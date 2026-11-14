@@ -97,6 +97,32 @@ CREATE TABLE nodes (
 );
 CREATE INDEX nodes_user ON nodes(user_id);
 `,
+	// 2: a generation counter bumped by any change that affects network maps,
+	// so tc-control notices edits from other processes (e.g. the admin CLI).
+	`
+CREATE TABLE generation (
+	id    INTEGER PRIMARY KEY CHECK (id = 1),
+	value INTEGER NOT NULL
+);
+INSERT INTO generation(id, value) VALUES (1, 0);
+CREATE TRIGGER nodes_gen_ins AFTER INSERT ON nodes BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_gen_del AFTER DELETE ON nodes BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_gen_upd AFTER UPDATE ON nodes
+	WHEN OLD.node_key IS NOT NEW.node_key OR OLD.disco_key IS NOT NEW.disco_key
+	  OR OLD.given_name IS NOT NEW.given_name OR OLD.endpoints IS NOT NEW.endpoints
+	  OR OLD.hostinfo IS NOT NEW.hostinfo OR OLD.user_id IS NOT NEW.user_id
+	  OR OLD.ipv4 IS NOT NEW.ipv4 OR OLD.ipv6 IS NOT NEW.ipv6 OR OLD.expires_at IS NOT NEW.expires_at
+	BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER users_gen_del AFTER DELETE ON users BEGIN UPDATE generation SET value = value + 1; END;
+`,
+}
+
+// Generation returns a counter that increases whenever nodes or users change
+// in a way that affects network maps.
+func (d *DB) Generation(ctx context.Context) (int64, error) {
+	var g int64
+	err := d.sql.QueryRowContext(ctx, `SELECT value FROM generation WHERE id = 1`).Scan(&g)
+	return g, err
 }
 
 func (d *DB) migrate(ctx context.Context) error {

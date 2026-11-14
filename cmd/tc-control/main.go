@@ -117,7 +117,7 @@ func openDB(path string) (*db.DB, error) {
 
 func cmdServe(args []string) error {
 	fs, dbPath := flags("serve")
-	listen := fs.String("listen", "127.0.0.1:8080", "client-facing control API address")
+	listen := fs.String("listen", ":8080", "client-facing control API address")
 	adminListen := fs.String("admin-listen", "127.0.0.1:8081", `admin web UI/API address ("" disables)`)
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
 	publicURL := fs.String("public-url", "", "URL clients use to reach this server (shown in the admin UI)")
@@ -148,9 +148,11 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !isLoopback(*listen) {
-		log.Warn("control API is listening on a non-loopback address; until the Noise transport lands (milestone 2) "+
-			"/machine/* requests are unauthenticated. Only expose it on trusted networks.", "listen", *listen)
+	defer ctl.Close()
+	if *tlsCert == "" && !isLoopback(*listen) {
+		log.Warn("control API is plain HTTP: traffic is protected by Noise, but clients fetch the server key "+
+			"trust-on-first-use. Use TLS, or have clients pin it with `tc up --server-key`.",
+			"server_key", ctl.MachinePublic().String())
 	}
 
 	scheme := "http"
@@ -218,6 +220,7 @@ func cmdServe(args []string) error {
 	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	ctl.Close() // Noise connections are hijacked, so Shutdown doesn't track them
 	for _, srv := range servers {
 		_ = srv.Shutdown(shutCtx)
 	}

@@ -164,17 +164,66 @@ func TestReRegisterAndRotate(t *testing.T) {
 	if again.Created || again.Rotated || again.Node.ID != first.Node.ID {
 		t.Fatalf("re-register: %+v", again)
 	}
-	// New node key requires an auth key.
-	if _, err := reg(d, "m1", "n1b", "laptop", ""); !errors.Is(err, ErrInvalidAuthKey) {
-		t.Fatalf("rotate without key: got %v", err)
-	}
-	k2 := mustKey(t, d, u.ID, false)
-	rot, err := reg(d, "m1", "n1b", "laptop", k2)
+	// A known (machine-authenticated) machine may rotate its node key without an auth key.
+	rot, err := reg(d, "m1", "n1b", "laptop", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !rot.Rotated || rot.Node.ID != first.Node.ID || rot.Node.IPv4 != first.Node.IPv4 || rot.Node.NodeKey != "n1b" {
 		t.Fatalf("rotate: %+v", rot)
+	}
+	// Rotating with an auth key moves the node to that key's user; a bad key fails.
+	if _, err := reg(d, "m1", "n1c", "laptop", "tc-auth-bogus"); !errors.Is(err, ErrInvalidAuthKey) {
+		t.Fatalf("rotate with bad key: got %v", err)
+	}
+	bob := mustUser(t, d, "bob")
+	moved, err := reg(d, "m1", "n1c", "laptop", mustKey(t, d, bob.ID, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.Node.UserName != "bob" || moved.Node.IPv4 != first.Node.IPv4 {
+		t.Fatalf("move: %+v", moved.Node)
+	}
+}
+
+func TestGeneration(t *testing.T) {
+	d := open(t)
+	g := func() int64 {
+		v, err := d.Generation(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	g0 := g()
+	u := mustUser(t, d, "alice")
+	k := mustKey(t, d, u.ID, true)
+	if g() != g0 {
+		t.Fatal("creating a user/key should not bump the generation")
+	}
+	r, _ := reg(d, "m1", "n1", "a", k)
+	g1 := g()
+	if g1 <= g0 {
+		t.Fatal("node insert did not bump generation")
+	}
+	if err := d.TouchNode(ctx, r.Node.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateNodeStatus(ctx, r.Node.ID, r.Node.DiscoKey, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if g() != g1 {
+		t.Fatal("last_seen / unchanged status should not bump generation")
+	}
+	ep := []netip.AddrPort{netip.MustParseAddrPort("10.0.0.1:41641")}
+	d.UpdateNodeStatus(ctx, r.Node.ID, r.Node.DiscoKey, ep, "")
+	g2 := g()
+	if g2 <= g1 {
+		t.Fatal("endpoint change did not bump generation")
+	}
+	d.DeleteUser(ctx, "alice")
+	if g() <= g2 {
+		t.Fatal("user delete did not bump generation")
 	}
 }
 

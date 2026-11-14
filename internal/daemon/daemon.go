@@ -1,0 +1,550 @@
+// Package daemon is the core of tcd: it keeps the node's keys and
+// registration, holds a map stream to tc-control and applies every network
+// map to the WireGuard engine.
+//
+// If control becomes unreachable the tunnel keeps running with the last map;
+// the daemon reconnects with backoff.
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"tailconnect/internal/controlclient"
+	"tailconnect/internal/engine"
+	"tailconnect/internal/key"
+	"tailconnect/internal/localapi"
+	"tailconnect/internal/protocol"
+)
+
+// Version is reported to control in Hostinfo.
+var Version = "dev"
+
+type Options struct {
+	StateDir   string
+	TUNName    string // shown in status, excluded from endpoint discovery
+	ListenPort uint16 // preferred WireGuard port; falls back to random if busy
+	Logf       func(format string, args ...any)
+	// NewEngine creates the data plane once the node's addresses are known.
+	NewEngine func(priv key.NodePrivate, addrs []netip.Prefix, port uint16) (*engine.Engine, error)
+	// Endpoints discovers this host's candidate endpoints and attached
+	// prefixes (nil = LocalEndpoints).
+	Endpoints func(port uint16) ([]netip.AddrPort, []netip.Prefix)
+	// EndpointInterval is how often endpoints are re-discovered (default 15s).
+	EndpointInterval time.Duration
+}
+
+// persist is the on-disk state (state.json, mode 0600).
+type persist struct {
+	ControlURL  string            `json:",omitempty"`
+	ServerKey   key.MachinePublic `json:",omitempty"`
+	MachineKey  key.MachinePrivate
+	NodeKey     key.NodePrivate
+	DiscoKey    key.DiscoPrivate
+	Hostname    string `json:",omitempty"`
+	Registered  bool
+	WantRunning bool
+	Self        *protocol.Node `json:",omitempty"`
+}
+
+type Daemon struct {
+	opts Options
+	path string
+
+	opMu sync.Mutex // serialises Up/Down/Logout/Start
+
+	mu      sync.Mutex
+	st      persist
+	state   string
+	lastErr string
+	netmap  *protocol.MapResponse
+	eng     *engine.Engine
+	port    uint16
+	local   []netip.Prefix
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
+func New(opts Options) (*Daemon, error) {
+	if opts.Logf == nil {
+		opts.Logf = func(string, ...any) {}
+	}
+	if opts.NewEngine == nil {
+		return nil, errors.New("daemon: NewEngine is required")
+	}
+	if opts.Endpoints == nil {
+		name := opts.TUNName
+		opts.Endpoints = func(port uint16) ([]netip.AddrPort, []netip.Prefix) { return LocalEndpoints(port, name) }
+	}
+	if opts.EndpointInterval <= 0 {
+		opts.EndpointInterval = 15 * time.Second
+	}
+	if err := os.MkdirAll(opts.StateDir, 0o700); err != nil {
+		return nil, fmt.Errorf("daemon: state dir: %w", err)
+	}
+	d := &Daemon{opts: opts, path: filepath.Join(opts.StateDir, "state.json")}
+	b, err := os.ReadFile(d.path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return nil, fmt.Errorf("daemon: read state: %w", err)
+	default:
+		if err := json.Unmarshal(b, &d.st); err != nil {
+			return nil, fmt.Errorf("daemon: parse %s: %w", d.path, err)
+		}
+	}
+	d.state = localapi.StateNeedsLogin
+	if d.st.Registered {
+		d.state = localapi.StateStopped
+	}
+	return d, nil
+}
+
+// Start resumes the previous session if the node was up when tcd last stopped.
+func (d *Daemon) Start() {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.mu.Lock()
+	resume := d.st.Registered && d.st.WantRunning
+	d.mu.Unlock()
+	if resume {
+		d.startLocked()
+	}
+}
+
+// Close stops the tunnel (keeping WantRunning, so the next start resumes).
+func (d *Daemon) Close() {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.stopLocked()
+}
+
+func (d *Daemon) save() error {
+	b, err := json.MarshalIndent(d.st, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := d.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, d.path)
+}
+
+func (d *Daemon) running() bool {
+	if d.done == nil {
+		return false
+	}
+	select {
+	case <-d.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// startLocked launches the run loop. Caller holds opMu.
+func (d *Daemon) startLocked() {
+	d.mu.Lock()
+	if d.running() {
+		d.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.cancel, d.done = cancel, make(chan struct{})
+	d.state = localapi.StateStarting
+	st, done := d.st, d.done
+	d.mu.Unlock()
+	go d.run(ctx, st, done)
+}
+
+// stopLocked stops the run loop and waits for it. Caller holds opMu.
+func (d *Daemon) stopLocked() {
+	d.mu.Lock()
+	cancel, done := d.cancel, d.done
+	d.cancel = nil
+	d.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
+}
+
+func (d *Daemon) setErr(err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err == nil {
+		d.lastErr = ""
+	} else {
+		d.lastErr = err.Error()
+	}
+}
+
+func (d *Daemon) hostinfo(st persist) protocol.Hostinfo {
+	return protocol.Hostinfo{Hostname: st.Hostname, OS: runtime.GOOS, ClientVersion: Version}
+}
+
+// ---- local API backend ----
+
+var _ localapi.Backend = (*Daemon)(nil)
+
+func (d *Daemon) Up(req localapi.UpRequest) error {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.mu.Lock()
+	st := d.st
+	d.mu.Unlock()
+
+	url := strings.TrimRight(req.ControlURL, "/")
+	if url == "" {
+		url = st.ControlURL
+	}
+	if url == "" {
+		return errors.New("no control server configured: pass --server URL")
+	}
+	if st.ControlURL != "" && url != st.ControlURL {
+		d.opts.Logf("switching control server %s → %s; starting with a fresh identity", st.ControlURL, url)
+		d.stopLocked()
+		st = persist{Hostname: st.Hostname}
+	}
+	if st.MachineKey.IsZero() {
+		st.MachineKey = key.NewPrivate[key.MachineKind]()
+	}
+	if st.NodeKey.IsZero() {
+		st.NodeKey = key.NewPrivate[key.NodeKind]()
+		st.DiscoKey = key.NewPrivate[key.DiscoKind]()
+	}
+	if req.Hostname != "" {
+		st.Hostname = req.Hostname
+	}
+	if st.Hostname == "" {
+		st.Hostname, _ = os.Hostname()
+	}
+	st.ControlURL = url
+
+	if !st.Registered || req.AuthKey != "" {
+		if !st.Registered && req.AuthKey == "" {
+			return errors.New("this machine is not registered: pass --authkey (create one in the admin UI or with `tc-control keys create`)")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		sk := req.ServerKey
+		if sk.IsZero() {
+			sk = st.ServerKey
+		}
+		if sk.IsZero() {
+			var err error
+			if sk, err = controlclient.FetchServerKey(ctx, url, nil); err != nil {
+				return err
+			}
+			if strings.HasPrefix(url, "http://") {
+				d.opts.Logf("pinned control server key %s (fetched over plain HTTP: trust on first use)", sk.ShortString())
+			}
+		}
+		cc, err := controlclient.New(controlclient.Options{ServerURL: url, ServerKey: sk, MachineKey: st.MachineKey})
+		if err != nil {
+			return err
+		}
+		defer cc.Close()
+		d.stopLocked()
+		resp, err := cc.Register(ctx, protocol.RegisterRequest{
+			NodeKey: st.NodeKey.Public(), DiscoKey: st.DiscoKey.Public(), AuthKey: req.AuthKey, Hostinfo: d.hostinfo(st),
+		})
+		if controlclient.IsUnauthorized(err) {
+			return fmt.Errorf("registration refused: %w", err)
+		}
+		if err != nil {
+			return fmt.Errorf("register: %w", err)
+		}
+		st.ServerKey, st.Registered, st.Self = sk, true, &resp.Node
+		d.opts.Logf("registered as %s (%v)", resp.Node.Name, resp.Node.Addresses)
+	}
+	st.WantRunning = true
+
+	d.mu.Lock()
+	d.st = st
+	d.lastErr = ""
+	err := d.save()
+	d.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("save state: %w", err)
+	}
+	d.startLocked()
+	return nil
+}
+
+func (d *Daemon) Down() error {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.stopLocked()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.st.WantRunning = false
+	if d.st.Registered {
+		d.state = localapi.StateStopped
+	} else {
+		d.state = localapi.StateNeedsLogin
+	}
+	return d.save()
+}
+
+func (d *Daemon) Logout() error {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.stopLocked()
+	d.mu.Lock()
+	st := d.st
+	d.mu.Unlock()
+	if st.Registered && !st.ServerKey.IsZero() {
+		if cc, err := controlclient.New(controlclient.Options{ServerURL: st.ControlURL, ServerKey: st.ServerKey, MachineKey: st.MachineKey}); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := cc.Logout(ctx, st.NodeKey.Public()); err != nil {
+				d.opts.Logf("logout: server not informed: %v", err)
+			}
+			cancel()
+			cc.Close()
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Keep the server URL and key so the next `tc up --authkey` needs no --server.
+	d.st = persist{ControlURL: st.ControlURL, ServerKey: st.ServerKey, Hostname: st.Hostname}
+	d.state, d.lastErr, d.netmap = localapi.StateNeedsLogin, "", nil
+	return d.save()
+}
+
+func (d *Daemon) Status() localapi.Status {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s := localapi.Status{
+		State: d.state, Error: d.lastErr, ControlURL: d.st.ControlURL, TUN: d.opts.TUNName, ListenPort: d.port,
+		Peers: []localapi.PeerStatus{},
+	}
+	var stats map[key.NodePublic]engine.PeerStats
+	if d.eng != nil {
+		stats = d.eng.Stats()
+	}
+	self := d.st.Self
+	if d.netmap != nil {
+		self = &d.netmap.Self
+		s.Domain = d.netmap.DNS.Domain
+		for _, p := range d.netmap.Peers {
+			ps := peerStatus(p)
+			if st, ok := stats[p.NodeKey]; ok {
+				ps.CurrentEndpoint, ps.RxBytes, ps.TxBytes = st.Endpoint, st.RxBytes, st.TxBytes
+				if !st.LastHandshake.IsZero() {
+					t := st.LastHandshake
+					ps.LastHandshake = &t
+					ps.Active = time.Since(t) < 3*time.Minute
+				}
+			}
+			s.Peers = append(s.Peers, ps)
+		}
+	}
+	if self != nil && d.st.Registered {
+		ps := peerStatus(*self)
+		s.Self = &ps
+	}
+	return s
+}
+
+func peerStatus(n protocol.Node) localapi.PeerStatus {
+	return localapi.PeerStatus{
+		Name: n.Name, HostName: n.Hostinfo.Hostname, User: n.User, OS: n.Hostinfo.OS,
+		Addresses: n.Addresses, NodeKey: n.NodeKey, Endpoints: n.Endpoints,
+	}
+}
+
+// ---- run loop ----
+
+func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
+	defer close(done)
+	logf := d.opts.Logf
+	fail := func(state string, err error) {
+		logf("%v", err)
+		d.mu.Lock()
+		d.state, d.lastErr = state, err.Error()
+		d.mu.Unlock()
+	}
+	if st.Self == nil {
+		fail(localapi.StateNeedsLogin, errors.New("no registration data; run `tc up --authkey ...`"))
+		return
+	}
+	cc, err := controlclient.New(controlclient.Options{ServerURL: st.ControlURL, ServerKey: st.ServerKey, MachineKey: st.MachineKey})
+	if err != nil {
+		fail(localapi.StateStopped, err)
+		return
+	}
+	defer cc.Close()
+
+	eng, err := d.opts.NewEngine(st.NodeKey, st.Self.Addresses, d.opts.ListenPort)
+	if err != nil && d.opts.ListenPort != 0 {
+		logf("port %d unavailable (%v); using a random port", d.opts.ListenPort, err)
+		eng, err = d.opts.NewEngine(st.NodeKey, st.Self.Addresses, 0)
+	}
+	if err != nil {
+		fail(localapi.StateStopped, fmt.Errorf("start tunnel: %w", err))
+		return
+	}
+	port := eng.ListenPort()
+	d.mu.Lock()
+	d.eng, d.port = eng, port
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		d.eng, d.netmap, d.port = nil, nil, 0
+		if d.state != localapi.StateNeedsLogin {
+			d.state = localapi.StateStopped
+		}
+		d.mu.Unlock()
+		eng.Close()
+	}()
+	logf("tunnel up, WireGuard on UDP port %d", port)
+
+	nk, dk := st.NodeKey.Public(), st.DiscoKey.Public()
+	hi := d.hostinfo(st)
+
+	var repMu sync.Mutex
+	var reported []netip.AddrPort
+	discover := func() []netip.AddrPort {
+		eps, local := d.opts.Endpoints(port)
+		d.mu.Lock()
+		d.local = local
+		d.mu.Unlock()
+		return eps
+	}
+
+	// Re-report endpoints when interfaces change (DHCP renewals, Wi-Fi switches).
+	go func() {
+		t := time.NewTicker(d.opts.EndpointInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			eps := discover()
+			repMu.Lock()
+			same := slices.Equal(eps, reported)
+			repMu.Unlock()
+			if same {
+				continue
+			}
+			if err := cc.UpdateStatus(ctx, protocol.MapRequest{NodeKey: nk, DiscoKey: dk, Endpoints: eps}); err != nil {
+				if ctx.Err() == nil {
+					logf("report endpoints: %v", err)
+				}
+				continue
+			}
+			logf("endpoints changed: %v", eps)
+			repMu.Lock()
+			reported = eps
+			repMu.Unlock()
+		}
+	}()
+
+	backoff := time.Second
+	for {
+		eps := discover()
+		repMu.Lock()
+		reported = eps
+		repMu.Unlock()
+		err := cc.StreamMap(ctx, protocol.MapRequest{NodeKey: nk, DiscoKey: dk, Endpoints: eps, Hostinfo: &hi},
+			func(m *protocol.MapResponse) error {
+				backoff = time.Second
+				d.mu.Lock()
+				local := d.local
+				d.mu.Unlock()
+				rerr := eng.Reconfig(m, local)
+				if rerr != nil {
+					logf("apply network map: %v", rerr)
+				}
+				d.mu.Lock()
+				d.netmap, d.state = m, localapi.StateRunning
+				if rerr != nil {
+					d.lastErr = rerr.Error()
+				} else {
+					d.lastErr = ""
+				}
+				d.mu.Unlock()
+				return nil
+			})
+		if ctx.Err() != nil {
+			return
+		}
+		if controlclient.IsUnauthorized(err) {
+			logf("control no longer recognises this node (%v); login required", err)
+			d.mu.Lock()
+			d.st.Registered, d.st.Self = false, nil
+			d.state = localapi.StateNeedsLogin
+			d.lastErr = "this machine was removed from the network; run `tc up --authkey ...` to rejoin"
+			_ = d.save()
+			d.mu.Unlock()
+			return
+		}
+		// Keep the tunnel running on the last map while we reconnect.
+		logf("control connection lost: %v (retrying in %v)", err, backoff)
+		d.setErr(fmt.Errorf("control unreachable: %w", err))
+		cc.Close()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, 30*time.Second)
+	}
+}
+
+// ---- endpoint discovery ----
+
+// LocalEndpoints lists this host's usable unicast addresses (excluding
+// loopback, link-local and the tunnel interface itself) paired with port, plus
+// the prefixes they belong to. Results are sorted for stable comparison.
+func LocalEndpoints(port uint16, excludeIface string) ([]netip.AddrPort, []netip.Prefix) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, nil
+	}
+	var eps []netip.AddrPort
+	var prefixes []netip.Prefix
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || ifc.Name == excludeIface {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip, ok := netip.AddrFromSlice(ipn.IP)
+			if !ok {
+				continue
+			}
+			ip = ip.Unmap()
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() {
+				continue
+			}
+			ones, _ := ipn.Mask.Size()
+			eps = append(eps, netip.AddrPortFrom(ip, port))
+			prefixes = append(prefixes, netip.PrefixFrom(ip, ones).Masked())
+		}
+	}
+	slices.SortFunc(eps, func(a, b netip.AddrPort) int { return a.Compare(b) })
+	return eps, prefixes
+}

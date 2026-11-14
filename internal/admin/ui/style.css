@@ -81,7 +81,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 48px; display: grid
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
 th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 tr:last-child td { border-bottom: none; }
 td.actions { text-align: right; white-space: nowrap; }
 .sub { color: var(--muted); font-size: 12px; }

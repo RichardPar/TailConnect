@@ -1,0 +1,287 @@
+// Command tc is the TailConnect command-line client. It controls the local
+// tcd daemon.
+//
+//	tc up [--server URL] [--authkey KEY] [--hostname NAME]
+//	tc down
+//	tc status [--json]
+//	tc ip [-4|-6] [PEER]
+//	tc logout
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"net/netip"
+	"os"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"tailconnect/internal/key"
+	"tailconnect/internal/localapi"
+)
+
+var version = "dev"
+
+const usage = `tc: TailConnect client
+
+Usage:
+  tc up [--server URL] [--authkey KEY] [--hostname NAME] [--server-key mkey:...]
+  tc down
+  tc status [--json]
+  tc ip [-4|-6] [PEER]
+  tc logout
+  tc version
+
+Global: --socket PATH (default $TC_SOCKET or ` + localapi.DefaultSocket + `)
+`
+
+func main() {
+	args := os.Args[1:]
+	socket := os.Getenv("TC_SOCKET")
+	if socket == "" {
+		socket = localapi.DefaultSocket
+	}
+	// Accept --socket before the subcommand.
+	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		name, val, hasVal := strings.Cut(strings.TrimLeft(args[0], "-"), "=")
+		if name != "socket" {
+			break
+		}
+		if !hasVal {
+			if len(args) < 2 {
+				die(2, "--socket needs a value")
+			}
+			val, args = args[1], args[1:]
+		}
+		socket, args = val, args[1:]
+	}
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
+	}
+	c := localapi.NewClient(socket)
+	cmd, rest := args[0], args[1:]
+	var err error
+	switch cmd {
+	case "up":
+		err = cmdUp(c, rest)
+	case "down":
+		_, err = c.Down(context.Background())
+		if err == nil {
+			fmt.Println("Tunnel stopped. Run `tc up` to reconnect.")
+		}
+	case "status":
+		err = cmdStatus(c, rest)
+	case "ip":
+		err = cmdIP(c, rest)
+	case "logout":
+		_, err = c.Logout(context.Background())
+		if err == nil {
+			fmt.Println("Logged out. This machine has been removed from the network.")
+		}
+	case "version":
+		fmt.Println(version)
+	case "help", "-h", "--help":
+		fmt.Print(usage)
+	default:
+		die(2, "unknown command %q\n\n%s", cmd, usage)
+	}
+	if err != nil {
+		die(1, "%v", err)
+	}
+}
+
+func die(code int, f string, a ...any) {
+	fmt.Fprintf(os.Stderr, "tc: "+f+"\n", a...)
+	os.Exit(code)
+}
+
+func cmdUp(c *localapi.Client, args []string) error {
+	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	server := fs.String("server", "", "control server URL, e.g. https://ctl.example.com (needed on first login)")
+	authKey := fs.String("authkey", "", "pre-auth key (needed to register this machine)")
+	hostname := fs.String("hostname", "", "name for this machine (default: OS hostname)")
+	serverKey := fs.String("server-key", "", "pin the server's machine key (mkey:...) instead of fetching it")
+	timeout := fs.Duration("timeout", 20*time.Second, "how long to wait for the tunnel to come up")
+	fs.Parse(args)
+
+	req := localapi.UpRequest{ControlURL: *server, AuthKey: *authKey, Hostname: *hostname}
+	if *serverKey != "" {
+		k, err := key.ParsePublic[key.MachineKind](*serverKey)
+		if err != nil {
+			return fmt.Errorf("--server-key: %w", err)
+		}
+		req.ServerKey = k
+	}
+	if *authKey == "" {
+		if v := os.Getenv("TC_AUTHKEY"); v != "" {
+			req.AuthKey = v
+		}
+	}
+	ctx := context.Background()
+	if _, err := c.Up(ctx, req); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(*timeout)
+	for {
+		st, err := c.Status(ctx)
+		if err != nil {
+			return err
+		}
+		switch {
+		case st.State == localapi.StateRunning:
+			if st.Self != nil {
+				fmt.Printf("Connected as %s (%s)\n", st.Self.Name, addrList(st.Self.Addresses))
+			} else {
+				fmt.Println("Connected.")
+			}
+			return nil
+		case st.State == localapi.StateNeedsLogin || st.State == localapi.StateStopped:
+			return fmt.Errorf("tunnel did not start: %s", orDefault(st.Error, st.State))
+		case time.Now().After(deadline):
+			return fmt.Errorf("still %s after %v: %s", st.State, *timeout, orDefault(st.Error, "waiting for control server"))
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func cmdStatus(c *localapi.Client, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "output JSON")
+	fs.Parse(args)
+	st, err := c.Status(context.Background())
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(st)
+	}
+	switch st.State {
+	case localapi.StateNeedsLogin:
+		fmt.Println("Logged out. Run: tc up --server URL --authkey KEY")
+		if st.Error != "" {
+			fmt.Println("Note:", st.Error)
+		}
+		return nil
+	case localapi.StateStopped:
+		fmt.Println("Stopped. Run: tc up")
+		if st.Error != "" {
+			fmt.Println("Error:", st.Error)
+		}
+		return nil
+	}
+	fmt.Printf("State: %s   control: %s\n", st.State, st.ControlURL)
+	if st.Error != "" {
+		fmt.Println("Warning:", st.Error)
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 3, ' ', 0)
+	if st.Self != nil {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", first4(st.Self.Addresses), shortName(st.Self.Name, st.Domain), st.Self.User, st.Self.OS, "(this machine)")
+	}
+	for _, p := range st.Peers {
+		state := "idle"
+		if p.Active {
+			state = "active"
+		}
+		detail := state
+		if p.CurrentEndpoint.IsValid() {
+			detail += "; direct " + p.CurrentEndpoint.String()
+		} else if len(p.Endpoints) == 0 {
+			detail += "; no endpoints reported"
+		}
+		if p.RxBytes+p.TxBytes > 0 {
+			detail += fmt.Sprintf("; rx %s tx %s", bytesStr(p.RxBytes), bytesStr(p.TxBytes))
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", first4(p.Addresses), shortName(p.Name, st.Domain), p.User, p.OS, detail)
+	}
+	return tw.Flush()
+}
+
+func cmdIP(c *localapi.Client, args []string) error {
+	fs := flag.NewFlagSet("ip", flag.ExitOnError)
+	only4 := fs.Bool("4", false, "only IPv4")
+	only6 := fs.Bool("6", false, "only IPv6")
+	fs.Parse(args)
+	st, err := c.Status(context.Background())
+	if err != nil {
+		return err
+	}
+	addrs := []netip.Prefix(nil)
+	if fs.NArg() == 0 {
+		if st.Self == nil {
+			return errors.New("not logged in")
+		}
+		addrs = st.Self.Addresses
+	} else {
+		want := fs.Arg(0)
+		for _, p := range st.Peers {
+			if p.Name == want || shortName(p.Name, st.Domain) == want || p.HostName == want {
+				addrs = p.Addresses
+				break
+			}
+		}
+		if addrs == nil {
+			return fmt.Errorf("no peer named %q", want)
+		}
+	}
+	for _, a := range addrs {
+		if (*only4 && !a.Addr().Is4()) || (*only6 && !a.Addr().Is6()) {
+			continue
+		}
+		fmt.Println(a.Addr())
+	}
+	return nil
+}
+
+func addrList(ps []netip.Prefix) string {
+	var s []string
+	for _, p := range ps {
+		s = append(s, p.Addr().String())
+	}
+	return strings.Join(s, ", ")
+}
+
+func first4(ps []netip.Prefix) string {
+	for _, p := range ps {
+		if p.Addr().Is4() {
+			return p.Addr().String()
+		}
+	}
+	if len(ps) > 0 {
+		return ps[0].Addr().String()
+	}
+	return "-"
+}
+
+func shortName(fqdn, domain string) string {
+	if domain != "" {
+		return strings.TrimSuffix(fqdn, "."+domain)
+	}
+	return fqdn
+}
+
+func orDefault(s, d string) string {
+	if s == "" {
+		return d
+	}
+	return s
+}
+
+func bytesStr(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}

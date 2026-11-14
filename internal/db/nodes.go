@@ -57,8 +57,10 @@ type RegisterResult struct {
 //
 //   - Unknown machine: AuthKey is required; a new node is created.
 //   - Known machine, same node key: hostinfo/disco are refreshed; no auth key needed.
-//   - Known machine, new node key: AuthKey is required (until milestone 2 adds
-//     machine-key-authenticated rotation); the node keeps its addresses and name.
+//   - Known machine, new node key: the node key is rotated, keeping addresses
+//     and name. The caller must have authenticated the machine key (the Noise
+//     channel does). If AuthKey is given it is consumed and the node moves to
+//     that key's user.
 func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult, error) {
 	if p.Hostinfo == "" {
 		p.Hostinfo = "{}"
@@ -85,15 +87,18 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 		return RegisterResult{Node: n}, tx.Commit()
 
 	case err == nil:
-		k, err := consumePreAuthKey(ctx, tx, p.AuthKey, now)
-		if err != nil {
-			return RegisterResult{}, err
-		}
 		_, err = tx.ExecContext(ctx, `
-			UPDATE nodes SET node_key = ?, disco_key = ?, hostname = ?, hostinfo = ?, user_id = ?,
-			       ephemeral = ?, preauth_key_id = ?, last_seen = ?, endpoints = '[]'
+			UPDATE nodes SET node_key = ?, disco_key = ?, hostname = ?, hostinfo = ?, last_seen = ?, endpoints = '[]'
 			WHERE id = ?`,
-			p.NodeKey, p.DiscoKey, p.Hostname, p.Hostinfo, k.UserID, k.Ephemeral, k.ID, unix(now), existing.ID)
+			p.NodeKey, p.DiscoKey, p.Hostname, p.Hostinfo, unix(now), existing.ID)
+		if err == nil && p.AuthKey != "" {
+			var k PreAuthKey
+			if k, err = consumePreAuthKey(ctx, tx, p.AuthKey, now); err != nil {
+				return RegisterResult{}, err
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, ephemeral = ?, preauth_key_id = ? WHERE id = ?`,
+				k.UserID, k.Ephemeral, k.ID, existing.ID)
+		}
 		if isUniqueViolation(err) {
 			return RegisterResult{}, fmt.Errorf("node key: %w", ErrExists)
 		}
@@ -162,6 +167,12 @@ func (d *DB) UpdateNodeStatus(ctx context.Context, id int64, discoKey string, en
 		       hostinfo = CASE WHEN ? = '' THEN hostinfo ELSE ? END
 		WHERE id = ?`,
 		discoKey, string(eps), unix(d.now()), hostinfo, hostinfo, id)
+	return err
+}
+
+// TouchNode records that the node is alive without changing anything else.
+func (d *DB) TouchNode(ctx context.Context, id int64) error {
+	_, err := d.sql.ExecContext(ctx, `UPDATE nodes SET last_seen = ? WHERE id = ?`, unix(d.now()), id)
 	return err
 }
 

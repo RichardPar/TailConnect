@@ -1,8 +1,9 @@
 // Package protocol defines the wire types exchanged between TailConnect
 // clients (tcd) and the coordination server (tc-control).
 //
-// Messages are JSON. In milestone 1 they travel over plain HTTP(S); milestone 2
-// moves /machine/* onto a Noise IK channel authenticated by the machine key.
+// Messages are JSON, exchanged over HTTP/2 inside a Noise IK channel (see
+// internal/noise) that authenticates the client's machine key. Only GET /key
+// and the /machine/noise upgrade are served in the clear.
 package protocol
 
 import (
@@ -37,11 +38,13 @@ type ServerKeyResponse struct {
 // RegisterRequest is sent to POST /machine/register to join the network or
 // to rotate a node key.
 type RegisterRequest struct {
-	Version    int
+	Version int
+	// MachineKey is optional: the server takes the machine key from the Noise
+	// channel and rejects a request whose MachineKey disagrees.
 	MachineKey key.MachinePublic
 	NodeKey    key.NodePublic
 	DiscoKey   key.DiscoPublic
-	AuthKey    string `json:",omitempty"` // pre-auth key; required for new machines
+	AuthKey    string `json:",omitempty"` // pre-auth key; required for new (or deleted) machines
 	Hostinfo   Hostinfo
 }
 
@@ -57,14 +60,25 @@ type MapRequest struct {
 	DiscoKey  key.DiscoPublic
 	Endpoints []netip.AddrPort `json:",omitempty"`
 	Hostinfo  *Hostinfo        `json:",omitempty"`
-	// Stream asks the server to keep the response open and push updates.
-	// Not yet implemented (milestone 2); the server currently returns one map.
+	// Stream asks the server to keep the response open and push a new
+	// newline-delimited MapResponse whenever the map changes.
 	Stream bool `json:",omitempty"`
+	// OmitPeers (with Stream=false) is a "lite" update: the server records the
+	// reported endpoints/hostinfo and replies with an empty body.
+	OmitPeers bool `json:",omitempty"`
+}
+
+// LogoutRequest is sent to POST /machine/logout to remove the node from the network.
+type LogoutRequest struct {
+	NodeKey key.NodePublic
 }
 
 // MapResponse is the network map: who this node is, which peers it may talk
 // to, and how to resolve names and reach relays.
 type MapResponse struct {
+	// KeepAlive messages carry no other fields; they only keep the stream alive.
+	KeepAlive bool `json:",omitempty"`
+
 	Self   Node
 	Peers  []Node
 	DNS    DNSConfig

@@ -1,0 +1,24 @@
+[Unit]
+Description=TailConnect client daemon
+Wants=network-pre.target
+After=network-pre.target NetworkManager.service systemd-resolved.service
+
+[Service]
+ExecStart=/usr/local/bin/tcd -state /var/lib/tailconnect -socket /run/tailconnect/tcd.sock
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=tailconnect
+RuntimeDirectoryMode=0755
+StateDirectory=tailconnect
+StateDirectoryMode=0700
+# Needs to create a TUN device and manage routes/addresses.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+DeviceAllow=/dev/net/tun rw
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
