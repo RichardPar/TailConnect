@@ -1,0 +1,181 @@
+// Package db is tc-control's persistent store, backed by SQLite (pure-Go
+// driver, so the server cross-compiles without cgo).
+package db
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
+)
+
+var (
+	ErrNotFound       = errors.New("not found")
+	ErrExists         = errors.New("already exists")
+	ErrInvalidAuthKey = errors.New("invalid, expired or already-used auth key")
+	ErrInvalid        = errors.New("invalid argument")
+)
+
+type DB struct {
+	sql *sql.DB
+	now func() time.Time
+}
+
+// Open opens (creating if needed) the database at path and applies migrations.
+func Open(path string) (*DB, error) {
+	q := url.Values{}
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "synchronous(NORMAL)")
+	q.Set("_txlock", "immediate") // take the write lock at BEGIN, avoiding upgrade deadlocks
+	dsn := "file:" + path + "?" + q.Encode()
+
+	s, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	d := &DB{sql: s, now: time.Now}
+	if err := d.migrate(context.Background()); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("migrate %s: %w", path, err)
+	}
+	return d, nil
+}
+
+func (d *DB) Close() error { return d.sql.Close() }
+
+// SetClock overrides the time source (tests).
+func (d *DB) SetClock(now func() time.Time) { d.now = now }
+
+// migrations[i] upgrades the schema from user_version i to i+1. Append only.
+var migrations = []string{
+	`
+CREATE TABLE settings (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+CREATE TABLE users (
+	id         INTEGER PRIMARY KEY,
+	name       TEXT NOT NULL UNIQUE,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE preauth_keys (
+	id         INTEGER PRIMARY KEY,
+	hash       BLOB NOT NULL UNIQUE,
+	prefix     TEXT NOT NULL,
+	user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	reusable   INTEGER NOT NULL,
+	ephemeral  INTEGER NOT NULL,
+	uses       INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	revoked    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE nodes (
+	id             INTEGER PRIMARY KEY,
+	user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	machine_key    TEXT NOT NULL UNIQUE,
+	node_key       TEXT NOT NULL UNIQUE,
+	disco_key      TEXT NOT NULL DEFAULT '',
+	hostname       TEXT NOT NULL,
+	given_name     TEXT NOT NULL UNIQUE,
+	hostinfo       TEXT NOT NULL DEFAULT '{}',
+	ipv4           TEXT NOT NULL UNIQUE,
+	ipv6           TEXT NOT NULL UNIQUE,
+	endpoints      TEXT NOT NULL DEFAULT '[]',
+	ephemeral      INTEGER NOT NULL DEFAULT 0,
+	preauth_key_id INTEGER REFERENCES preauth_keys(id) ON DELETE SET NULL,
+	created_at     INTEGER NOT NULL,
+	last_seen      INTEGER,
+	expires_at     INTEGER
+);
+CREATE INDEX nodes_user ON nodes(user_id);
+`,
+}
+
+func (d *DB) migrate(ctx context.Context) error {
+	var v int
+	if err := d.sql.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v > len(migrations) {
+		return fmt.Errorf("database schema version %d is newer than this binary supports (%d)", v, len(migrations))
+	}
+	for ; v < len(migrations); v++ {
+		tx, err := d.sql.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, migrations[v]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d: %w", v+1, err)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, v+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetSetting returns the value for key, or ErrNotFound.
+func (d *DB) GetSetting(ctx context.Context, key string) (string, error) {
+	var v string
+	err := d.sql.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return v, err
+}
+
+func (d *DB) SetSetting(ctx context.Context, key, value string) error {
+	_, err := d.sql.ExecContext(ctx,
+		`INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, value)
+	return err
+}
+
+// SetSettingIfAbsent stores value only if key is unset, and returns whichever
+// value is stored afterwards. Safe against concurrent first-time initialisation.
+func (d *DB) SetSettingIfAbsent(ctx context.Context, key, value string) (string, error) {
+	if _, err := d.sql.ExecContext(ctx,
+		`INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING`, key, value); err != nil {
+		return "", err
+	}
+	return d.GetSetting(ctx, key)
+}
+
+func unix(t time.Time) int64 { return t.Unix() }
+
+func fromUnix(v int64) time.Time { return time.Unix(v, 0).UTC() }
+
+func fromNullUnix(v sql.NullInt64) time.Time {
+	if !v.Valid {
+		return time.Time{}
+	}
+	return fromUnix(v.Int64)
+}
+
+func nullUnix(t time.Time) sql.NullInt64 {
+	if t.IsZero() {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: t.Unix(), Valid: true}
+}
+
+func isUniqueViolation(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	return se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE || se.Code() == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY
+}
