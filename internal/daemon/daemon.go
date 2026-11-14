@@ -334,6 +334,7 @@ func (d *Daemon) Status() localapi.Status {
 	var stats map[key.NodePublic]engine.PeerStats
 	if d.eng != nil {
 		stats = d.eng.Stats()
+		s.HomeRelay, s.RelayConnected = d.eng.HomeRelay(), d.eng.RelayConnected()
 	}
 	self := d.st.Self
 	if d.netmap != nil {
@@ -342,7 +343,7 @@ func (d *Daemon) Status() localapi.Status {
 		for _, p := range d.netmap.Peers {
 			ps := peerStatus(p)
 			if st, ok := stats[p.NodeKey]; ok {
-				ps.CurrentEndpoint, ps.RxBytes, ps.TxBytes = st.Endpoint, st.RxBytes, st.TxBytes
+				ps.CurrentEndpoint, ps.Relay, ps.RxBytes, ps.TxBytes = st.Endpoint, st.Relay, st.RxBytes, st.TxBytes
 				if !st.LastHandshake.IsZero() {
 					t := st.LastHandshake
 					ps.LastHandshake = &t
@@ -397,6 +398,9 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		fail(localapi.StateStopped, fmt.Errorf("start tunnel: %w", err))
 		return
 	}
+	if err := eng.SetControlURL(st.ControlURL); err != nil {
+		logf("relay base URL: %v", err)
+	}
 	port := eng.ListenPort()
 	d.mu.Lock()
 	d.eng, d.port = eng, port
@@ -417,6 +421,8 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 
 	var repMu sync.Mutex
 	var reported []netip.AddrPort
+	reportedRelay := 0
+	kick := make(chan struct{}, 1) // re-report now (e.g. home relay changed)
 	discover := func() []netip.AddrPort {
 		eps, local := d.opts.Endpoints(port)
 		d.mu.Lock()
@@ -434,23 +440,25 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+			case <-kick:
 			}
 			eps := discover()
+			home := eng.HomeRelay()
 			repMu.Lock()
-			same := slices.Equal(eps, reported)
+			same := slices.Equal(eps, reported) && home == reportedRelay
 			repMu.Unlock()
 			if same {
 				continue
 			}
-			if err := cc.UpdateStatus(ctx, protocol.MapRequest{NodeKey: nk, DiscoKey: dk, Endpoints: eps}); err != nil {
+			if err := cc.UpdateStatus(ctx, protocol.MapRequest{NodeKey: nk, DiscoKey: dk, Endpoints: eps, HomeRelay: home}); err != nil {
 				if ctx.Err() == nil {
 					logf("report endpoints: %v", err)
 				}
 				continue
 			}
-			logf("endpoints changed: %v", eps)
+			logf("reported endpoints %v, home relay %d", eps, home)
 			repMu.Lock()
-			reported = eps
+			reported, reportedRelay = eps, home
 			repMu.Unlock()
 		}
 	}()
@@ -458,10 +466,11 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 	backoff := time.Second
 	for {
 		eps := discover()
+		home := eng.HomeRelay()
 		repMu.Lock()
-		reported = eps
+		reported, reportedRelay = eps, home
 		repMu.Unlock()
-		err := cc.StreamMap(ctx, protocol.MapRequest{NodeKey: nk, DiscoKey: dk, Endpoints: eps, Hostinfo: &hi},
+		err := cc.StreamMap(ctx, protocol.MapRequest{NodeKey: nk, DiscoKey: dk, Endpoints: eps, Hostinfo: &hi, HomeRelay: home},
 			func(m *protocol.MapResponse) error {
 				backoff = time.Second
 				d.mu.Lock()
@@ -470,6 +479,15 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 				rerr := eng.Reconfig(m, local)
 				if rerr != nil {
 					logf("apply network map: %v", rerr)
+				}
+				repMu.Lock()
+				relayChanged := eng.HomeRelay() != reportedRelay
+				repMu.Unlock()
+				if relayChanged {
+					select {
+					case kick <- struct{}{}:
+					default:
+					}
 				}
 				d.mu.Lock()
 				d.netmap, d.state = m, localapi.StateRunning

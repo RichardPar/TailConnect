@@ -31,6 +31,7 @@ type (
 	MachineKind struct{}
 	NodeKind    struct{}
 	DiscoKind   struct{}
+	RelayKind   struct{}
 )
 
 func (MachineKind) pubPrefix() string  { return "mkey:" }
@@ -39,6 +40,8 @@ func (NodeKind) pubPrefix() string     { return "nodekey:" }
 func (NodeKind) privPrefix() string    { return "nodeprivkey:" }
 func (DiscoKind) pubPrefix() string    { return "discokey:" }
 func (DiscoKind) privPrefix() string   { return "discoprivkey:" }
+func (RelayKind) pubPrefix() string    { return "relaykey:" }
+func (RelayKind) privPrefix() string   { return "relayprivkey:" }
 
 type (
 	MachinePublic  = Public[MachineKind]
@@ -47,6 +50,8 @@ type (
 	NodePrivate    = Private[NodeKind]
 	DiscoPublic    = Public[DiscoKind]
 	DiscoPrivate   = Private[DiscoKind]
+	RelayPublic    = Public[RelayKind]
+	RelayPrivate   = Private[RelayKind]
 )
 
 // Public is a Curve25519 public key of kind K. The zero value is "no key".

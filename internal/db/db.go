@@ -115,6 +115,13 @@ CREATE TRIGGER nodes_gen_upd AFTER UPDATE ON nodes
 	BEGIN UPDATE generation SET value = value + 1; END;
 CREATE TRIGGER users_gen_del AFTER DELETE ON users BEGIN UPDATE generation SET value = value + 1; END;
 `,
+	// 3: the relay region each node is reachable through.
+	`
+ALTER TABLE nodes ADD COLUMN home_relay INTEGER NOT NULL DEFAULT 0;
+CREATE TRIGGER nodes_gen_relay AFTER UPDATE OF home_relay ON nodes
+	WHEN OLD.home_relay IS NOT NEW.home_relay
+	BEGIN UPDATE generation SET value = value + 1; END;
+`,
 }
 
 // Generation returns a counter that increases whenever nodes or users change

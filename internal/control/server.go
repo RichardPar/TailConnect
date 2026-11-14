@@ -305,7 +305,9 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 	}
 	// Subscribe before writing so our own change is reflected in the first map.
 	changed := s.bus.wait()
-	if err := s.db.UpdateNodeStatus(r.Context(), self.ID, textOrEmpty(req.DiscoKey), req.Endpoints, hi); err != nil {
+	if err := s.db.UpdateNodeStatus(r.Context(), self.ID, db.NodeStatus{
+		DiscoKey: textOrEmpty(req.DiscoKey), Endpoints: req.Endpoints, HomeRelay: req.HomeRelay, Hostinfo: hi,
+	}); err != nil {
 		s.internalError(w, "map", err)
 		return
 	}
@@ -482,6 +484,7 @@ func (s *Server) toProtocol(n db.Node) (protocol.Node, error) {
 		DiscoKey:  dk,
 		Addresses: []netip.Prefix{netip.PrefixFrom(n.IPv4, 32), netip.PrefixFrom(n.IPv6, 128)},
 		Endpoints: n.Endpoints,
+		HomeRelay: n.HomeRelay,
 		Hostinfo:  hi,
 		Created:   n.CreatedAt,
 	}

@@ -60,6 +60,8 @@ type MapRequest struct {
 	DiscoKey  key.DiscoPublic
 	Endpoints []netip.AddrPort `json:",omitempty"`
 	Hostinfo  *Hostinfo        `json:",omitempty"`
+	// HomeRelay is the relay region where this node can be reached (0 = none).
+	HomeRelay int `json:",omitempty"`
 	// Stream asks the server to keep the response open and push a new
 	// newline-delimited MapResponse whenever the map changes.
 	Stream bool `json:",omitempty"`
@@ -120,10 +122,12 @@ type RelayRegion struct {
 }
 
 type RelayNode struct {
-	Name      string
-	HostName  string
-	STUNPort  int `json:",omitempty"` // 0 = default 3478
-	RelayPort int `json:",omitempty"` // 0 = default 443
+	Name string
+	// URL of the relay endpoint. A URL without scheme and host (e.g. "/relay")
+	// is relative to the control server URL: the relay embedded in tc-control.
+	URL      string
+	HostName string `json:",omitempty"` // for STUN (milestone 4)
+	STUNPort int    `json:",omitempty"` // 0 = default 3478
 }
 
 // ErrorResponse is the body of any non-2xx response.

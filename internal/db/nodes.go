@@ -27,6 +27,7 @@ type Node struct {
 	IPv4       netip.Addr
 	IPv6       netip.Addr
 	Endpoints  []netip.AddrPort
+	HomeRelay  int
 	Ephemeral  bool
 	CreatedAt  time.Time
 	LastSeen   time.Time // zero = never
@@ -152,9 +153,17 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 	return RegisterResult{Node: n, Created: true}, tx.Commit()
 }
 
+// NodeStatus is what a node reports about itself in a map request.
+type NodeStatus struct {
+	DiscoKey  string
+	Endpoints []netip.AddrPort
+	HomeRelay int
+	Hostinfo  string // JSON; "" leaves the stored hostinfo unchanged
+}
+
 // UpdateNodeStatus records what a node reported in a map request.
-// hostinfo == "" leaves the stored hostinfo unchanged.
-func (d *DB) UpdateNodeStatus(ctx context.Context, id int64, discoKey string, endpoints []netip.AddrPort, hostinfo string) error {
+func (d *DB) UpdateNodeStatus(ctx context.Context, id int64, st NodeStatus) error {
+	discoKey, endpoints, hostinfo := st.DiscoKey, st.Endpoints, st.Hostinfo
 	if endpoints == nil {
 		endpoints = []netip.AddrPort{}
 	}
@@ -163,10 +172,10 @@ func (d *DB) UpdateNodeStatus(ctx context.Context, id int64, discoKey string, en
 		return err
 	}
 	_, err = d.sql.ExecContext(ctx, `
-		UPDATE nodes SET disco_key = ?, endpoints = ?, last_seen = ?,
+		UPDATE nodes SET disco_key = ?, endpoints = ?, home_relay = ?, last_seen = ?,
 		       hostinfo = CASE WHEN ? = '' THEN hostinfo ELSE ? END
 		WHERE id = ?`,
-		discoKey, string(eps), unix(d.now()), hostinfo, hostinfo, id)
+		discoKey, string(eps), st.HomeRelay, unix(d.now()), hostinfo, hostinfo, id)
 	return err
 }
 
@@ -178,7 +187,7 @@ func (d *DB) TouchNode(ctx context.Context, id int64) error {
 
 const nodeSelect = `
 	SELECT n.id, n.user_id, u.name, n.machine_key, n.node_key, n.disco_key, n.hostname, n.given_name,
-	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.ephemeral, n.created_at, n.last_seen, n.expires_at
+	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.created_at, n.last_seen, n.expires_at
 	FROM nodes n JOIN users u ON u.id = n.user_id`
 
 func scanNode(r rowScanner) (Node, error) {
@@ -187,7 +196,7 @@ func scanNode(r rowScanner) (Node, error) {
 	var created int64
 	var lastSeen, expires sql.NullInt64
 	err := r.Scan(&n.ID, &n.UserID, &n.UserName, &n.MachineKey, &n.NodeKey, &n.DiscoKey, &n.Hostname,
-		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.Ephemeral, &created, &lastSeen, &expires)
+		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &created, &lastSeen, &expires)
 	if err != nil {
 		return Node{}, err
 	}

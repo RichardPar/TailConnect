@@ -130,6 +130,23 @@ tca up >/dev/null
 wait_for 10 "alpha → beta after up" ip netns exec a ping -c1 -W1 "$IPB"
 ok "down/up"
 
+echo "== relay failover (direct path cut)"
+ip -n a route add blackhole 10.99.0.3/32
+ip -n b route add blackhole 10.99.0.2/32
+ip netns exec a ping -c1 -W1 10.99.0.3 >/dev/null 2>&1 && fail "blackhole not effective"
+# The trusted direct path expires after 15s without direct packets; then
+# traffic moves to the relay embedded in tc-control.
+t0=$(date +%s)
+wait_for 30 "alpha → beta via relay" ip netns exec a ping -c1 -W1 "$IPB"
+ok "failed over to relay after $(( $(date +%s) - t0 ))s"
+ip netns exec a ping -c5 -i0.2 -W2 "$IPB" >/dev/null || fail "relay path unstable"
+tca status | grep -q "relay 1" || { tca status; fail "status does not show relay path"; }
+ok "status shows relay path"
+ip -n a route del blackhole 10.99.0.3/32
+ip -n b route del blackhole 10.99.0.2/32
+wait_for 20 "back to direct" bash -c "ip netns exec a ping -c1 -W1 $IPB >/dev/null; ip netns exec a tc --socket /run/tc-a.sock status | grep -q 'direct 10.99.0.3'"
+ok "returned to direct path"
+
 echo "== admin removes beta"
 BID=$(tc-control nodes list | awk '$2=="beta"{print $1}')
 tc-control nodes delete "$BID" >/dev/null

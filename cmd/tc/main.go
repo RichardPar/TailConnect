@@ -176,7 +176,14 @@ func cmdStatus(c *localapi.Client, args []string) error {
 		}
 		return nil
 	}
-	fmt.Printf("State: %s   control: %s\n", st.State, st.ControlURL)
+	relay := "none"
+	if st.HomeRelay != 0 {
+		relay = fmt.Sprintf("%d", st.HomeRelay)
+		if !st.RelayConnected {
+			relay += " (connecting)"
+		}
+	}
+	fmt.Printf("State: %s   control: %s   relay: %s\n", st.State, st.ControlURL, relay)
 	if st.Error != "" {
 		fmt.Println("Warning:", st.Error)
 	}
@@ -190,9 +197,12 @@ func cmdStatus(c *localapi.Client, args []string) error {
 			state = "active"
 		}
 		detail := state
-		if p.CurrentEndpoint.IsValid() {
+		switch {
+		case p.CurrentEndpoint.IsValid():
 			detail += "; direct " + p.CurrentEndpoint.String()
-		} else if len(p.Endpoints) == 0 {
+		case p.Relay != 0:
+			detail += fmt.Sprintf("; relay %d", p.Relay)
+		case len(p.Endpoints) == 0:
 			detail += "; no endpoints reported"
 		}
 		if p.RxBytes+p.TxBytes > 0 {

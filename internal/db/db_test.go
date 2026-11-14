@@ -209,14 +209,14 @@ func TestGeneration(t *testing.T) {
 	if err := d.TouchNode(ctx, r.Node.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.UpdateNodeStatus(ctx, r.Node.ID, r.Node.DiscoKey, nil, ""); err != nil {
+	if err := d.UpdateNodeStatus(ctx, r.Node.ID, NodeStatus{DiscoKey: r.Node.DiscoKey}); err != nil {
 		t.Fatal(err)
 	}
 	if g() != g1 {
 		t.Fatal("last_seen / unchanged status should not bump generation")
 	}
 	ep := []netip.AddrPort{netip.MustParseAddrPort("10.0.0.1:41641")}
-	d.UpdateNodeStatus(ctx, r.Node.ID, r.Node.DiscoKey, ep, "")
+	d.UpdateNodeStatus(ctx, r.Node.ID, NodeStatus{DiscoKey: r.Node.DiscoKey, Endpoints: ep})
 	g2 := g()
 	if g2 <= g1 {
 		t.Fatal("endpoint change did not bump generation")
@@ -235,11 +235,11 @@ func TestStatusRenameDelete(t *testing.T) {
 	b, _ := reg(d, "m2", "n2", "b", k)
 
 	ep := []netip.AddrPort{netip.MustParseAddrPort("203.0.113.5:41641")}
-	if err := d.UpdateNodeStatus(ctx, a.Node.ID, "disco-new", ep, ""); err != nil {
+	if err := d.UpdateNodeStatus(ctx, a.Node.ID, NodeStatus{DiscoKey: "disco-new", Endpoints: ep, HomeRelay: 1}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := d.GetNodeByNodeKey(ctx, "n1")
-	if got.DiscoKey != "disco-new" || len(got.Endpoints) != 1 || got.Endpoints[0] != ep[0] {
+	if got.DiscoKey != "disco-new" || len(got.Endpoints) != 1 || got.Endpoints[0] != ep[0] || got.HomeRelay != 1 {
 		t.Fatalf("status not stored: %+v", got)
 	}
 

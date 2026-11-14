@@ -2,7 +2,7 @@
 
 A self-hosted mesh VPN built on WireGuard, for Linux, Windows and Android. One small coordination server hands out addresses and keys. Every device then talks to every other device directly over WireGuard.
 
-**Status: milestone 2.** Linux client, plus an encrypted, authenticated control channel and a WireGuard mesh between machines that can reach each other directly. Relay fallback, NAT traversal, MagicDNS, Windows and Android are next (see [Roadmap](#roadmap)).
+**Status: milestone 3.** Linux client, an encrypted and authenticated control channel, and a WireGuard mesh. Devices talk directly when they can and fall back to a relay when they can't (firewalls, NAT, blocked UDP). NAT hole punching, MagicDNS, Windows and Android are next (see [Roadmap](#roadmap)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/admin-machines-dark.png">
@@ -37,8 +37,9 @@ A self-hosted mesh VPN built on WireGuard, for Linux, Windows and Android. One s
 
 1. **Join.** `tc up --server URL --authkey KEY` asks the local daemon `tcd` to register. `tcd` fetches the server's public key from `GET /key` and pins it. It then opens a Noise IK channel, which proves the device's machine key to the server, and registers its WireGuard (node) key. The server gives it an address from `100.64.0.0/10`, plus a matching IPv6 ULA.
 2. **Map stream.** `tcd` keeps a streaming request open over that channel. `tc-control` pushes a new network map whenever something peers can see changes: a node joins or leaves, reports new endpoints, or is renamed. That includes edits from the admin UI or the CLI, which reach clients within about a second.
-3. **Data plane.** Each map is applied to WireGuard as a diff, so existing sessions survive. Every peer gets a /32 or /128 route on `tc0`, and traffic flows directly between devices.
-4. **Resilience.** If the control server goes away, the tunnel keeps running on the last map and `tcd` reconnects with backoff. If an admin removes a device, its tunnel is torn down and it must log in again.
+3. **Data plane.** Each map is applied to WireGuard as a diff, so existing sessions survive. Every peer gets a /32 or /128 route on `tc0`.
+4. **Direct or relayed.** *magicsock*, TailConnect's WireGuard transport, picks a path for every packet. Once packets arrive from a peer directly, it sends directly. Until then, or when the direct path stops answering (detected in about 3 seconds), it sends through the **relay** built into `tc-control` while still trying the direct address, so the direct path comes back by itself. Packets are attributed to peers by WireGuard session index rather than source address, so a peer behind NAT can be reached directly at its NAT-mapped address. The relay only forwards packets that are already WireGuard-encrypted.
+5. **Resilience.** If the control server goes away, the tunnel keeps running on the last map and `tcd` reconnects with backoff. If an admin removes a device, its tunnel is torn down and it must log in again.
 
 ---
 
@@ -120,7 +121,7 @@ sudo tc up --server http://SERVER:8080 --authkey tc-auth-…
 
 ![Terminal: tc status showing two active peers, tc ip, ping over the tunnel, and the tc0 routes](docs/images/term-client-verify.png)
 
-- `tc status` lists every peer. `active` means a WireGuard handshake completed in the last 3 minutes, and `direct` shows the address WireGuard is actually sending to.
+- `tc status` lists every peer. `active` means a WireGuard handshake completed in the last 3 minutes. `direct ADDR` means packets go straight to that address; `relay N` means they currently go through relay region N (or would, for an idle peer). The header shows this node's home relay.
 - `tc ip -4 PEER` prints a peer's tunnel address.
 - `ip route show dev tc0` shows one route per peer, tagged `proto 124`.
 
@@ -144,9 +145,33 @@ The admin CLI works directly on the database, so it works whether or not the ser
 | `-domain` | `tc.internal` | MagicDNS suffix: machines are named `<name>.<domain>` |
 | `-public-url` | derived | URL shown in the admin UI |
 | `-tls-cert`, `-tls-key` | none | Turn on HTTPS for both listeners |
+| `-relay` | `true` | Serve the built-in relay at `/relay` on the control listener (registered nodes only) |
+| `-relay-map` | none | JSON relay map to advertise instead of the built-in relay (see below) |
 | `-log-json` | `false` | Log in JSON format |
 
 Admin subcommands: `users create|list|delete`, `keys create|list|revoke`, `nodes list|delete|rename`, `admin-token`. Add `-json` to any list command.
+
+### Relays
+
+By default, `tc-control` runs a relay on its own control port at `/relay`, advertises it to every client as region 1, and only relays for registered nodes. Nothing extra needs configuring or opening.
+
+To add relays elsewhere, run `tc-relay` on another host and pass `tc-control serve -relay-map relays.json`:
+
+```json
+{ "Regions": [
+  { "ID": 1, "Code": "control", "Name": "tc-control (embedded)", "Nodes": [ { "Name": "1a", "URL": "/relay" } ] },
+  { "ID": 2, "Code": "edge",    "Name": "tc-relay",              "Nodes": [ { "Name": "2a", "URL": "https://relay.example.com/relay" } ] }
+] }
+```
+
+A relative URL such as `/relay` means "on the control server". Each node uses the lowest-numbered region as its home relay (latency-based choice comes with milestone 4).
+
+| `tc-relay` flag | Default | Description |
+|---|---|---|
+| `-listen` | `:3340` | Listen address |
+| `-key-file` | `relay.key` | Relay key (created if missing) |
+| `-tls-cert`, `-tls-key` | none | Serve HTTPS |
+| `-allow-any` | `false` | Required. A standalone relay can't check registrations with `tc-control` yet, so it serves any node that proves it owns its key. |
 
 ### `tcd`
 
@@ -174,7 +199,7 @@ Global option: `--socket PATH` (or `$TC_SOCKET`). `status` works for any user; `
 
 | Port | Protocol | Who connects |
 |---|---|---|
-| 8080 | TCP | clients → control server |
+| 8080 | TCP | clients → control server and built-in relay |
 | 8081 | TCP | administrator → admin UI (localhost by default) |
 | 41641 | UDP | device ↔ device (WireGuard) |
 
@@ -185,7 +210,7 @@ Global option: `--socket PATH` (or `$TC_SOCKET`). `status` works for any user; `
 - Everything a client sends to control after `GET /key` runs inside Noise IK, and every request is tied to the client's machine key. A device can only act on its own registration, even if it knows other devices' public keys.
 - Over plain HTTP, a client trusts the server key it receives on first connection. Use `-tls-cert/-tls-key`, or pin the key with `tc up --server-key`.
 - Auth keys and the admin token are stored only as SHA-256 hashes. The admin UI uses HMAC-signed `SameSite=Strict` session cookies, accepts only JSON for writes, checks request origin, and sends a strict CSP.
-- WireGuard traffic is end-to-end encrypted between devices; the control server never sees it.
+- WireGuard traffic is end-to-end encrypted between devices; the control server never sees it. Relays forward packets that are already encrypted. When a client connects to a relay, it proves it owns its node key with a NaCl box, so nobody can claim another node's key to intercept its packets. The built-in relay also refuses nodes that aren't registered.
 
 ---
 
@@ -196,11 +221,14 @@ Global option: `--socket PATH` (or `$TC_SOCKET`). `status` works for any user; `
 | `cmd/tc-control` | Coordination server and admin CLI |
 | `cmd/tcd` | Client daemon: TUN or userspace networking, WireGuard, routes |
 | `cmd/tc` | Client CLI |
+| `cmd/tc-relay` | Standalone relay server |
 | `internal/control` | Control API: Noise upgrade, register, map streaming, logout |
 | `internal/controlclient` | Client side of the control protocol |
 | `internal/noise` | Noise IK handshake and encrypted framed stream |
 | `internal/daemon` | `tcd` core: persisted state, map-stream loop, endpoint discovery |
 | `internal/engine` | wireguard-go device, peer config applied as diffs, netlink router |
+| `internal/magicsock` | WireGuard transport: per-packet direct/relay path choice, session-index attribution |
+| `internal/relay` | Relay protocol, server and client |
 | `internal/localapi` | `tc` ↔ `tcd` API over a Unix socket (SO_PEERCRED) |
 | `internal/admin` | Admin web server: JSON API and embedded UI |
 | `internal/db` | SQLite store (pure Go) with a change counter kept by triggers |
@@ -224,7 +252,7 @@ GOOS=windows go build ./... && GOOS=android GOARCH=arm64 go build ./...
 
 1. ✅ Coordination server, pre-auth keys, admin CLI and admin web UI
 2. ✅ Linux client (`tcd`/`tc`), Noise control channel, streaming network map, WireGuard mesh, userspace mode, systemd units
-3. magicsock and a relay server (`tc-relay`) for devices that can't reach each other directly
+3. ✅ magicsock, relay fallback (built into `tc-control`, plus standalone `tc-relay`), ~3s failover
 4. NAT traversal (STUN, disco pings, hole punching)
 5. MagicDNS (`<name>.<domain>` resolved on every device)
 6. Windows port (Wintun, Windows service, NRPT)

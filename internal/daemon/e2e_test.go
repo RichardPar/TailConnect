@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -35,7 +38,23 @@ func (n *testNode) tnet() *netstack.Net {
 	return n.net
 }
 
+// loopbackEndpoints makes nodes on this host reach each other over loopback.
+func loopbackEndpoints(port uint16) ([]netip.AddrPort, []netip.Prefix) {
+	return []netip.AddrPort{netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port)},
+		[]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+}
+
+// deadEndpoints advertises an address where nothing listens, so the only
+// working path between nodes is the relay.
+func deadEndpoints(uint16) ([]netip.AddrPort, []netip.Prefix) {
+	return []netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:9")}, []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+}
+
 func newTestNode(t *testing.T, name string) *testNode {
+	return newTestNodeEP(t, name, loopbackEndpoints)
+}
+
+func newTestNodeEP(t *testing.T, name string, eps func(uint16) ([]netip.AddrPort, []netip.Prefix)) *testNode {
 	t.Helper()
 	n := &testNode{}
 	d, err := New(Options{
@@ -50,7 +69,7 @@ func newTestNode(t *testing.T, name string) *testNode {
 			if err != nil {
 				return nil, err
 			}
-			e, err := engine.New(engine.Config{TUN: tdev, ListenPort: 0}, priv)
+			e, err := engine.New(engine.Config{TUN: tdev, ListenPort: 0, Verbose: os.Getenv("TC_WG_VERBOSE") != "", Logf: func(f string, a ...any) { t.Logf("[%s] "+f, append([]any{name}, a...)...) }}, priv)
 			if err != nil {
 				return nil, err
 			}
@@ -59,11 +78,7 @@ func newTestNode(t *testing.T, name string) *testNode {
 			n.mu.Unlock()
 			return e, nil
 		},
-		// Both nodes share this host; reach each other over loopback.
-		Endpoints: func(port uint16) ([]netip.AddrPort, []netip.Prefix) {
-			return []netip.AddrPort{netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), port)},
-				[]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
-		},
+		Endpoints: eps,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -124,8 +139,15 @@ func echo(t *testing.T, n *testNode, ip netip.Addr) {
 	}()
 }
 
-func ping(n *testNode, dst netip.Addr, msg string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func ping(n *testNode, dst netip.Addr, msg string) (out string, err error) {
+	start := time.Now()
+	defer func() {
+		if d := time.Since(start); d > time.Second {
+			fmt.Printf("slow ping %s → %s: %v (err=%v)\n", msg, dst, d.Round(time.Millisecond), err)
+		}
+	}()
+	// Allow for one WireGuard handshake retry (5s) on a cold path.
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	c, err := n.tnet().DialContextTCPAddrPort(ctx, netip.AddrPortFrom(dst, 7000))
 	if err != nil {
@@ -140,21 +162,38 @@ func ping(n *testNode, dst netip.Addr, msg string) (string, error) {
 	return string(b), err
 }
 
-func TestEndToEndMesh(t *testing.T) {
-	// Control server.
+// newControl starts tc-control with its embedded relay and returns the
+// database, URL and a reusable auth key.
+func newControl(t *testing.T) (*db.DB, string, string) {
+	t.Helper()
 	cdb, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctl, err := control.New(context.Background(), cdb, control.Config{BaseDomain: "e2e.internal", PollInterval: 50 * time.Millisecond},
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	rs, err := control.NewEmbeddedRelay(context.Background(), cdb, log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(ctl.Handler())
-	t.Cleanup(func() { ctl.Close(); ts.Close(); cdb.Close() })
+	ctl, err := control.New(context.Background(), cdb, control.Config{
+		BaseDomain: "e2e.internal", PollInterval: 50 * time.Millisecond, Relays: control.EmbeddedRelayMap(),
+	}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle(control.EmbeddedRelayPath, rs)
+	mux.Handle("/", ctl.Handler())
+	ts := httptest.NewServer(mux)
+	t.Cleanup(func() { ctl.Close(); rs.Close(); ts.Close(); cdb.Close() })
 	u, _ := cdb.CreateUser(context.Background(), "alice")
 	authKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: u.ID, Reusable: true, TTL: time.Hour})
+	return cdb, ts.URL, authKey
+}
+
+func TestEndToEndMesh(t *testing.T) {
+	cdb, url, authKey := newControl(t)
+	ts := struct{ URL string }{url}
 
 	a, b := newTestNode(t, "alpha"), newTestNode(t, "beta")
 
@@ -187,6 +226,7 @@ func TestEndToEndMesh(t *testing.T) {
 	echo(t, b, ipB)
 	echo(t, a, ipA)
 	if got, err := ping(a, ipB, "hi-beta"); err != nil || got != "pong:hi-beta" {
+		dump(t, a, b)
 		t.Fatalf("alpha→beta: %q %v", got, err)
 	}
 	if got, err := ping(b, ipA, "hi-alpha"); err != nil || got != "pong:hi-alpha" {
@@ -195,6 +235,16 @@ func TestEndToEndMesh(t *testing.T) {
 	st := a.d.Status()
 	if !st.Peers[0].Active || st.Peers[0].TxBytes == 0 || st.Peers[0].RxBytes == 0 {
 		t.Fatalf("peer stats not populated: %+v", st.Peers[0])
+	}
+	// Loopback is reachable, so the path must settle on direct once each side
+	// has the other's endpoints and traffic flows.
+	waitFor(t, "direct path", func() bool {
+		ping(a, ipB, "x")
+		ps := a.d.Status().Peers
+		return len(ps) == 1 && ps[0].CurrentEndpoint.IsValid()
+	})
+	if st.HomeRelay != 1 || !st.RelayConnected {
+		t.Fatalf("home relay: %d connected=%v", st.HomeRelay, st.RelayConnected)
 	}
 
 	// Down/Up cycle: registration survives, tunnel comes back.
@@ -260,5 +310,46 @@ func TestStatePersists(t *testing.T) {
 	}
 	if !d2.st.MachineKey.Equal(d.st.MachineKey) || d2.Status().State != localapi.StateStopped {
 		t.Fatalf("state not restored: %+v", d2.Status())
+	}
+}
+
+func TestRelayFallback(t *testing.T) {
+	cdb, url, authKey := newControl(t)
+	a, b := newTestNodeEP(t, "alpha", deadEndpoints), newTestNodeEP(t, "beta", deadEndpoints)
+	for _, n := range []struct {
+		n    *testNode
+		host string
+	}{{a, "alpha"}, {b, "beta"}} {
+		if err := n.n.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: authKey, Hostname: n.host}); err != nil {
+			t.Fatalf("up %s: %v", n.host, err)
+		}
+	}
+	waitFor(t, "alpha running", running(a, 1))
+	waitFor(t, "beta running", running(b, 1))
+	// Both nodes must have told control their home relay before they can find each other.
+	waitFor(t, "home relays reported", func() bool {
+		nodes, _ := cdb.ListNodes(context.Background(), 0)
+		return len(nodes) == 2 && nodes[0].HomeRelay == 1 && nodes[1].HomeRelay == 1
+	})
+	ipA, ipB := selfIP(t, a), selfIP(t, b)
+	echo(t, b, ipB)
+	echo(t, a, ipA)
+	if got, err := ping(a, ipB, "via-relay"); err != nil || got != "pong:via-relay" {
+		t.Fatalf("alpha→beta via relay: %q %v", got, err)
+	}
+	if got, err := ping(b, ipA, "back"); err != nil || got != "pong:back" {
+		t.Fatalf("beta→alpha via relay: %q %v", got, err)
+	}
+	st := a.d.Status()
+	p := st.Peers[0]
+	if p.CurrentEndpoint.IsValid() || p.Relay != 1 || !p.Active {
+		t.Fatalf("expected relay path: endpoint=%v relay=%d active=%v", p.CurrentEndpoint, p.Relay, p.Active)
+	}
+}
+
+func dump(t *testing.T, ns ...*testNode) {
+	for _, n := range ns {
+		b, _ := json.MarshalIndent(n.d.Status(), "", " ")
+		t.Logf("status: %s", b)
 	}
 }

@@ -174,7 +174,7 @@ func TestCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = f.db.UpdateNodeStatus(context.Background(), res.Node.ID, "", nil, "")
+	_ = f.db.UpdateNodeStatus(context.Background(), res.Node.ID, db.NodeStatus{})
 
 	_, _, raw := f.do(f.c, "GET", "/api/v1/nodes", nil, nil)
 	var nodes []apiNode

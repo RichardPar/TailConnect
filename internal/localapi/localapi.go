@@ -40,8 +40,12 @@ type Status struct {
 	Domain     string `json:",omitempty"` // MagicDNS suffix
 	TUN        string `json:",omitempty"`
 	ListenPort uint16 `json:",omitempty"`
-	Self       *PeerStatus
-	Peers      []PeerStatus
+	// HomeRelay is the relay region this node is reachable through, and
+	// RelayConnected whether that connection is up.
+	HomeRelay      int  `json:",omitempty"`
+	RelayConnected bool `json:",omitempty"`
+	Self           *PeerStatus
+	Peers          []PeerStatus
 }
 
 type PeerStatus struct {
@@ -51,10 +55,12 @@ type PeerStatus struct {
 	OS        string `json:",omitempty"`
 	Addresses []netip.Prefix
 	NodeKey   key.NodePublic
-	// Endpoints are the addresses the peer reported; CurrentEndpoint is where
-	// WireGuard is actually sending.
+	// Endpoints are the addresses the peer reported. CurrentEndpoint is the
+	// direct address in use; when there is none, traffic goes via relay
+	// region Relay.
 	Endpoints       []netip.AddrPort `json:",omitempty"`
 	CurrentEndpoint netip.AddrPort   `json:",omitempty"`
+	Relay           int              `json:",omitempty"`
 	LastHandshake   *time.Time       `json:",omitempty"`
 	RxBytes         int64
 	TxBytes         int64

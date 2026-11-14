@@ -30,6 +30,8 @@ import (
 	"tailconnect/internal/admin"
 	"tailconnect/internal/control"
 	"tailconnect/internal/db"
+	"tailconnect/internal/protocol"
+	"tailconnect/internal/relay"
 )
 
 // version is set at build time: -ldflags "-X main.version=v0.1.0".
@@ -124,6 +126,8 @@ func cmdServe(args []string) error {
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file (enables HTTPS on both listeners)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
 	logJSON := fs.Bool("log-json", false, "log in JSON format")
+	embedRelay := fs.Bool("relay", true, "serve the built-in relay at /relay on the control listener")
+	relayMapFile := fs.String("relay-map", "", "JSON relay map to advertise instead of the built-in relay (see docs)")
 	fs.Parse(args)
 
 	var h slog.Handler = slog.NewTextHandler(os.Stderr, nil)
@@ -144,7 +148,28 @@ func cmdServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	ctl, err := control.New(ctx, d, control.Config{BaseDomain: *domain}, log)
+	var relays protocol.RelayMap
+	switch {
+	case *relayMapFile != "":
+		b, err := os.ReadFile(*relayMapFile)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(b, &relays); err != nil {
+			return fmt.Errorf("parse %s: %w", *relayMapFile, err)
+		}
+	case *embedRelay:
+		relays = control.EmbeddedRelayMap()
+	}
+	var relaySrv *relay.Server
+	if *embedRelay {
+		if relaySrv, err = control.NewEmbeddedRelay(ctx, d, log); err != nil {
+			return err
+		}
+		defer relaySrv.Close()
+	}
+
+	ctl, err := control.New(ctx, d, control.Config{BaseDomain: *domain, Relays: relays}, log)
 	if err != nil {
 		return err
 	}
@@ -163,8 +188,15 @@ func cmdServe(args []string) error {
 		*publicURL = scheme + "://" + *listen
 	}
 
+	var ctlHandler http.Handler = ctl.Handler()
+	if relaySrv != nil {
+		mux := http.NewServeMux()
+		mux.Handle(control.EmbeddedRelayPath, relaySrv)
+		mux.Handle("/", ctl.Handler())
+		ctlHandler = mux
+	}
 	servers := []*http.Server{{
-		Addr: *listen, Handler: ctl.Handler(),
+		Addr: *listen, Handler: ctlHandler,
 		ReadHeaderTimeout: control.ReadHeaderTimeout, IdleTimeout: control.IdleTimeout,
 	}}
 	names := []string{"control"}
@@ -210,7 +242,8 @@ func cmdServe(args []string) error {
 			}
 		}(srv, ln)
 	}
-	log.Info("tc-control started", "version", version, "domain", *domain, "machine_key", ctl.MachinePublic().ShortString())
+	log.Info("tc-control started", "version", version, "domain", *domain, "machine_key", ctl.MachinePublic().ShortString(),
+		"relay", relaySrv != nil, "relay_regions", len(relays.Regions))
 
 	select {
 	case <-ctx.Done():
@@ -220,7 +253,10 @@ func cmdServe(args []string) error {
 	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ctl.Close() // Noise connections are hijacked, so Shutdown doesn't track them
+	ctl.Close() // Noise and relay connections are hijacked, so Shutdown doesn't track them
+	if relaySrv != nil {
+		relaySrv.Close()
+	}
 	for _, srv := range servers {
 		_ = srv.Shutdown(shutCtx)
 	}
