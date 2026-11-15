@@ -32,6 +32,9 @@ type UpRequest struct {
 	AuthKey    string            `json:",omitempty"` // required to register a new machine
 	Hostname   string            `json:",omitempty"` // default: OS hostname
 	ServerKey  key.MachinePublic `json:",omitempty"` // pin explicitly instead of fetching /key
+	// TLSFingerprint pins the server's self-signed HTTPS certificate
+	// ("sha256:…", as tc-control logs it). "" = unchanged.
+	TLSFingerprint string `json:",omitempty"`
 	// ExitNode chooses the exit node for this machine's internet traffic:
 	// a machine's name or tunnel address, "" for none. nil = unchanged.
 	ExitNode *string `json:",omitempty"`

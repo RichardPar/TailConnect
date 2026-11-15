@@ -149,6 +149,7 @@ The options you're most likely to want:
 | `-signup MODE` | Who may create accounts in the portal: `off`, `approval` (default), `invite` or `open`. See [accounts and sign-up](usage.md#accounts-and-sign-up). |
 | `-public-url URL` | The URL shown in the portal for clients to use |
 | `-acme-domain NAME` | Automatic HTTPS from Let's Encrypt; see [Enable HTTPS](#enable-https) |
+| `-tls-self-signed` | HTTPS on a LAN with a certificate the server makes itself; devices pin its fingerprint. See [Self-signed certificate](#self-signed-certificate-no-dns-name-or-open-port-needed) |
 | `-listen :PORT` | A different control port (default `:7740`) |
 
 All options are listed in the [configuration reference](configuration.md#tc-control-serve).
@@ -186,7 +187,7 @@ Over plain HTTP, the control channel is still encrypted and authenticated with N
 
 ### Automatic certificates (Let's Encrypt)
 
-`tc-control` gets a free certificate from Let's Encrypt and renews it by itself. You need:
+`tc-control` gets a free certificate from Let's Encrypt and renews it by itself. It's for the server only: devices need no certificate and no setup, and trust it like any website's. You need:
 - a DNS name pointing at the server, such as `vpn.example.com`;
 - TCP port 443 reachable from the internet, so Let's Encrypt can check that the name is yours.
 
@@ -210,6 +211,37 @@ Clients then join with `--server https://vpn.example.com`. Open TCP 443 instead 
 - relays, renewals and rate limits;
 - fixes for each error.
 
+### Self-signed certificate (no DNS name or open port needed)
+
+On a LAN, or anywhere Let's Encrypt can't reach the server, `tc-control` can make its own certificate:
+
+```sh
+# /etc/default/tc-control
+TC_CONTROL_ARGS="-tls-self-signed -public-url https://192.168.1.10:7740"
+```
+
+```sh
+sudo systemctl restart tc-control
+sudo journalctl -u tc-control | grep fingerprint
+# ... msg="HTTPS with a self-signed certificate: ..." fingerprint=sha256:Xq3…
+```
+
+Only the server has a certificate; devices need none. But no authority vouches for a self-signed certificate, so each device is told which one to trust, by its fingerprint, the way SSH remembers a host key:
+
+```sh
+sudo tc up --server https://192.168.1.10:7740 --tls-fingerprint sha256:Xq3… --authkey tc-auth-…
+```
+
+- **Where to find the fingerprint:** the server log, and the portal's **Auth keys** tab, whose join command already includes it. An auth key's QR code carries it too, so the Android app trusts the right certificate without typing.
+- **If you leave it out**, `tc up` refuses and prints the fingerprint the server presented. Compare it with the log or portal, then run the command again with it. The Android app shows the same fingerprint and asks **Trust this server's certificate?**
+- **The fingerprint names the key, not the certificate.** The key is made once and kept in `tls/` next to the database. The certificate covers the server's hostname, `hostname.local`, its IPv4 addresses and the `-public-url` host. When those change, `tc-control` reissues the certificate with the same key, so clients keep working. Add more names with `-tls-names vpn.lan,10.0.0.5`.
+- **Check a fingerprint with standard tools:** `openssl s_client -connect SERVER:7740 </dev/null 2>/dev/null | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | basenc --base64url | tr -d =` prints the part after `sha256:`.
+- **Browsers** warn about the portal's certificate. Accept it once; the warning comes back only when the certificate is reissued for new names.
+- **IPv6:** the certificate covers the machine's IPv4 addresses and `::1`. Add IPv6 addresses you connect to by number with `-tls-names` (temporary addresses change daily, so they aren't added automatically).
+- **Moving existing devices to HTTPS:** `sudo tc up --server https://… --tls-fingerprint sha256:…` on each one keeps its identity (the server key is the same). The built-in relay uses the same pin.
+- **Back up `tls/`** with the database. A new key means a new fingerprint for every client.
+- **Standalone relays** (`tc-relay`) don't have a self-signed option yet. Run them with Let's Encrypt, your own certificate, or plain HTTP: relayed packets are WireGuard either way.
+
 ### Your own certificate
 
 If you already have a certificate (from your own CA, or one renewed by other tooling), give `tc-control` the files. The packaged unit runs as a dynamic user that can't read other users' files, such as those under `/etc/letsencrypt`. So hand the files to the service with systemd **credentials**, using a drop-in:
@@ -232,7 +264,8 @@ TC_CONTROL_ARGS="-listen :443 -public-url https://vpn.example.com -tls-cert /run
 ```
 
 - **Renewals:** systemd copies the credentials when the service starts, so restart `tc-control` after each renewal. Connected clients reconnect by themselves, and their tunnels keep running during the restart.
-- **Private CA or self-signed certificates:** clients check the certificate against the system trust store. Add your CA there (`/usr/local/share/ca-certificates/` and `update-ca-certificates` on Debian/Ubuntu), then **restart `tcd`**, which reads the store at startup.
+- **Private CA certificates:** clients check the certificate against the system trust store. Add your CA there (`/usr/local/share/ca-certificates/` and `update-ca-certificates` on Debian/Ubuntu), then **restart `tcd`**, which reads the store at startup.
+- **A self-signed certificate of your own?** Clients can pin it like the built-in one: `--tls-fingerprint`. The fingerprint is in the error `tc up` prints.
 - **No certificate at all?** Pin the server key on each client instead: `sudo tc up --server http://… --server-key mkey:…`. The key is in the server log and in `curl http://SERVER:7740/key`.
 
 ---
@@ -290,6 +323,7 @@ Options:
 - `--hostname NAME` sets the device's name; the default is the OS hostname. An administrator can rename it later.
 - You need the auth key only once. After a reboot or `tc down`, the device reconnects with a plain `sudo tc up`, or by itself when `tcd` starts.
 - `--server-key mkey:…` pins the server key over plain HTTP (see [Enable HTTPS](#enable-https)).
+- `--tls-fingerprint sha256:…` trusts a server's self-signed certificate (see [Self-signed certificate](#self-signed-certificate-no-dns-name-or-open-port-needed)).
 - To use the key without putting it in shell history, run `sudo TC_AUTHKEY=tc-auth-… tc up --server …`.
 
 Check it worked:
@@ -375,7 +409,7 @@ To give the server a new address, port or HTTPS while keeping its database, run 
 sudo tc up --server https://new-address
 ```
 
-The device fetches the server key from the new URL. If it's the same server (same key), the device keeps its registration, address and name, and no auth key is needed. If the key is different, it's a different server: the device starts with a fresh identity and needs an auth key for that server.
+The device fetches the server key from the new URL. If it's the same server (same key), the device keeps its registration, address and name, and no auth key is needed. For a server with a self-signed certificate, add `--tls-fingerprint sha256:…`; without it the device refuses, prints the fingerprint, and stays connected to the old address. If the key is different, it's a different server: the device starts with a fresh identity and needs an auth key for that server.
 
 **To new hardware** (say, from a VM to a Raspberry Pi): install the server on the new machine, stop both servers, copy the database across, start the new one, then run `tc up --server` on each device as above:
 
@@ -396,8 +430,11 @@ Everything the server knows is in `/var/lib/tc-control/control.db`: accounts, ma
 ```sh
 sudo systemctl stop tc-control
 sudo cp /var/lib/tc-control/control.db /root/tc-control-$(date +%F).db
+sudo cp -r /var/lib/tc-control/tls /root/tc-control-tls-$(date +%F)    # with -tls-self-signed
 sudo systemctl start tc-control
 ```
+
+With `-tls-self-signed`, back up the `tls/` folder beside the database too. Its key is what devices pinned: a server without it makes a new key, and every device then needs `tc up --tls-fingerprint` with the new fingerprint.
 
 To restore, stop the service, copy the file back to the same path, and start it; the service takes ownership of the file when it starts. If the database is lost, the replacement server has a new key: on every device run `sudo tc logout` (which forgets the old key), then join again with `sudo tc up --server URL --authkey …`.
 

@@ -10,6 +10,7 @@ package engine
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -547,6 +548,10 @@ func orAll(d []string) any {
 func reverseZones() []string {
 	return append(dns.ReverseZones(ipam.DefaultV4), dns.ReverseZones(ipam.DefaultV6)...)
 }
+
+// SetRelayTLS sets how relays' HTTPS certificates are checked (nil = the
+// usual checks); see tlspin for pinned self-signed certificates.
+func (e *Engine) SetRelayTLS(cfg *tls.Config) { e.magic.SetRelayTLS(cfg) }
 
 // DNSStatus describes MagicDNS on this node.
 type DNSStatus struct {

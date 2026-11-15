@@ -67,7 +67,7 @@ Web portal: http://192.168.1.10:7741   (sign in as alice)
 | Question | What to answer |
 |---|---|
 | MagicDNS domain | The end of your machines' names: `laptop.alice.home.internal`. Pick it now: changing it later renames every machine. |
-| Where devices reach the server | **1** for a server only on your LAN. **2** for one reachable from anywhere: you give its DNS name, and it gets a free HTTPS certificate from Let's Encrypt by itself ([what that needs](docs/lets-encrypt.md#what-you-need)). |
+| Where devices reach the server | **1** for a server only on your LAN. **2** for one reachable from anywhere: you give its DNS name, and it gets a free HTTPS certificate from Let's Encrypt by itself ([what that needs](docs/lets-encrypt.md#what-you-need)). A LAN server can use HTTPS too, with a self-signed certificate, turned on afterwards ([how](docs/installation.md#self-signed-certificate-no-dns-name-or-open-port-needed)). |
 | Address, or DNS name and port | What devices connect to. On a LAN, give the server a fixed address on your router. |
 | Web portal | **1** (the default): anyone who can reach the server can open the sign-in page, on port 7741. Over plain HTTP (a LAN server), passwords cross your network unencrypted; with HTTPS, the portal uses the same certificate. **2**: only the server itself; you reach it through an SSH tunnel. |
 | Firewall | Asked only if `ufw` or `firewalld` is active. Otherwise, open the ports it lists, and on a router or cloud VM also forward or allow them there. |

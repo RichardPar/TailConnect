@@ -10,13 +10,17 @@ import (
 
 // JoinURL is what an auth key's QR code holds. The Android app opens
 // tailconnect://join links with its form filled in: point the device's
-// camera at the code, open the link, check the name, tap Connect.
-func JoinURL(server, authKey string) string {
+// camera at the code, open the link, check the name, tap Connect. fp is the
+// server's self-signed certificate fingerprint ("" if it has none).
+func JoinURL(server, authKey, fp string) string {
 	q := url.Values{}
 	if server != "" {
 		q.Set("server", server)
 	}
 	q.Set("key", authKey)
+	if fp != "" {
+		q.Set("fp", fp)
+	}
 	return "tailconnect://join?" + q.Encode()
 }
 

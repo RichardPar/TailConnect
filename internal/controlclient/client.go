@@ -25,6 +25,7 @@ import (
 	"tailconnect/internal/netmark"
 	"tailconnect/internal/noise"
 	"tailconnect/internal/protocol"
+	"tailconnect/internal/tlspin"
 )
 
 // HTTPError is a non-2xx response from the server.
@@ -46,9 +47,7 @@ func IsUnauthorized(err error) bool {
 // Over HTTPS this is authenticated by TLS; over plain HTTP it is trust-on-first-use.
 func FetchServerKey(ctx context.Context, serverURL string, hc *http.Client) (key.MachinePublic, error) {
 	if hc == nil {
-		tr := http.DefaultTransport.(*http.Transport).Clone()
-		tr.DialContext = netmark.Dialer(15*time.Second, 30*time.Second).DialContext
-		hc = &http.Client{Timeout: 15 * time.Second, Transport: tr}
+		hc = HTTPClient(nil)
 	}
 	u, err := parseServerURL(serverURL)
 	if err != nil {
@@ -57,6 +56,9 @@ func FetchServerKey(ctx context.Context, serverURL string, hc *http.Client) (key
 	req, _ := http.NewRequestWithContext(ctx, "GET", u.JoinPath("/key").String(), nil)
 	resp, err := hc.Do(req)
 	if err != nil {
+		if u.Scheme == "https" {
+			err = tlspin.Explain(ctx, err, hostPort(u), u.Hostname())
+		}
 		return key.MachinePublic{}, fmt.Errorf("fetch server key: %w", err)
 	}
 	defer resp.Body.Close()
@@ -71,6 +73,26 @@ func FetchServerKey(ctx context.Context, serverURL string, hc *http.Client) (key
 		return key.MachinePublic{}, errors.New("fetch server key: server returned no key")
 	}
 	return kr.MachineKey, nil
+}
+
+// HTTPClient is a client for the control server's plain HTTP endpoints
+// (like /key), with tlsConfig for HTTPS (nil = the usual checks).
+func HTTPClient(tlsConfig *tls.Config) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = netmark.Dialer(15*time.Second, 30*time.Second).DialContext
+	tr.TLSClientConfig = tlsConfig
+	return &http.Client{Timeout: 15 * time.Second, Transport: tr}
+}
+
+// hostPort is u's host with its port, defaulting by scheme.
+func hostPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return u.Host
+	}
+	if u.Scheme == "https" {
+		return net.JoinHostPort(u.Hostname(), "443")
+	}
+	return net.JoinHostPort(u.Hostname(), "80")
 }
 
 func parseServerURL(s string) (*url.URL, error) {
@@ -173,7 +195,7 @@ func (c *Client) dial(ctx context.Context) (*http2.ClientConn, error) {
 		tc := tls.Client(raw, cfg)
 		if err := tc.HandshakeContext(ctx); err != nil {
 			raw.Close()
-			return nil, fmt.Errorf("control TLS: %w", err)
+			return nil, fmt.Errorf("control TLS: %w", tlspin.Explain(ctx, err, host, cfg.ServerName))
 		}
 		raw = tc
 	}

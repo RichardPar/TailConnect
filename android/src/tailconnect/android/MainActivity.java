@@ -1,6 +1,7 @@
 package tailconnect.android;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
@@ -39,6 +40,8 @@ import java.util.Date;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -67,6 +70,12 @@ public class MainActivity extends Activity {
     private Form form;
     private JSONObject lastStatus;
     private boolean running, polling, logShown;
+    // A self-signed server certificate's fingerprint to pin (from a QR code,
+    // or trusted by the user), the auth key of the last attempt (kept in
+    // memory only, to retry once the certificate is trusted), and the
+    // fingerprint last asked about (to ask only once).
+    private String tlsFp = "", retryKey = "", askedFp = "";
+    private static final Pattern FP_HINT = Pattern.compile("--tls-fingerprint (sha256:[A-Za-z0-9_-]{43})");
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -97,6 +106,8 @@ public class MainActivity extends Activity {
             // From an auth key's QR code. Fill in, never connect by itself: the
             // user checks the server (a link can come from anywhere) and taps Connect.
             String s = link.getQueryParameter("server"), k = link.getQueryParameter("key"), h = link.getQueryParameter("hostname");
+            String fp = link.getQueryParameter("fp");
+            if (fp != null) tlsFp = fp.trim();
             if (s != null && !s.isEmpty()) server.setText(s);
             if (k != null && !k.isEmpty()) authKey.setText(k);
             if (h != null && !h.isEmpty()) hostname.setText(h);
@@ -107,6 +118,7 @@ public class MainActivity extends Activity {
         if ((v = i.getStringExtra("server")) != null) server.setText(v);
         if ((v = i.getStringExtra("authkey")) != null) authKey.setText(v);
         if ((v = i.getStringExtra("hostname")) != null) hostname.setText(v);
+        if ((v = i.getStringExtra("fp")) != null) tlsFp = v.trim();
     }
 
     @Override
@@ -315,10 +327,14 @@ public class MainActivity extends Activity {
 
     private void startConnect() {
         setError("");
+        String key = authKey.getText().toString().trim();
+        if (key.isEmpty()) key = retryKey;
+        retryKey = key;
         Intent i = new Intent(this, TcVpnService.class).setAction(TcVpnService.ACTION_CONNECT)
                 .putExtra(TcVpnService.EXTRA_SERVER, server.getText().toString().trim())
-                .putExtra(TcVpnService.EXTRA_AUTHKEY, authKey.getText().toString().trim())
-                .putExtra(TcVpnService.EXTRA_HOSTNAME, hostname.getText().toString().trim());
+                .putExtra(TcVpnService.EXTRA_AUTHKEY, key)
+                .putExtra(TcVpnService.EXTRA_HOSTNAME, hostname.getText().toString().trim())
+                .putExtra(TcVpnService.EXTRA_FP, tlsFp);
         startService(i);
         authKey.setText(""); // used once; never stored
         stateText.setText("Connecting…");
@@ -362,6 +378,8 @@ public class MainActivity extends Activity {
         if (st != null && !st.optString("Error").isEmpty()) err = st.optString("Error");
         if (st != null && !st.optString("Notice").isEmpty()) err = st.optString("Notice");
         running = st != null && !state.equals("Stopped") && !state.equals("NeedsLogin");
+        if (state.equals("Running")) retryKey = "";
+        offerTrust(err);
         switch (state) {
             case "Running":
                 stateText.setText("Connected");
@@ -501,6 +519,29 @@ public class MainActivity extends Activity {
         } catch (PackageManager.NameNotFoundException e) {
             return "";
         }
+    }
+
+    /**
+     * The server's certificate isn't from a trusted authority: show its
+     * fingerprint and offer to pin it, like SSH's first connection to a host.
+     */
+    private void offerTrust(String err) {
+        if (err == null) return;
+        Matcher m = FP_HINT.matcher(err);
+        if (!m.find()) return;
+        String fp = m.group(1);
+        if (fp.equals(askedFp) || isFinishing()) return;
+        askedFp = fp;
+        new AlertDialog.Builder(this)
+                .setTitle("Trust this server's certificate?")
+                .setMessage("The server uses a certificate that isn't from a trusted authority, such as a self-signed one. Its fingerprint is:\n\n"
+                        + fp + "\n\nCompare it with the one the web portal shows (Auth keys tab) or tc-control logs. Only trust it if they match.")
+                .setPositiveButton("They match: trust it", (d, w) -> {
+                    tlsFp = fp;
+                    startConnect();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void setError(String msg) {

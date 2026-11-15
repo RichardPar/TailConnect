@@ -34,7 +34,7 @@ The server has its own machine key, plus a relay key, stored in its database. Pr
 ## Joining
 
 1. `tc up --server URL --authkey KEY` asks the local `tcd` to register.
-2. `tcd` fetches the server's public key from `GET /key` and pins it. Over HTTPS this is authenticated; over plain HTTP it's trust on first use, unless you pass `--server-key`.
+2. `tcd` fetches the server's public key from `GET /key` and pins it. Over HTTPS this is authenticated, by a trusted certificate or one whose key fingerprint the device pinned (`--tls-fingerprint`); over plain HTTP it's trust on first use, unless you pass `--server-key`.
 3. `tcd` opens a **Noise IK** channel to the server, carried in an HTTP Upgrade on `POST /machine/noise`. The handshake proves the device holds its machine key and the server holds the pinned key. Everything after that runs inside the channel, as HTTP/2 requests.
 4. The device sends its node key, disco key, hostname and the auth key. The server checks the auth key (and that its account is active), records the device in that account, picks a name unique within the account, and gives it the lowest free address in `100.64.0.0/10` (unique across the whole server), plus the matching IPv6 address.
 
@@ -168,7 +168,7 @@ Inbound packets from the exit node can come from any address. WireGuard still at
 
 ## Security model
 
-- **Control channel.** Everything after `GET /key` runs inside Noise IK, and each request is tied to the client's machine key. Over plain HTTP, the server key is trusted on first use. Use HTTPS, or pin it with `--server-key`, to close that gap.
+- **Control channel.** Everything after `GET /key` runs inside Noise IK, and each request is tied to the client's machine key. Over plain HTTP, the server key is trusted on first use. Use HTTPS (a public certificate, or a self-signed one pinned with `--tls-fingerprint`), or pin the key with `--server-key`, to close that gap.
 - **Secrets at rest.** Passwords are hashed with argon2id (19 MiB, 2 passes, per-password salt); auth keys, invites, share links and the admin token are stored only as SHA-256 hashes. The database also holds the server's private machine key and relay key, so protect it and its backups.
 - **Tenant isolation.** See [Tenants](#tenants). In the portal and API, another account's machines, keys and shares look like they don't exist (404), and operator endpoints refuse tenants.
 - **Web portal.**
@@ -182,6 +182,7 @@ Inbound packets from the exit node can come from any address. WireGuard still at
 - **Traffic reports.** For the portal's traffic view, every machine sends the server how many bytes it exchanged with each peer, over its control connection. Only counts: nothing about what the traffic is or where else it goes. The server keeps the latest report in memory, for operators and the machine's own account to see.
 - **Relays.** A device must prove it owns its node key before the relay accepts packets for it, so nobody can claim another device's key to intercept its packets. Relays serve only registered machines of active accounts, and only between machines that may talk. The built-in relay knows this directly; a standalone `tc-relay` asks the control server, authenticated with its own revocable token, and caches the answers until the rules change (unless it is run as an open relay with `-allow-any`).
 - **HTTPS.** `tc-control` and `tc-relay` serve HTTPS themselves, with certificates from Let's Encrypt (`-acme-domain`, renewed automatically) or your own files. Nothing needs to run in front of them.
+- **Self-signed certificates.** With `-tls-self-signed`, `tc-control` makes an ECDSA P-256 key once and a certificate for its hostname and addresses, kept in `tls/` beside the database. Devices pin the SHA-256 of the certificate's public key (SubjectPublicKeyInfo), not the certificate itself, so the server can reissue the certificate for new addresses without breaking them. A device with a pin accepts a server whose certificate is valid as usual or whose key matches the pin, and uses the pin for the control connection, the first `GET /key` and the built-in relay. Without a pin, it refuses and reports the fingerprint it saw. A failed attempt leaves the device connected to its current server.
 - **MagicDNS.** It answers only the local device and isn't reachable from peers, so it can't be used as an open resolver.
 - **Local API.** `tc` talks to `tcd` over a Unix socket. The caller's UID (`SO_PEERCRED`) decides what it may do: status for anyone; up, down and logout for root.
 - **Least privilege.** `tc-control` runs as an unprivileged dynamic user. `tcd` runs as root, limited to `CAP_NET_ADMIN` and `CAP_NET_RAW`, with a read-only system except `/etc/resolv.conf`.

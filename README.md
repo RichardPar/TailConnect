@@ -27,12 +27,12 @@ Windows is next (see [Roadmap](#roadmap)).
 - **Accounts and tenants:** every account is its own private network. Sign-up can be off, by invite, with operator approval, or open. Accounts' machines never see each other.
 - **One-way sharing:** an account can share a single machine with another account. The other account's machines can then connect to it, but it can't connect back.
 - **Direct WireGuard paths** between devices, found by STUN and hole punching through NAT. When no direct path exists, traffic goes through the built-in relay, still end-to-end encrypted. Switching between the two takes about 3 seconds.
-- **MagicDNS:** every machine is reachable as `name.account.your-domain`, or just `name`. Split DNS through systemd-resolved, with a `resolv.conf` fallback.
+- **MagicDNS:** every machine is reachable as `name.account.your-domain`, or just `name`. An account can choose its own domain instead (`laptop.acme.internal`). Split DNS through systemd-resolved, with a `resolv.conf` fallback.
 - **Exit nodes:** turn on a Linux machine as an exit node, and other machines in its account can send all their internet traffic through it (`tc up --exit-node NAME`). Off for every machine until turned on.
 - **Access rules** within an account: tag machines, then allow *from → to on ports* (for example, laptops may reach the servers on SSH only).
 - **Machine lifecycle:** keys that expire after 180 days (or never, per machine), optional approval of new machines, and automatic removal of ephemeral machines.
 - **Pre-auth keys** for joining devices: single-use or reusable, ephemeral or pre-approved, with an expiry and revocation.
-- **Automatic HTTPS** from Let's Encrypt, built in: no web server, proxy or certbot.
+- **HTTPS built in:** automatic certificates from Let's Encrypt, or, on a LAN, a self-signed certificate that devices pin by fingerprint. No web server, proxy or certbot.
 - **Android app** for phones and tablets, with the same client inside.
 - **Standalone relays** near your machines, checked against the server; **metrics** for monitoring.
 - **Userspace mode** for containers and machines without root.
@@ -60,10 +60,11 @@ There are no settings files to edit. **[QUICKSTART.md](QUICKSTART.md)** walks th
 | Guide | What's in it |
 |---|---|
 | [Quick start](QUICKSTART.md) | From nothing to two connected devices and the web portal, in ten minutes |
-| [Installation](docs/installation.md) | Requirements, building, installing the server and clients, HTTPS, upgrading, uninstalling |
+| [Installation](docs/installation.md) | Requirements, building, installing the server and clients, HTTPS (Let's Encrypt, self-signed or your own certificate), upgrading, uninstalling |
 | [The web portal](docs/portal.md) | Every tab, column, button and setting of the portal, with screenshots |
 | [Usage](docs/usage.md) | Accounts and sign-up, joining devices, sharing machines, the web portal, admin CLI and API, the `tc` client, MagicDNS, relays |
 | [HTTPS with Let's Encrypt](docs/lets-encrypt.md) | Free certificates, obtained and renewed by the server itself: setup, testing, renewals, troubleshooting |
+| [HOWTO: DuckDNS and Let's Encrypt](docs/duckdns.md) | A home server reachable from anywhere with a free DuckDNS name and a trusted certificate, step by step |
 | [Android](docs/android.md) | The Android app: build, install over USB, join, use |
 | [LAN and internet setups](docs/network-setups.md) | Where to put the server: LAN only, on the internet, or at home reachable from outside; settings, ports and pitfalls |
 | [Configuration](docs/configuration.md) | Settings at a glance, then every flag, settings file, environment variable, port and file path |

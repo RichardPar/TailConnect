@@ -41,7 +41,7 @@ public class TcVpnService extends VpnService {
     static final String ACTION_CONNECT = "tailconnect.android.CONNECT";
     static final String ACTION_DISCONNECT = "tailconnect.android.DISCONNECT";
     static final String ACTION_LOGOUT = "tailconnect.android.LOGOUT";
-    static final String EXTRA_SERVER = "server", EXTRA_AUTHKEY = "authkey", EXTRA_HOSTNAME = "hostname";
+    static final String EXTRA_SERVER = "server", EXTRA_AUTHKEY = "authkey", EXTRA_HOSTNAME = "hostname", EXTRA_FP = "fp";
     private static final String TAG = "TailConnect";
 
     /** The last error from connecting, shown by the UI ("" = none). */
@@ -80,7 +80,8 @@ public class TcVpnService extends VpnService {
             // ACTION_CONNECT from the UI, or the system starting an always-on VPN
             // (then there are no extras: the daemon reconnects with its saved state).
             String server = extra(intent, EXTRA_SERVER), key = extra(intent, EXTRA_AUTHKEY), host = extra(intent, EXTRA_HOSTNAME);
-            worker.execute(() -> connect(server, key, host));
+            String fp = extra(intent, EXTRA_FP);
+            worker.execute(() -> connect(server, key, host, fp));
         }
         return START_STICKY;
     }
@@ -106,13 +107,13 @@ public class TcVpnService extends VpnService {
 
     // ---- connect / disconnect ----
 
-    private void connect(String server, String authKey, String hostname) {
+    private void connect(String server, String authKey, String hostname, String fp) {
         lastError = "";
         try {
             watchNetwork();
             startDaemon();
             connectBridge();
-            LocalApi.up(socketPath(getFilesDir()), server, authKey, hostname);
+            LocalApi.up(socketPath(getFilesDir()), server, authKey, hostname, fp);
         } catch (Exception e) {
             String msg = e.getMessage() == null ? e.toString() : e.getMessage();
             lastError = msg;

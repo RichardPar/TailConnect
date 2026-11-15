@@ -2,6 +2,8 @@
 
 `tc-control` and `tc-relay` can get free HTTPS certificates from [Let's Encrypt](https://letsencrypt.org) and renew them by themselves. Nothing else to install or run: no web server, no proxy, no certbot, no renewal cron job.
 
+Certificates are for servers only. Devices need no certificate of their own: they check the server's, like a browser checks a website's.
+
 - [Why HTTPS](#why-https)
 - [What you need](#what-you-need)
 - [Set it up](#set-it-up)
@@ -24,11 +26,11 @@ Without HTTPS, the control channel is still encrypted and authenticated, with No
 - lets the web portal be used by other people, because they type passwords into it;
 - carries the built-in relay too, so relayed traffic works wherever HTTPS does.
 
-On a LAN-only server with no public name, Let's Encrypt can't work. Pin the server key instead ([LAN only](network-setups.md#lan-only)).
+On a LAN-only server with no public name, or when ports 80 and 443 can't be opened, Let's Encrypt can't work. Use a [self-signed certificate](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed) instead: devices pin its fingerprint, and the portal is encrypted too. Or pin the server key ([LAN only](network-setups.md#lan-only)).
 
 ## What you need
 
-1. **A DNS name** for the server, such as `vpn.example.com`. Any domain you control works. A dynamic DNS name works too, if your home address changes.
+1. **A DNS name** for the server, such as `vpn.example.com`. Any domain you control works. A dynamic DNS name works too, if your home address changes: see [HOWTO: DuckDNS and Let's Encrypt](duckdns.md).
 2. **The name pointing at the server.** At your DNS provider, add an `A` record with the server's public IPv4 address. Add an `AAAA` record only if the server is also reachable over IPv6 (see [the IPv6 trap](#the-ipv6-trap)).
    ```sh
    dig +short vpn.example.com A        # the server's public IPv4 address

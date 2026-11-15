@@ -14,8 +14,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"strconv"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,11 +67,11 @@ type Resolver struct {
 
 	warnedNoUpstream atomic.Bool // logged once until upstreams are known again
 
-	mu     sync.RWMutex
-	cfg    Config
-	domains []string               // "tc.internal." etc., lowercase
-	hosts  map[string][]netip.Addr // keys with trailing dot
-	ptr    map[netip.Addr]string   // address → FQDN with trailing dot
+	mu      sync.RWMutex
+	cfg     Config
+	domains []string                // "tc.internal." etc., lowercase
+	hosts   map[string][]netip.Addr // keys with trailing dot
+	ptr     map[netip.Addr]string   // address → FQDN with trailing dot
 }
 
 func NewResolver(logf func(string, ...any)) *Resolver {

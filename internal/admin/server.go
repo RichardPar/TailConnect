@@ -45,10 +45,13 @@ type Info struct {
 	// MagicDNS domain under (e.g. "internal" allows "acme.internal").
 	// Empty: only operators can set account domains.
 	TenantDomainSuffixes []string
-	ControlURL string
-	Version    string
-	Signup     string        // sign-up mode (SignupOff, ...); "" = off
-	KeyExpiry  time.Duration // default key lifetime for machines (0 = never)
+	ControlURL           string
+	// TLSFingerprint is the pin of the server's self-signed certificate
+	// ("" when it has none): shown for clients to check and pin.
+	TLSFingerprint string
+	Version        string
+	Signup         string        // sign-up mode (SignupOff, ...); "" = off
+	KeyExpiry      time.Duration // default key lifetime for machines (0 = never)
 	// Traffic returns what machine id reported about its traffic (nil if
 	// nothing), from the control server. nil: no traffic in the portal.
 	Traffic func(id int64) *protocol.MachineTraffic
@@ -341,7 +344,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := map[string]any{
-		"machineKey": s.info.MachineKey, "baseDomain": s.info.BaseDomain, "controlURL": s.info.ControlURL,
+		"machineKey": s.info.MachineKey, "baseDomain": s.info.BaseDomain, "controlURL": s.info.ControlURL, "tlsFingerprint": s.info.TLSFingerprint,
 		"version": s.info.Version, "nodes": len(nodes), "online": online, "signup": s.info.Signup,
 		"pendingMachines": pendingMachines,
 	}
@@ -501,8 +504,8 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("admin: auth key created", "id", k.ID, "user", u.Name, "reusable", k.Reusable)
-	resp := map[string]any{"key": secret, "info": toAPIKey(k, s.now()), "joinURL": JoinURL(s.info.ControlURL, secret)}
-	if svg, err := qrSVG(JoinURL(s.info.ControlURL, secret)); err == nil {
+	resp := map[string]any{"key": secret, "info": toAPIKey(k, s.now()), "joinURL": JoinURL(s.info.ControlURL, secret, s.info.TLSFingerprint)}
+	if svg, err := qrSVG(JoinURL(s.info.ControlURL, secret, s.info.TLSFingerprint)); err == nil {
 		resp["qrSvg"] = svg
 	}
 	writeJSON(w, http.StatusCreated, resp)

@@ -22,7 +22,7 @@ The portal is where you manage the network in a browser: machines, auth keys, ac
 
 Open **port 7741 on the server** in a browser: `http://192.168.1.10:7741`, or `https://vpn.example.com:7741` on a server with HTTPS. The installer prints the address at the end.
 
-- **Over plain HTTP**, passwords typed into the portal cross your network unencrypted. On a network you trust that may be fine. Otherwise turn on [HTTPS](lets-encrypt.md); the portal then uses the same certificate.
+- **Over plain HTTP**, passwords typed into the portal cross your network unencrypted. On a network you trust that may be fine. Otherwise turn on HTTPS: [Let's Encrypt](lets-encrypt.md) for a server with a public name, or a [self-signed certificate](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed) on a LAN. The portal uses the same certificate. With a self-signed one, the browser warns once: check the fingerprint the server logged, then accept it.
 - **To keep the portal on the server only**, choose that in the installer (`sudo ./packaging/linux/install.sh server --reconfigure`), or set `-admin-listen 127.0.0.1:7741`. Then reach it through an SSH tunnel from your computer:
   ```sh
   ssh -L 7741:127.0.0.1:7741 you@server      # then open http://localhost:7741
@@ -121,7 +121,7 @@ A device joins with an auth key: `sudo tc up --server URL --authkey KEY`, or the
 
 The new key is shown **once**: copy it then. The server keeps only a hash.
 
-**The QR code** next to it holds the server's address and the key, as a `tailconnect://join` link. On an Android phone or tablet with the TailConnect app, point the camera at it and open the link: the app fills in the server and the key; you check the device name and tap Connect ([details](android.md#join-with-a-qr-code)). The address in the code is the server's public URL (`-public-url`, or the one the installer set). The table lists each key's uses and status (*active*, *used*, *expired* or *revoked*). **Revoke** stops a key from being used; machines that already joined with it stay.
+**The QR code** next to it holds the server's address and the key, as a `tailconnect://join` link. On an Android phone or tablet with the TailConnect app, point the camera at it and open the link: the app fills in the server and the key; you check the device name and tap Connect ([details](android.md#join-with-a-qr-code)). The address in the code is the server's public URL (`-public-url`, or the one the installer set). On a server with a [self-signed certificate](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed), the tab also shows the certificate's fingerprint, the join command includes `--tls-fingerprint`, and the QR code carries it, so devices trust that certificate only. The table lists each key's uses and status (*active*, *used*, *expired* or *revoked*). **Revoke** stops a key from being used; machines that already joined with it stay.
 
 ## Access rules
 
@@ -207,6 +207,6 @@ The server's own settings are command-line options, set in `/etc/default/tc-cont
 | Domains accounts may choose (My account → MagicDNS domain) | `-tenant-domain-suffixes internal` | `internal` |
 | The URL shown for joining | `-public-url` | derived from `-listen` |
 | Where the portal listens | `-admin-listen` | `:7741` (every address) |
-| HTTPS | `-acme-domain NAME`, or `-tls-cert`/`-tls-key` | off |
+| HTTPS | `-acme-domain NAME`, `-tls-self-signed`, or `-tls-cert`/`-tls-key` | off |
 
 All of them are in the [configuration reference](configuration.md#tc-control-serve). [Settings at a glance](configuration.md#settings-at-a-glance) lists every setting and where it's changed.

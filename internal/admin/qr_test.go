@@ -11,12 +11,18 @@ import (
 )
 
 func TestJoinURL(t *testing.T) {
-	u, err := url.Parse(JoinURL("http://192.168.1.10:7740", "tc-auth-abc"))
+	u, err := url.Parse(JoinURL("http://192.168.1.10:7740", "tc-auth-abc", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if u.Scheme != "tailconnect" || u.Host != "join" || u.Query().Get("server") != "http://192.168.1.10:7740" || u.Query().Get("key") != "tc-auth-abc" {
 		t.Fatalf("join URL: %s", u)
+	}
+	if u.Query().Has("fp") {
+		t.Fatal("fp without a fingerprint")
+	}
+	if f, _ := url.Parse(JoinURL("https://pi:7740", "k", "sha256:abc")); f.Query().Get("fp") != "sha256:abc" {
+		t.Fatalf("fingerprint missing: %s", f)
 	}
 	svg, err := qrSVG(u.String())
 	if err != nil {

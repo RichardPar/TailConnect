@@ -193,6 +193,9 @@ async function loadStatus() {
   stats.push(stat(s.baseDomain, "MagicDNS domain", true), stat(s.version || "dev", "server version", true));
   $("stats").replaceChildren(...stats);
   document.querySelectorAll(".control-url").forEach((e) => (e.textContent = s.controlURL || "URL"));
+  document.querySelectorAll(".tls-pin-arg").forEach((e) => (e.textContent = s.tlsFingerprint ? ` --tls-fingerprint ${s.tlsFingerprint}` : ""));
+  document.querySelectorAll(".tls-fp").forEach((e) => (e.textContent = s.tlsFingerprint || ""));
+  document.querySelectorAll(".tls-pin").forEach((e) => (e.hidden = !s.tlsFingerprint));
   const mb = $("machine-badge");
   mb.hidden = !s.pendingMachines;
   mb.textContent = s.pendingMachines || "";

@@ -24,12 +24,13 @@ final class LocalApi {
         return parse(request(socket, "GET", "/localapi/v1/status", null));
     }
 
-    static void up(String socket, String server, String authKey, String hostname) throws IOException {
+    static void up(String socket, String server, String authKey, String hostname, String tlsFingerprint) throws IOException {
         JSONObject req = new JSONObject();
         try {
             if (!server.isEmpty()) req.put("ControlURL", server);
             if (!authKey.isEmpty()) req.put("AuthKey", authKey);
             if (!hostname.isEmpty()) req.put("Hostname", hostname);
+            if (!tlsFingerprint.isEmpty()) req.put("TLSFingerprint", tlsFingerprint);
         } catch (JSONException e) {
             throw new IOException(e);
         }

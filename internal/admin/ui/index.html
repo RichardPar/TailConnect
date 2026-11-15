@@ -87,7 +87,8 @@
     <section data-panel="keys" hidden>
       <div class="card">
         <div class="card-head"><h2>Auth keys</h2></div>
-        <p class="muted intro">A device joins your network with <code>sudo tc up --server <span class="control-url">URL</span> --authkey KEY</code>.</p>
+        <p class="muted intro">A device joins your network with <code>sudo tc up --server <span class="control-url">URL</span><span class="tls-pin-arg"></span> --authkey KEY</code>.</p>
+        <p class="sub tls-pin" hidden>This server uses a self-signed certificate. Its fingerprint is <code class="tls-fp"></code>: if a device shows a different one, don't connect it.</p>
         <form id="key-form" class="inline-form">
           <label class="op-only">Account <select id="key-user"></select></label>
           <label>Expires

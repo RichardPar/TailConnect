@@ -22,6 +22,7 @@
 package magicsock
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -75,6 +76,7 @@ type Conn struct {
 	loopDone    chan struct{}
 
 	relayRecv chan relayPacket // from all relay clients; persists across Open/Close
+	relayTLS  *tls.Config      // for relays over HTTPS (nil = default checks)
 
 	mu        sync.Mutex
 	peers     map[key.NodePublic]*peer
@@ -337,6 +339,14 @@ func (c *Conn) updateRelaysLocked() {
 	}
 }
 
+// SetRelayTLS sets how relays' HTTPS certificates are checked (e.g. a
+// pinned self-signed certificate), for relay connections made from now on.
+func (c *Conn) SetRelayTLS(cfg *tls.Config) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.relayTLS = cfg
+}
+
 // relayClientLocked returns (creating if needed) the client for region id.
 func (c *Conn) relayClientLocked(id int) *relay.Client {
 	if id == 0 {
@@ -353,9 +363,10 @@ func (c *Conn) relayClientLocked(id int) *relay.Client {
 		return nil
 	}
 	rc, err := relay.NewClient(relay.ClientOptions{
-		URL:     u,
-		NodeKey: c.priv,
-		Logf:    c.logf,
+		URL:       u,
+		NodeKey:   c.priv,
+		Logf:      c.logf,
+		TLSConfig: c.relayTLS,
 		Recv: func(src key.NodePublic, pkt []byte) {
 			select {
 			case c.relayRecv <- relayPacket{src: src, data: slices.Clone(pkt)}:

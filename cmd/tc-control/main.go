@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -45,6 +46,7 @@ import (
 	"tailconnect/internal/protocol"
 	"tailconnect/internal/relay"
 	"tailconnect/internal/stun"
+	"tailconnect/internal/tlspin"
 )
 
 // version is set at build time: -ldflags "-X main.version=v0.1.0".
@@ -188,6 +190,8 @@ func cmdServe(args []string) error {
 	publicURL := fs.String("public-url", "", "URL clients use to reach this server (shown in the web portal)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file (enables HTTPS on both listeners)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
+	tlsSelfSigned := fs.Bool("tls-self-signed", false, "HTTPS with a certificate tc-control makes and signs itself (kept next to the database); clients pin its fingerprint with `tc up --tls-fingerprint`")
+	tlsNames := fs.String("tls-names", "", "-tls-self-signed: extra comma-separated DNS names or addresses the certificate covers (default: this machine's hostname, addresses and the -public-url host)")
 	acmeDomain := fs.String("acme-domain", "", "get HTTPS certificates from Let's Encrypt for this DNS name (comma-separated for several); the name must point at this server, and port 443 (or -acme-http-listen) be reachable from the internet")
 	acmeEmail := fs.String("acme-email", "", "contact address for the Let's Encrypt account (optional)")
 	acmeHTTP := fs.String("acme-http-listen", "", `also serve Let's Encrypt's checks on this address, e.g. ":80" (needed unless -listen is on port 443; it redirects other requests to HTTPS)`)
@@ -207,6 +211,12 @@ func cmdServe(args []string) error {
 
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return usageError("-tls-cert and -tls-key must be given together")
+	}
+	if *tlsSelfSigned && (*tlsCert != "" || *acmeDomain != "") {
+		return usageError("-tls-self-signed excludes -tls-cert and -acme-domain")
+	}
+	if *tlsNames != "" && !*tlsSelfSigned {
+		return usageError("-tls-names needs -tls-self-signed")
 	}
 	var certs *autotls.Manager
 	if *acmeDomain != "" {
@@ -330,15 +340,38 @@ func cmdServe(args []string) error {
 	if relaySrv != nil {
 		relaySrv.SetAllow(ctl.RelayAllowed) // tenants' packets never cross
 	}
-	if *tlsCert == "" && !isLoopback(*listen) {
-		log.Warn("control API is plain HTTP: traffic is protected by Noise, but clients fetch the server key "+
-			"trust-on-first-use. Use TLS, or have clients pin it with `tc up --server-key`.",
-			"server_key", ctl.MachinePublic().String())
+	var selfSigned *tlspin.SelfSigned
+	if *tlsSelfSigned {
+		names := tlspin.LocalNames()
+		for _, a := range []string{*listen, *adminListen} {
+			if h, _, err := net.SplitHostPort(a); err == nil && h != "" {
+				names = append(names, h)
+			}
+		}
+		if u, err := url.Parse(*publicURL); err == nil && u.Hostname() != "" {
+			names = append(names, u.Hostname())
+		}
+		for _, n := range strings.Split(*tlsNames, ",") {
+			names = append(names, n)
+		}
+		if selfSigned, err = tlspin.LoadOrCreate(filepath.Join(filepath.Dir(*dbPath), "tls"), names, time.Now()); err != nil {
+			return fmt.Errorf("self-signed certificate: %w", err)
+		}
+		if selfSigned.Reissued {
+			log.Info("issued a self-signed certificate", "names", selfSigned.Names)
+		}
+		log.Info("HTTPS with a self-signed certificate: clients must pin its fingerprint (tc up --tls-fingerprint ...)",
+			"fingerprint", selfSigned.Fingerprint)
 	}
 
 	scheme := "http"
-	if *tlsCert != "" || certs != nil {
+	if *tlsCert != "" || certs != nil || selfSigned != nil {
 		scheme = "https"
+	}
+	if scheme == "http" && !isLoopback(*listen) {
+		log.Warn("control API is plain HTTP: traffic is protected by Noise, but clients fetch the server key "+
+			"trust-on-first-use. Use TLS (-acme-domain or -tls-self-signed), or have clients pin it with `tc up --server-key`.",
+			"server_key", ctl.MachinePublic().String())
 	}
 	if *publicURL == "" {
 		*publicURL = scheme + "://" + *listen
@@ -375,7 +408,7 @@ func cmdServe(args []string) error {
 				log.Warn("nobody can sign in to the web portal as operator yet: run `tc-control users create NAME -operator -password` (or `tc-control admin-token`)")
 			}
 		}
-		if !isLoopback(*adminListen) && *tlsCert == "" && certs == nil {
+		if !isLoopback(*adminListen) && scheme == "http" {
 			log.Warn("the web portal is reachable over plain HTTP: passwords and session cookies cross the network unencrypted; "+
 				"turn on HTTPS (-acme-domain), or keep the portal on this machine (-admin-listen 127.0.0.1:7741)",
 				"listen", *adminListen)
@@ -385,7 +418,7 @@ func cmdServe(args []string) error {
 				"signup", *signup)
 		}
 		adm := admin.New(d, admin.Info{
-			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, TenantDomainSuffixes: suffixes, ControlURL: *publicURL, Version: version, Signup: *signup, KeyExpiry: keyLife,
+			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, TenantDomainSuffixes: suffixes, ControlURL: *publicURL, TLSFingerprint: fingerprintOf(selfSigned), Version: version, Signup: *signup, KeyExpiry: keyLife,
 			Traffic: ctl.Traffic,
 		}, log)
 		servers = append(servers, &http.Server{
@@ -395,9 +428,12 @@ func cmdServe(args []string) error {
 		names = append(names, "admin")
 	}
 
-	if certs != nil {
-		for _, srv := range servers {
+	for _, srv := range servers {
+		switch {
+		case certs != nil:
 			srv.TLSConfig = certs.TLSConfig()
+		case selfSigned != nil:
+			srv.TLSConfig = selfSigned.TLSConfig()
 		}
 	}
 	tlsOn := len(servers) // servers[:tlsOn] use TLS when it's on
@@ -438,7 +474,7 @@ func cmdServe(args []string) error {
 			switch {
 			case !useTLS:
 				err = srv.Serve(ln)
-			case certs != nil:
+			case certs != nil, selfSigned != nil:
 				err = srv.ServeTLS(ln, "", "")
 			case *tlsCert != "":
 				err = srv.ServeTLS(ln, *tlsCert, *tlsKey)
@@ -507,6 +543,14 @@ func cmdAdminToken(args []string) error {
 }
 
 // ---- users ----
+
+// fingerprintOf is a self-signed certificate's fingerprint ("" for none).
+func fingerprintOf(s *tlspin.SelfSigned) string {
+	if s == nil {
+		return ""
+	}
+	return s.Fingerprint
+}
 
 // baseDomainSetting stores serve's -domain, for the admin CLI.
 const baseDomainSetting = "base_domain"

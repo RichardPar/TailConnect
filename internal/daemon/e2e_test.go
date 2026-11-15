@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,6 +189,12 @@ func newControlWith(t testing.TB, mod func(*control.Config), noSTUNFlag bool) (*
 // newControlServer is newControlWith, also returning the control server.
 func newControlServer(t testing.TB, mod func(*control.Config), noSTUNFlag bool) (*db.DB, string, string, *control.Server) {
 	t.Helper()
+	return newControlServerTLS(t, mod, noSTUNFlag, nil)
+}
+
+// newControlServerTLS is newControlServer serving HTTPS with tlsCfg (nil: HTTP).
+func newControlServerTLS(t testing.TB, mod func(*control.Config), noSTUNFlag bool, tlsCfg *tls.Config) (*db.DB, string, string, *control.Server) {
+	t.Helper()
 	noSTUN := []bool{noSTUNFlag}
 	relays := control.EmbeddedRelayMap(0)
 	if len(noSTUN) == 0 || !noSTUN[0] {
@@ -220,7 +227,13 @@ func newControlServer(t testing.TB, mod func(*control.Config), noSTUNFlag bool) 
 	mux := http.NewServeMux()
 	mux.Handle(control.EmbeddedRelayPath, rs)
 	mux.Handle("/", ctl.Handler())
-	ts := httptest.NewServer(mux)
+	ts := httptest.NewUnstartedServer(mux)
+	if tlsCfg != nil {
+		ts.TLS = tlsCfg
+		ts.StartTLS()
+	} else {
+		ts.Start()
+	}
 	t.Cleanup(func() { ctl.Close(); rs.Close(); ts.Close(); cdb.Close() })
 	u, _ := cdb.CreateUser(context.Background(), "alice")
 	authKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: u.ID, Reusable: true, TTL: time.Hour})

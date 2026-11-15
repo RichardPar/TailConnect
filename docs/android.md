@@ -66,6 +66,8 @@ The quickest way. In the web portal, create an auth key (Auth keys → Generate 
 
 The app never connects from a link by itself: a link can come from anywhere, so you always see the server and decide. A key works once unless it's reusable; to join more devices with one code, make it reusable.
 
+**Self-signed servers.** If the server uses `-tls-self-signed`, the QR code also carries its certificate's fingerprint, and the app trusts that certificate only. If you type the address instead, the app shows the fingerprint the server presents and asks **Trust this server's certificate?** Compare it with the portal's Auth keys tab before tapping **They match: trust it**.
+
 ## Fill it in over USB
 
 To fill the form in from your computer while the device is on USB (handy when setting up several devices):

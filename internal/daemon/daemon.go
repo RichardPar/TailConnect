@@ -28,6 +28,7 @@ import (
 	"tailconnect/internal/key"
 	"tailconnect/internal/localapi"
 	"tailconnect/internal/protocol"
+	"tailconnect/internal/tlspin"
 )
 
 // Version is reported to control in Hostinfo.
@@ -65,16 +66,18 @@ type EngineParams struct {
 
 // persist is the on-disk state (state.json, mode 0600).
 type persist struct {
-	ControlURL  string            `json:",omitempty"`
-	ServerKey   key.MachinePublic `json:",omitempty"`
-	MachineKey  key.MachinePrivate
-	NodeKey     key.NodePrivate
-	DiscoKey    key.DiscoPrivate
-	Hostname    string `json:",omitempty"`
-	Registered  bool
-	WantRunning bool
-	Self        *protocol.Node `json:",omitempty"`
-	ExitNode    string         `json:",omitempty"` // chosen exit node ("" = none)
+	ControlURL string            `json:",omitempty"`
+	ServerKey  key.MachinePublic `json:",omitempty"`
+	// TLSFingerprint pins the control server's self-signed certificate.
+	TLSFingerprint string `json:",omitempty"`
+	MachineKey     key.MachinePrivate
+	NodeKey        key.NodePrivate
+	DiscoKey       key.DiscoPrivate
+	Hostname       string `json:",omitempty"`
+	Registered     bool
+	WantRunning    bool
+	Self           *protocol.Node `json:",omitempty"`
+	ExitNode       string         `json:",omitempty"` // chosen exit node ("" = none)
 	// DNSSearch is the last network map's search domains, for platforms
 	// that fix them when the tunnel starts (Android).
 	DNSSearch []string `json:",omitempty"`
@@ -238,9 +241,26 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 	if url == "" {
 		return errors.New("no control server configured: pass --server URL")
 	}
+	reqPin := ""
+	if req.TLSFingerprint != "" {
+		var err error
+		if reqPin, err = tlspin.ParseFingerprint(req.TLSFingerprint); err != nil {
+			return fmt.Errorf("--tls-fingerprint: %w", err)
+		}
+	}
+	pin := st.TLSFingerprint
+	if reqPin != "" {
+		pin = reqPin
+	}
 	if st.ControlURL != "" && url != st.ControlURL {
+		same, err := d.sameServer(url, st.ServerKey, pin)
+		if err != nil && req.AuthKey == "" {
+			// Can't tell (unreachable, or an untrusted certificate): say
+			// why, and leave the device as it is.
+			return err
+		}
 		d.stopLocked()
-		if d.sameServer(url, st.ServerKey) {
+		if same {
 			// The same server at a new address (new port, hostname or TLS).
 			// Safe to trust: the Noise handshake still authenticates the
 			// pinned key, whatever /key returned.
@@ -264,6 +284,10 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 		st.Hostname, _ = os.Hostname()
 	}
 	st.ControlURL = url
+	if reqPin != "" && reqPin != st.TLSFingerprint {
+		d.stopLocked() // relays reconnect with the new pin
+		st.TLSFingerprint = reqPin
+	}
 	if req.ExitNode != nil {
 		pref := strings.TrimSpace(*req.ExitNode)
 		d.mu.Lock()
@@ -291,14 +315,14 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 		}
 		if sk.IsZero() {
 			var err error
-			if sk, err = controlclient.FetchServerKey(ctx, url, nil); err != nil {
+			if sk, err = controlclient.FetchServerKey(ctx, url, controlclient.HTTPClient(tlspin.ClientConfig(st.TLSFingerprint))); err != nil {
 				return err
 			}
 			if strings.HasPrefix(url, "http://") {
 				d.opts.Logf("pinned control server key %s (fetched over plain HTTP: trust on first use)", sk.ShortString())
 			}
 		}
-		cc, err := controlclient.New(controlclient.Options{ServerURL: url, ServerKey: sk, MachineKey: st.MachineKey})
+		cc, err := controlclient.New(controlclient.Options{ServerURL: url, ServerKey: sk, MachineKey: st.MachineKey, TLSConfig: tlspin.ClientConfig(st.TLSFingerprint)})
 		if err != nil {
 			return err
 		}
@@ -362,7 +386,7 @@ func (d *Daemon) Logout() error {
 	st := d.st
 	d.mu.Unlock()
 	if st.Registered && !st.ServerKey.IsZero() {
-		if cc, err := controlclient.New(controlclient.Options{ServerURL: st.ControlURL, ServerKey: st.ServerKey, MachineKey: st.MachineKey}); err == nil {
+		if cc, err := controlclient.New(controlclient.Options{ServerURL: st.ControlURL, ServerKey: st.ServerKey, MachineKey: st.MachineKey, TLSConfig: tlspin.ClientConfig(st.TLSFingerprint)}); err == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := cc.Logout(ctx, st.NodeKey.Public()); err != nil {
 				d.opts.Logf("logout: server not informed: %v", err)
@@ -454,7 +478,7 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		fail(localapi.StateNeedsLogin, errors.New("no registration data; run `tc up --authkey ...`"))
 		return
 	}
-	cc, err := controlclient.New(controlclient.Options{ServerURL: st.ControlURL, ServerKey: st.ServerKey, MachineKey: st.MachineKey})
+	cc, err := controlclient.New(controlclient.Options{ServerURL: st.ControlURL, ServerKey: st.ServerKey, MachineKey: st.MachineKey, TLSConfig: tlspin.ClientConfig(st.TLSFingerprint)})
 	if err != nil {
 		fail(localapi.StateStopped, err)
 		return
@@ -480,6 +504,7 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		return
 	}
 	_ = eng.SetExitNode(st.ExitNode) // no map yet: nothing to apply
+	eng.SetRelayTLS(tlspin.ClientConfig(st.TLSFingerprint))
 	if err := eng.SetControlURL(st.ControlURL); err != nil {
 		logf("relay base URL: %v", err)
 	}
@@ -670,14 +695,19 @@ func LocalEndpoints(port uint16, excludeIface string) ([]netip.AddrPort, []netip
 }
 
 // sameServer reports whether the control server at url has the pinned key.
-func (d *Daemon) sameServer(url string, pinned key.MachinePublic) bool {
+// It fails if the key can't be fetched (unreachable, or a certificate that
+// isn't trusted), so a mistake isn't taken for a different server.
+func (d *Daemon) sameServer(url string, pinned key.MachinePublic, tlsPin string) (bool, error) {
 	if pinned.IsZero() {
-		return false
+		return false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	sk, err := controlclient.FetchServerKey(ctx, url, nil)
-	return err == nil && sk.Equal(pinned)
+	sk, err := controlclient.FetchServerKey(ctx, url, controlclient.HTTPClient(tlspin.ClientConfig(tlsPin)))
+	if err != nil {
+		return false, err
+	}
+	return sk.Equal(pinned), nil
 }
 
 // reportTraffic sends the control server this machine's per-peer WireGuard

@@ -301,7 +301,7 @@ Write requests must send `Content-Type: application/json`. Another account's mac
 
 | Command | What it does |
 |---|---|
-| `tc up --server URL --authkey KEY [--hostname NAME] [--server-key mkey:…]` | Join an account the first time. |
+| `tc up --server URL --authkey KEY [--hostname NAME] [--server-key mkey:…] [--tls-fingerprint sha256:…]` | Join an account the first time. `--tls-fingerprint` trusts a server's [self-signed certificate](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed). |
 | `tc up --exit-node NAME` | Send all internet traffic through exit node NAME; `--exit-node ""` stops ([exit nodes](#exit-nodes)). Without the flag the choice is unchanged; a new machine uses none. |
 | `tc up` | Reconnect after `tc down`. Also: `--server NEW` after the server moves; `--authkey` to re-register, e.g. after the machine was removed (a key of another account moves the machine there). |
 | `tc down` | Disconnect. The tunnel, routes and DNS settings are removed and the machine stays registered; it stays down across reboots until `tc up`. |

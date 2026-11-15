@@ -34,6 +34,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 | URL shown for joining | `-public-url` | derived |
 | HTTPS: automatic (Let's Encrypt) | `-acme-domain`, `-acme-http-listen`, `-acme-email`, `-acme-staging` | off ([guide](lets-encrypt.md)) |
 | HTTPS: your own certificate | `-tls-cert`, `-tls-key` | off |
+| HTTPS: a self-signed certificate | `-tls-self-signed` (extra names: `-tls-names`) | off |
 | Who may create accounts | `-signup off\|approval\|invite\|open` | `approval` |
 | How long machines stay authorised | `-key-expiry 180d` or `never` | 180 days |
 | Removing offline ephemeral machines | `-ephemeral-timeout` | 30 minutes |
@@ -84,6 +85,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 |---|---|---|
 | Server, auth key, name | `sudo tc up --server URL --authkey KEY --hostname NAME` | name: the OS hostname |
 | Pin the server key | `tc up --server-key mkey:…` | fetched (trust on first use, or checked by HTTPS) |
+| Trust a self-signed server certificate | `tc up --tls-fingerprint sha256:…` | only certificates from trusted authorities |
 | Send internet traffic through an [exit node](usage.md#exit-nodes) | `sudo tc up --exit-node NAME`; `--exit-node ""` stops | none; remembered in `state.json` |
 | DNS integration | `-dns auto\|systemd-resolved\|file\|off` | `auto` |
 | WireGuard port | `-port` | `41641` |
@@ -120,6 +122,8 @@ The coordination server: control API, built-in relay, STUN, web portal.
 | `-acme-email` | none | Contact address for the Let's Encrypt account (optional) |
 | `-acme-staging` | `false` | Use Let's Encrypt's test service (certificates clients won't trust) |
 | `-tls-cert`, `-tls-key` | none | Your own PEM certificate (with chain) and key, instead of `-acme-domain`. Turns on HTTPS for both the control and portal listeners. |
+| `-tls-self-signed` | off | HTTPS with a certificate `tc-control` makes itself, kept in `tls/` next to the database. It logs the certificate's fingerprint, and the portal shows it; clients trust it with `tc up --tls-fingerprint`. Excludes `-tls-cert` and `-acme-domain`. See [Self-signed certificate](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed). |
+| `-tls-names` | none | With `-tls-self-signed`: more comma-separated DNS names or addresses for the certificate, beyond the hostname, `hostname.local`, the machine's IPv4 addresses, `::1` and the `-public-url` host. |
 | `-metrics-listen` | none | Serve [metrics](usage.md#monitoring) at `/metrics` on this address (plain HTTP, no login), e.g. `127.0.0.1:7743` |
 | `-log-json` | `false` | Log in JSON instead of text |
 
@@ -178,7 +182,7 @@ The client daemon. It runs as root, or with `CAP_NET_ADMIN`.
 
 | Command | Flags |
 |---|---|
-| `tc up` | `--server URL`, `--authkey KEY` (or `$TC_AUTHKEY`), `--hostname NAME`, `--server-key mkey:…`, `--exit-node NAME` (`""` = none; omitted = unchanged) |
+| `tc up` | `--server URL`, `--authkey KEY` (or `$TC_AUTHKEY`), `--hostname NAME`, `--server-key mkey:…`, `--tls-fingerprint sha256:…`, `--exit-node NAME` (`""` = none; omitted = unchanged) |
 | `tc down` | |
 | `tc status` | `--json` |
 | `tc ip [PEER]` | `-4`, `-6` |

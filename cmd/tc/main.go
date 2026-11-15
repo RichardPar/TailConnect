@@ -108,11 +108,12 @@ func cmdUp(c *localapi.Client, args []string) error {
 	authKey := fs.String("authkey", "", "pre-auth key (needed to register this machine)")
 	hostname := fs.String("hostname", "", "name for this machine (default: OS hostname)")
 	serverKey := fs.String("server-key", "", "pin the server's machine key (mkey:...) instead of fetching it")
+	tlsFP := fs.String("tls-fingerprint", "", "trust the server's self-signed HTTPS certificate with this fingerprint (sha256:..., as tc-control logs it and the web portal shows it)")
 	timeout := fs.Duration("timeout", 20*time.Second, "how long to wait for the tunnel to come up")
 	exitNode := fs.String("exit-node", "", `send all internet traffic through this exit node (name or tunnel IP); "" stops (default: unchanged, off on a new machine)`)
 	fs.Parse(args)
 
-	req := localapi.UpRequest{ControlURL: *server, AuthKey: *authKey, Hostname: *hostname}
+	req := localapi.UpRequest{ControlURL: *server, AuthKey: *authKey, Hostname: *hostname, TLSFingerprint: *tlsFP}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "exit-node" {
 			req.ExitNode = exitNode

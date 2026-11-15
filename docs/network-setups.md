@@ -18,7 +18,7 @@ Where you put the control server decides who can reach your network and from whe
 | Server runs on | A machine on your network (home server, Raspberry Pi) | A machine with a public address (cloud VM, rented server) | A machine on your home network |
 | Devices can be | On that network | Anywhere | At home and away |
 | You need | Nothing else | A DNS name for the server | A DNS name, and a router you can forward ports on |
-| HTTPS | Optional: pin the server key instead | Automatic (Let's Encrypt) | Automatic (Let's Encrypt) |
+| HTTPS | Optional: self-signed (devices pin its fingerprint), or pin the server key | Automatic (Let's Encrypt) | Automatic (Let's Encrypt) |
 | Ports open to the internet | None | TCP 443, UDP 3478 | TCP 443, UDP 3478, forwarded to the server |
 
 In every setup:
@@ -64,7 +64,24 @@ Don't forward anything on the router.
 
 ### Devices
 
-Over plain HTTP the control channel is still encrypted (Noise). But the first time a device connects, it trusts whatever server key it's given ("trust on first use"). On a LAN you trust, that's usually fine. To rule out a fake server, pin the key instead. Read it once on the server:
+Over plain HTTP the control channel is still encrypted (Noise). But the first time a device connects, it trusts whatever server key it's given ("trust on first use"). On a LAN you trust, that's usually fine. To rule out a fake server, there are two ways.
+
+**HTTPS with a self-signed certificate** (recommended: it also encrypts the web portal, so passwords don't cross the LAN in the clear). Add `-tls-self-signed` to the server and switch the public URL to `https://`:
+
+```sh
+# /etc/default/tc-control
+TC_CONTROL_ARGS="-domain home.internal -tls-self-signed -public-url https://192.168.1.10:7740"
+```
+
+After `sudo systemctl restart tc-control`, the log and the portal's Auth keys tab show the certificate's fingerprint. Devices join with it:
+
+```sh
+sudo tc up --server https://192.168.1.10:7740 --tls-fingerprint sha256:sfg_RIP4… --authkey tc-auth-…
+```
+
+The portal's join command and QR codes already include it. Details in [Self-signed certificate](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed).
+
+**Or pin the server key** and stay on plain HTTP. Read it once on the server:
 
 ```sh
 curl http://192.168.1.10:7740/key           # {"Version":2,"MachineKey":"mkey:520ff7…"}
@@ -142,7 +159,7 @@ The server runs at home, and your router forwards the needed ports to it. Device
 ### What you need
 
 - **A public address at home.** Check it: if the WAN address shown on your router's status page differs from what `curl -4 ifconfig.me` reports, your provider puts you behind carrier-grade NAT, and port forwarding can't work. Ask your provider for a public address, or use the [internet setup](#on-the-internet) with a small VM.
-- **A DNS name** for your home address. If your provider changes the address from time to time, use a dynamic DNS service; many routers have a built-in client for it.
+- **A DNS name** for your home address. If your provider changes the address from time to time, use a dynamic DNS service; many routers have a built-in client for it. [HOWTO: DuckDNS and Let's Encrypt](duckdns.md) walks through this whole setup with a free DuckDNS name.
 - **A fixed LAN address for the server** (a DHCP reservation), say `192.168.1.10`.
 
 ### Router
