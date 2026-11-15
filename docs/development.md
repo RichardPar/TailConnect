@@ -73,6 +73,8 @@ What each measures, current figures with charts and the known limits are in [Per
 | `internal/acl` | Access rules: selectors (`tag:`, names), ports, and who may reach whom |
 | `internal/autotls` | HTTPS certificates from Let's Encrypt, obtained and renewed in the process |
 | `internal/metrics` | Counters and gauges in the Prometheus text format (no dependencies) |
+| `internal/androidbridge` | How `tcd-android` gets its VPN interface (and the network's DNS servers and addresses) from the Android app |
+| `cmd/tcd-android`, `android/` | The Android client daemon, and the app around it (Java, built by `android/build.sh`; see [Android](android.md)) |
 | `internal/ipam`, `internal/key` | Address allocation, typed keys |
 | `packaging/linux` | systemd units, settings files, `install.sh` |
 | `tests/e2e` | Network-namespace test scripts and helpers |

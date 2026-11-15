@@ -52,6 +52,7 @@ On the server, open **TCP 7740** and **UDP 3478**. On devices with a firewall, o
 |---|---|
 | [Installation](docs/installation.md) | Requirements, building, installing the server and clients, HTTPS, upgrading, uninstalling |
 | [Usage](docs/usage.md) | Accounts and sign-up, joining devices, sharing machines, the web portal, admin CLI and API, the `tc` client, MagicDNS, relays |
+| [Android](docs/android.md) | The Android app: build, install over USB, join, use |
 | [LAN and internet setups](docs/network-setups.md) | Where to put the server: LAN only, on the internet, or at home reachable from outside; settings, ports and pitfalls |
 | [Configuration](docs/configuration.md) | Every flag, settings file, environment variable, port and file path |
 | [How it works](docs/how-it-works.md) | Architecture, NAT traversal, MagicDNS, tenants and sharing, security model |
@@ -68,5 +69,5 @@ On the server, open **TCP 7740** and **UDP 3478**. On devices with a firewall, o
 5. ✅ MagicDNS: in-tunnel resolver, split DNS via systemd-resolved, resolv.conf fallback, reverse lookups, optional upstream forwarding
 6. ✅ Multi-tenant: accounts with passwords, sign-up modes and approval, isolated networks per account, one-way machine sharing with an in-tunnel packet filter
 7. Windows port (Wintun, Windows service, NRPT)
-8. Android port (gomobile, VpnService)
+8. ✅ Android app: the Go client with a VpnService and a phone/tablet GUI, built with the SDK's own tools (no Gradle or NDK)
 9. ✅ Hardening: key expiry, machine approval and ephemeral cleanup; access rules with tags; batched UDP and delta maps; standalone relays checked against the server; MagicDNS over TCP; built-in HTTPS from Let's Encrypt; metrics

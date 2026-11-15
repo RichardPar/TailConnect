@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := -trimpath
 ARCHES  ?= amd64 arm64
 
-.PHONY: build test e2e bench perf perf-budget cross dist install-server install-client clean
+.PHONY: build test e2e bench perf perf-budget cross dist android android-install install-server install-client clean
 
 build: ## bin/tc-control, bin/tcd, bin/tc, bin/tc-relay
 	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/ ./cmd/...
@@ -31,6 +31,12 @@ perf-budget: ## fail if key operations exceed their performance budgets
 cross: ## compile checks for the other target platforms
 	CGO_ENABLED=0 GOOS=windows go build ./...
 	CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...
+
+android: ## android/build/tailconnect.apk (needs a JDK and the Android SDK; see docs/android.md)
+	VERSION=$(VERSION) android/build.sh
+
+android-install: ## build the APK and install it on the device connected over USB (adb)
+	VERSION=$(VERSION) android/build.sh install
 
 dist: ## dist/tailconnect-VERSION-linux-ARCH.tar.gz for each of ARCHES
 	@mkdir -p dist

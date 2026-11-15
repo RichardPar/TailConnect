@@ -1,6 +1,6 @@
 # Installation
 
-This guide sets up a TailConnect network: one **control server** (`tc-control`) and any number of **devices** running the client daemon (`tcd`) and CLI (`tc`). It covers Linux. Windows and Android clients are on the [roadmap](../README.md#roadmap).
+This guide sets up a TailConnect network: one **control server** (`tc-control`) and any number of **devices** running the client daemon (`tcd`) and CLI (`tc`). It covers Linux servers and clients. For phones and tablets, see [Android](android.md); Windows is on the [roadmap](../README.md#roadmap).
 
 **First decide where the server goes:** only on your LAN, on the internet, or at home but reachable from outside. [LAN and internet setups](network-setups.md) has the settings, ports and pitfalls for each.
 
