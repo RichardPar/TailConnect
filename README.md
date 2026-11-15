@@ -41,20 +41,17 @@ Windows is next (see [Roadmap](#roadmap)).
 On the **server**, from a release tarball (or `make dist`):
 
 ```sh
-sudo ./packaging/linux/install.sh server
-sudo tc-control users create alice -operator -password             # your account (prompts for a password)
-sudo tc-control keys create -user alice -reusable -expiration 24h  # prints tc-auth-…
+sudo ./packaging/linux/install.sh server     # asks a few questions, creates your account, prints a join key
 ```
 
 On **every device**:
 
 ```sh
-sudo ./packaging/linux/install.sh client
-sudo tc up --server http://SERVER:7740 --authkey tc-auth-…
+sudo ./packaging/linux/install.sh client     # asks for the server URL and the key, then joins
 tc status
 ```
 
-Open **TCP 7740** and **UDP 3478** on the server. **[QUICKSTART.md](QUICKSTART.md)** walks through it all, including HTTPS, Android and the web portal, in about ten minutes.
+There are no settings files to edit. **[QUICKSTART.md](QUICKSTART.md)** walks through it all, including HTTPS, Android and the web portal, in about ten minutes.
 
 ## Documentation
 

@@ -68,26 +68,62 @@ Pick a machine every device can reach: a small VPS, a home server, or one of the
 sudo ./packaging/linux/install.sh server
 ```
 
-![Terminal: installing tc-control from a release tarball with install.sh server, creating an operator account and a reusable auth key, and the server's startup log](images/term-server-setup.png)
+On a first install it asks a few questions and does the rest itself. This is a real run, on a LAN:
 
-The installer:
+```
+== Server settings
+Machines are named NAME.ACCOUNT.DOMAIN, e.g. laptop.alice.home.internal.
+Pick the domain now: changing it later renames every machine.
+MagicDNS domain [home.internal]:
 
-- copies `tc-control` to `/usr/local/bin`;
-- installs and starts the `tc-control` systemd unit. It runs as an unprivileged dynamic user, with its database in `/var/lib/tc-control/control.db`;
-- creates `/etc/default/tc-control` for your options (the file is kept on upgrades).
+Where will your devices reach this server?
+  1) Only on this LAN: no public name needed (devices away from home can't connect)
+  2) From anywhere, over HTTPS: needs a DNS name pointing here, and port 443 reachable
+     from the internet (a free certificate comes from Let's Encrypt automatically)
+Choose 1 or 2 [1]:
+This server's address on the LAN (give it a fixed address on your router) [192.168.10.124]:
+  saved in /etc/default/tc-control
+tc-control is running (v0.6.0-dev).
+  If this machine or your network has a firewall, open: 7740/tcp 3478/udp
 
-Then, once, create your own account and a key for joining your devices:
+== Your account
+You sign in to the web portal with it, and your devices join it. It's an operator
+account: it can also manage the server and other people's accounts.
+Account name [richard]: alice
+Choose a password (at least 10 characters).
+New password for alice:
+Repeat it:
+  created alice
 
-```sh
-sudo tc-control users create alice -operator -password             # prompts for a password (10+ characters)
-sudo tc-control keys create -user alice -reusable -expiration 24h  # auth key for joining devices
+== Ready
+Join your devices with this key. It works for 24 hours, on any number of devices:
+
+  tc-auth-fkbfs4lo••••••••••••••••••••••••
+
+  Linux:    sudo ./packaging/linux/install.sh client     (asks for the server and the key)
+  Android:  in the TailConnect app, Server: http://192.168.10.124:7740  and the key above
+  Server URL for devices: http://192.168.10.124:7740
 ```
 
-The account name becomes part of your machines' names (`laptop.alice.tc.internal`), so it's lowercase letters, digits and `-`. `-operator` lets the account run the server in the web portal; other people's accounts are ordinary **tenants**, each with its own private network ([accounts and sign-up](usage.md#accounts-and-sign-up)). The auth key is printed **once** and stored only as a hash. `tc-control` on the server finds the installed database automatically, so no `-db` flag is needed, and you can run these commands whether or not the service is running.
+With choice **2**, it asks for the server's DNS name, the HTTPS port (443, or another with port 80 for Let's Encrypt's checks) and an optional e-mail, and turns on [automatic HTTPS](lets-encrypt.md). If `ufw` or `firewalld` is active, it offers to open the ports.
 
-### Choose your options
+The installer:
+- copies `tc-control` to `/usr/local/bin`;
+- installs and starts the `tc-control` systemd unit. It runs as an unprivileged dynamic user, with its database in `/var/lib/tc-control/control.db`;
+- writes your answers to `/etc/default/tc-control`, which is kept on upgrades;
+- creates your account, an **operator**, which can run the server in the web portal. Other people's accounts are ordinary **tenants**, each with its own private network ([accounts and sign-up](usage.md#accounts-and-sign-up)). Nothing needs creating in the portal first: this is the first account;
+- creates an auth key for joining devices. It's printed **once** and stored only as a hash.
 
-Edit `/etc/default/tc-control` and restart:
+**Later:**
+- `sudo ./packaging/linux/install.sh server --reconfigure` asks the questions again; machines and accounts are kept.
+- Running the installer again without it upgrades in place, without questions.
+- `--no-setup` skips the questions, for scripts. Then set the options yourself (below), and create the account with `sudo tc-control users create NAME -operator -password` and a key with `sudo tc-control keys create -user NAME -reusable`.
+
+`tc-control` on the server finds the installed database by itself, so these commands need no `-db` flag, and work whether or not the service is running.
+
+### Other options
+
+The installer covers the common settings. For the others, such as who may sign up, edit `/etc/default/tc-control` and restart:
 
 ```sh
 # /etc/default/tc-control
@@ -216,10 +252,23 @@ On every device, from the tarball or source directory:
 
 ```sh
 sudo ./packaging/linux/install.sh client
-sudo tc up --server http://SERVER:7740 --authkey tc-auth-…
 ```
 
-![Terminal: install.sh client starting tcd, tc up joining as laptop.richard.home.internal, and systemctl status showing tcd active](images/term-client-install.png)
+It asks for the server URL, the auth key (hidden as you type) and a name for the device, and joins:
+
+```
+tcd is running (v0.6.0-dev).
+
+== Join a network
+The server URL and an auth key come from whoever runs the server
+(sudo tc-control keys create -user NAME, or Auth keys in the web portal).
+Server URL (e.g. http://192.168.1.10:7740 or https://vpn.example.com): http://192.168.10.124:7740
+Auth key (tc-auth-…; input hidden):
+Name for this device [laptop]:
+Connected as laptop.alice.home.internal (100.64.0.2, fd7c:7c0e:a1e0::6440:2)
+```
+
+If joining fails (a mistyped key, say), it shows why and offers to try again. To join a different server later, run it with `--reconfigure`. Without a terminal, or with `--no-setup`, it only installs; then join with `sudo tc up --server URL --authkey KEY`.
 
 The installer copies `tcd` and `tc` to `/usr/local/bin`, then installs and starts the `tcd` unit. That unit runs as root with only `CAP_NET_ADMIN` and `CAP_NET_RAW`, and keeps its keys in `/var/lib/tailconnect`. It also creates `/etc/default/tcd` for options.
 
