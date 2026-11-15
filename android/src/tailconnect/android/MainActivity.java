@@ -572,9 +572,11 @@ public class MainActivity extends Activity {
     private View peerRow(JSONObject p) {
         LinearLayout row = column();
         row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        // The panel's colour is the path from this device: grey idle, green direct, amber relay.
+        String[] path = path(p);
         GradientDrawable bg = new GradientDrawable();
         bg.setCornerRadius(dp(12));
-        bg.setColor(0x14808080);
+        bg.setColor(Integer.parseInt(path[1]));
         row.setBackground(bg);
 
         LinearLayout top = new LinearLayout(this);
@@ -583,15 +585,6 @@ public class MainActivity extends Activity {
         String shortName = p.optString("HostName", name);
         TextView nameView = text(shortName, 18, true);
         top.addView(nameView, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        String[] path = path(p);
-        TextView chip = text(path[0], 14, true);
-        chip.setTextColor(0xFFFFFFFF);
-        chip.setPadding(dp(10), dp(3), dp(10), dp(3));
-        GradientDrawable chipBg = new GradientDrawable();
-        chipBg.setCornerRadius(dp(10));
-        chipBg.setColor(Integer.parseInt(path[1]));
-        chip.setBackground(chipBg);
-        top.addView(chip);
         row.addView(top);
 
         List<String> addrs = addresses(p);
@@ -607,21 +600,25 @@ public class MainActivity extends Activity {
             cm.setPrimaryClip(ClipData.newPlainText("TailConnect address", copy));
             Toast.makeText(this, "Copied " + copy, Toast.LENGTH_SHORT).show();
         });
+        row.setContentDescription(shortName + ", " + path[0]);
         LinearLayout.LayoutParams lp = margins(0, dp(10), 0, 0);
         row.setLayoutParams(lp);
         return row;
     }
 
-    /** The path label and its colour for a peer. */
+    /**
+     * The path from this device to a peer, for screen readers, and its panel
+     * colour: a light tint of grey (idle), green (direct) or amber (relay).
+     */
     private static String[] path(JSONObject p) {
-        if (!p.optBoolean("Active")) return new String[]{"Idle", String.valueOf(GREY)};
+        if (!p.optBoolean("Active")) return new String[]{"idle", String.valueOf(0x14808080)};
         String ep = p.optString("CurrentEndpoint");
         if (!ep.isEmpty()) {
             double ms = p.optDouble("LatencyMS", 0);
-            String label = ms > 0 ? String.format(Locale.ROOT, "Direct · %.0f ms", ms) : "Direct";
-            return new String[]{label, String.valueOf(GREEN)};
+            String label = ms > 0 ? String.format(Locale.ROOT, "direct, %.0f ms", ms) : "direct";
+            return new String[]{label, String.valueOf(GREEN & 0x00FFFFFF | 0x40000000)};
         }
-        return new String[]{"Relay", String.valueOf(AMBER)};
+        return new String[]{"through the relay", String.valueOf(AMBER & 0x00FFFFFF | 0x40000000)};
     }
 
     private static List<String> addresses(JSONObject n) {
