@@ -41,7 +41,11 @@ type Config struct {
 	// BaseDomain is the MagicDNS suffix, e.g. "tc.internal".
 	BaseDomain string
 	Relays     protocol.RelayMap
-	// Nameservers are upstream DNS servers pushed to clients (optional).
+	// DisableMagicDNS stops clients from configuring MagicDNS.
+	DisableMagicDNS bool
+	// Nameservers are upstream resolvers pushed to clients (optional). When
+	// set, clients send all DNS queries through MagicDNS, which forwards
+	// names outside BaseDomain to these.
 	Nameservers []netip.Addr
 	// KeepAlive is the interval between keep-alive messages on map streams
 	// (default 30s). Each also refreshes the node's last-seen time.
@@ -75,8 +79,8 @@ const settingMachineKey = "control.machine_key"
 // New loads (or creates on first run) the server's machine key and returns a
 // server. Call Close to stop background work and drop Noise connections.
 func New(ctx context.Context, d *db.DB, cfg Config, log *slog.Logger) (*Server, error) {
-	if cfg.BaseDomain == "" {
-		return nil, errors.New("control: BaseDomain is required")
+	if err := ValidDomain(cfg.BaseDomain); err != nil {
+		return nil, fmt.Errorf("control: BaseDomain: %w", err)
 	}
 	if cfg.KeepAlive <= 0 {
 		cfg.KeepAlive = 30 * time.Second
@@ -436,7 +440,7 @@ func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, 
 	resp := protocol.MapResponse{
 		Peers: []protocol.Node{},
 		DNS: protocol.DNSConfig{
-			MagicDNS:    true,
+			MagicDNS:    !s.cfg.DisableMagicDNS,
 			Domain:      s.cfg.BaseDomain,
 			Resolver:    protocol.MagicDNSAddr,
 			Nameservers: s.cfg.Nameservers,
@@ -594,3 +598,18 @@ const (
 	ReadHeaderTimeout = 10 * time.Second
 	IdleTimeout       = 120 * time.Second
 )
+
+// ValidDomain checks that d (lowercase, no trailing dot) can be a MagicDNS
+// base domain: two or more labels of letters, digits and '-'.
+func ValidDomain(d string) error {
+	labels := strings.Split(d, ".")
+	if d == "" || len(d) > 200 || len(labels) < 2 {
+		return fmt.Errorf("%q: want a domain like tc.internal", d)
+	}
+	for _, l := range labels {
+		if l == "" || db.SanitizeName(l) != l {
+			return fmt.Errorf("%q: labels must be lowercase letters, digits and '-'", d)
+		}
+	}
+	return nil
+}

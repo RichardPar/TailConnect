@@ -108,7 +108,7 @@ func TestServerKeyStable(t *testing.T) {
 	if !k.Equal(f.srv.MachinePublic()) {
 		t.Fatal("fetched key mismatch")
 	}
-	s2, err := New(context.Background(), f.db, Config{BaseDomain: "x"}, slog.Default())
+	s2, err := New(context.Background(), f.db, Config{BaseDomain: "x.internal"}, slog.Default())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestKeepAliveFiltered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, _ := New(context.Background(), d, Config{BaseDomain: "x", KeepAlive: 20 * time.Millisecond}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s, _ := New(context.Background(), d, Config{BaseDomain: "x.internal", KeepAlive: 20 * time.Millisecond}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(func() { s.Close(); ts.Close(); d.Close() })
 	f := &fixture{t: t, db: d, srv: s, ts: ts}

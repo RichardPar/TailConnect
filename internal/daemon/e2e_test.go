@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -367,5 +369,70 @@ func dump(t *testing.T, ns ...*testNode) {
 	for _, n := range ns {
 		b, _ := json.MarshalIndent(n.d.Status(), "", " ")
 		t.Logf("status: %s", b)
+	}
+}
+
+// resolver returns a Go resolver that sends its queries through n's tunnel
+// to the MagicDNS address, as the host's stub resolver would.
+func resolver(n *testNode) *net.Resolver {
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return n.tnet().DialContext(ctx, "udp", "100.100.100.100:53")
+	}}
+}
+
+func TestMagicDNS(t *testing.T) {
+	cdb, url, authKey := newControl(t)
+	a, b := newTestNode(t, "alpha"), newTestNode(t, "beta")
+	for _, n := range []struct {
+		n    *testNode
+		host string
+	}{{a, "alpha"}, {b, "beta"}} {
+		if err := n.n.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: authKey, Hostname: n.host}); err != nil {
+			t.Fatalf("up %s: %v", n.host, err)
+		}
+	}
+	waitFor(t, "alpha running with 1 peer", running(a, 1))
+	waitFor(t, "beta running with 1 peer", running(b, 1))
+	ipA, ipB := selfIP(t, a), selfIP(t, b)
+
+	if d := a.d.Status().DNS; d == nil || d.Domain != "e2e.internal" || d.HostConfig != "off" {
+		t.Fatalf("DNS status: %+v", d)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r := resolver(a)
+	addrs, err := r.LookupNetIP(ctx, "ip", "Beta.E2E.internal")
+	if err != nil {
+		t.Fatalf("lookup beta: %v", err)
+	}
+	if len(addrs) != 2 || !slices.Contains(addrs, ipB) {
+		t.Fatalf("beta resolves to %v, want %v and its IPv6 address", addrs, ipB)
+	}
+	if self, err := r.LookupNetIP(ctx, "ip4", "alpha.e2e.internal"); err != nil || len(self) != 1 || self[0] != ipA {
+		t.Fatalf("self lookup: %v %v", self, err)
+	}
+	if names, err := r.LookupAddr(ctx, ipB.String()); err != nil || len(names) != 1 || names[0] != "beta.e2e.internal." {
+		t.Fatalf("reverse lookup of %s: %v %v", ipB, names, err)
+	}
+	var dnsErr *net.DNSError
+	if _, err := r.LookupNetIP(ctx, "ip", "gamma.e2e.internal"); !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
+		t.Fatalf("unknown name: want NXDOMAIN, got %v", err)
+	}
+
+	// Renaming a node in control reaches every client's resolver.
+	nodes, _ := cdb.ListNodes(context.Background(), 0)
+	for _, n := range nodes {
+		if n.GivenName == "beta" {
+			if err := cdb.RenameNode(context.Background(), n.ID, "db-server"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	waitFor(t, "renamed node resolves", func() bool {
+		got, err := r.LookupNetIP(ctx, "ip4", "db-server.e2e.internal")
+		return err == nil && len(got) == 1 && got[0] == ipB
+	})
+	if _, err := r.LookupNetIP(ctx, "ip4", "beta.e2e.internal"); err == nil {
+		t.Fatal("old name still resolves after rename")
 	}
 }

@@ -346,6 +346,11 @@ func (d *Daemon) Status() localapi.Status {
 	if d.eng != nil {
 		stats = d.eng.Stats()
 		s.HomeRelay, s.RelayConnected = d.eng.HomeRelay(), d.eng.RelayConnected()
+		if ds := d.eng.DNSStatus(); ds.Domain != "" {
+			s.DNS = &localapi.DNSStatus{
+				Domain: ds.Domain, Resolver: protocol.MagicDNSAddr, HostConfig: ds.Mode, SplitDNS: ds.Split, Error: ds.Error,
+			}
+		}
 	}
 	self := d.st.Self
 	if d.netmap != nil {

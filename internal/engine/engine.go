@@ -23,6 +23,8 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 
+	"tailconnect/internal/dns"
+	"tailconnect/internal/ipam"
 	"tailconnect/internal/key"
 	"tailconnect/internal/magicsock"
 	"tailconnect/internal/protocol"
@@ -74,8 +76,11 @@ type Config struct {
 	// OnEndpointsChanged is called when this node's advertised endpoints or
 	// home relay change (e.g. STUN learned a new public address).
 	OnEndpointsChanged func()
-	Logf               func(format string, args ...any)
-	Verbose            bool // log wireguard-go internals
+	// DNS points the host's resolver at MagicDNS (nil = leave host DNS alone;
+	// the in-tunnel resolver still answers at 100.100.100.100).
+	DNS     dns.OSConfigurator
+	Logf    func(format string, args ...any)
+	Verbose bool // log wireguard-go internals
 }
 
 type peerState struct {
@@ -89,9 +94,16 @@ type Engine struct {
 	logf   func(string, ...any)
 	pub    key.NodePublic
 
+	resolver *dns.Resolver
+	dnsTUN   *dns.TUN
+	osDNS    dns.OSConfigurator
+
 	mu         sync.Mutex
 	peers      map[key.NodePublic]peerState
 	lastRouter RouterConfig
+	lastOSDNS  dns.OSConfig
+	dnsErr     string
+	dnsDomain  string
 	sawMap     bool
 	closed     bool
 }
@@ -104,12 +116,17 @@ func New(cfg Config, priv key.NodePrivate) (*Engine, error) {
 	if cfg.Router == nil {
 		cfg.Router = NoopRouter{}
 	}
+	if cfg.DNS == nil {
+		cfg.DNS = dns.NoopConfigurator{}
+	}
+	resolver := dns.NewResolver(cfg.Logf)
+	dnsTUN := dns.WrapTUN(cfg.TUN, resolver, protocol.MagicDNSAddr, protocol.MagicDNSAddr6, cfg.Logf)
 	magic := magicsock.New(magicsock.Options{PrivateKey: priv, DiscoKey: cfg.DiscoKey, Logf: cfg.Logf, OnEndpointsChanged: cfg.OnEndpointsChanged})
 	wgLog := &device.Logger{Verbosef: device.DiscardLogf, Errorf: prefixed(cfg.Logf, "wg: ")}
 	if cfg.Verbose {
 		wgLog.Verbosef = prefixed(cfg.Logf, "wg: ")
 	}
-	dev := device.NewDevice(cfg.TUN, magic, wgLog)
+	dev := device.NewDevice(dnsTUN, magic, wgLog)
 	// Peers' endpoints are node keys interpreted by magicsock; WireGuard must
 	// not replace them with the source address of received packets.
 	dev.DisableSomeRoamingForBrokenMobileSemantics()
@@ -125,7 +142,11 @@ func New(cfg Config, priv key.NodePrivate) (*Engine, error) {
 		magic.Shutdown()
 		return nil, fmt.Errorf("engine: bring device up: %w", err)
 	}
-	return &Engine{dev: dev, magic: magic, router: cfg.Router, logf: cfg.Logf, pub: priv.Public(), peers: map[key.NodePublic]peerState{}}, nil
+	return &Engine{
+		dev: dev, magic: magic, router: cfg.Router, logf: cfg.Logf, pub: priv.Public(),
+		resolver: resolver, dnsTUN: dnsTUN, osDNS: cfg.DNS,
+		peers: map[key.NodePublic]peerState{},
+	}, nil
 }
 
 func prefixed(logf func(string, ...any), p string) func(string, ...any) {
@@ -141,6 +162,9 @@ func (e *Engine) Close() {
 	}
 	e.closed = true
 	e.mu.Unlock()
+	if err := e.osDNS.Close(); err != nil {
+		e.logf("dns: revert host configuration: %v", err)
+	}
 	if err := e.router.Close(); err != nil {
 		e.logf("router close: %v", err)
 	}
@@ -229,6 +253,10 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 		time.AfterFunc(rand.N(maxKickJitter), func() { e.kickHandshake(k) })
 	}
 
+	magicDNS := nm.DNS.MagicDNS && nm.DNS.Domain != ""
+	if magicDNS {
+		routes = append(routes, netip.PrefixFrom(protocol.MagicDNSAddr, 32), netip.PrefixFrom(protocol.MagicDNSAddr6, 128))
+	}
 	slices.SortFunc(routes, comparePrefix)
 	self := slices.Clone(nm.Self.Addresses)
 	slices.SortFunc(self, comparePrefix)
@@ -239,7 +267,106 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 		}
 		e.lastRouter = rc
 	}
+	e.reconfigDNSLocked(nm, magicDNS)
 	return nil
+}
+
+// reconfigDNSLocked updates the in-tunnel resolver and then the host's DNS
+// settings (after routes, so the resolver is reachable once the host uses
+// it). Host DNS failures are reported in status but don't fail the map:
+// the tunnel itself works without them.
+func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
+	var osc dns.OSConfig
+	if on {
+		domain := strings.TrimSuffix(strings.ToLower(nm.DNS.Domain), ".")
+		resolver := nm.DNS.Resolver
+		if !resolver.IsValid() {
+			resolver = protocol.MagicDNSAddr
+		}
+		osc = dns.OSConfig{Nameservers: []netip.Addr{resolver}, SearchDomains: []string{domain}}
+		if len(nm.DNS.Nameservers) == 0 && e.osDNS.SupportsSplitDNS() {
+			// Split DNS: only MagicDNS names and reverse lookups of tunnel
+			// addresses; the host keeps its resolvers for everything else.
+			osc.MatchDomains = append([]string{domain}, reverseZones()...)
+		}
+	}
+	var dnsErr string
+	if !osc.Equal(e.lastOSDNS) {
+		if err := e.osDNS.Set(osc); err != nil {
+			e.logf("dns: configure host (%s): %v", e.osDNS.Mode(), err)
+			dnsErr = err.Error()
+		} else {
+			e.lastOSDNS = osc
+			if on && e.osDNS.Mode() != dns.ModeOff {
+				e.logf("dns: host uses MagicDNS for %v via %s", orAll(osc.MatchDomains), e.osDNS.Mode())
+			}
+		}
+	} else if e.dnsErr != "" {
+		dnsErr = e.dnsErr
+	}
+	e.dnsErr = dnsErr
+
+	cfg := dns.Config{ReversePrefixes: []netip.Prefix{ipam.DefaultV4, ipam.DefaultV6}, Hosts: map[string][]netip.Addr{}}
+	if on {
+		cfg.Domain = nm.DNS.Domain
+		add := func(n protocol.Node) {
+			if n.Name == "" {
+				return
+			}
+			for _, p := range n.Addresses {
+				name := strings.ToLower(n.Name)
+				cfg.Hosts[name] = append(cfg.Hosts[name], p.Addr())
+			}
+		}
+		add(nm.Self)
+		for _, p := range nm.Peers {
+			add(p)
+		}
+		upstream := nm.DNS.Nameservers
+		if len(upstream) == 0 && !e.osDNS.SupportsSplitDNS() {
+			upstream = e.osDNS.HostResolvers() // everything comes to us; pass it on
+		}
+		for _, a := range upstream {
+			if a == protocol.MagicDNSAddr || a == protocol.MagicDNSAddr6 {
+				continue // never forward to ourselves
+			}
+			cfg.Upstream = append(cfg.Upstream, netip.AddrPortFrom(a, 53))
+		}
+		e.dnsDomain = cfg.Domain
+	} else {
+		e.dnsDomain = ""
+	}
+	e.resolver.SetConfig(cfg)
+	e.dnsTUN.SetEnabled(on)
+}
+
+func orAll(d []string) any {
+	if len(d) == 0 {
+		return "all names"
+	}
+	if len(d) > 3 {
+		return fmt.Sprintf("%s and %d reverse zones", d[0], len(d)-1)
+	}
+	return d
+}
+
+// reverseZones covers PTR lookups for all tunnel addresses.
+func reverseZones() []string {
+	return append(dns.ReverseZones(ipam.DefaultV4), dns.ReverseZones(ipam.DefaultV6)...)
+}
+
+// DNSStatus describes MagicDNS on this node.
+type DNSStatus struct {
+	Domain string // "" when MagicDNS is off
+	Mode   string // how the host is configured ("systemd-resolved", "file", "off")
+	Split  bool   // only MagicDNS names are sent to the resolver
+	Error  string // last host configuration error
+}
+
+func (e *Engine) DNSStatus() DNSStatus {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return DNSStatus{Domain: e.dnsDomain, Mode: e.osDNS.Mode(), Split: len(e.lastOSDNS.MatchDomains) > 0, Error: e.dnsErr}
 }
 
 // kickHandshake makes WireGuard send a keepalive to k, which starts a

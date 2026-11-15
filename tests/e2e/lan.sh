@@ -83,7 +83,7 @@ ok "tc-control up"
 
 echo "== daemons"
 for n in a b; do
-	ip netns exec "$n" tcd -state "$WORK/state-$n" -socket "/run/tc-$n.sock" >"$LOG/tcd-$n.log" 2>&1 &
+	ip netns exec "$n" tcd -state "$WORK/state-$n" -socket "/run/tc-$n.sock" -dns off >"$LOG/tcd-$n.log" 2>&1 &
 	pids+=($!)
 done
 for n in a b; do wait_for 5 "tcd-$n socket" test -S "/run/tc-$n.sock"; done
@@ -117,7 +117,7 @@ ok "status shows active peer"
 
 echo "== restart resumes session"
 kill "${pids[1]}"; wait "${pids[1]}" 2>/dev/null || true
-ip netns exec a tcd -state "$WORK/state-a" -socket "/run/tc-a.sock" >>"$LOG/tcd-a.log" 2>&1 &
+ip netns exec a tcd -state "$WORK/state-a" -socket "/run/tc-a.sock" -dns off >>"$LOG/tcd-a.log" 2>&1 &
 pids[1]=$!
 wait_for 10 "alpha running after restart" bash -c "ip netns exec a tc --socket /run/tc-a.sock status --json | grep -q '\"State\": \"Running\"'"
 wait_for 10 "alpha → beta after restart" ip netns exec a ping -c1 -W1 "$IPB"

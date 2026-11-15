@@ -2,7 +2,7 @@
 
 A self-hosted mesh VPN built on WireGuard, for Linux, Windows and Android. One small coordination server hands out addresses and keys. Every device then talks to every other device directly over WireGuard.
 
-**Status: milestone 4.** Linux client, an encrypted and authenticated control channel, and a WireGuard mesh with NAT traversal. Devices behind different NATs connect directly by hole punching, and fall back to a relay when that's impossible (blocked UDP, very strict NATs). MagicDNS, Windows and Android are next (see [Roadmap](#roadmap)).
+**Status: milestone 5.** Linux client, an encrypted and authenticated control channel, and a WireGuard mesh with NAT traversal. Devices behind different NATs connect directly by hole punching, and fall back to a relay when that's impossible (blocked UDP, very strict NATs). Every device can reach the others by name (`ping laptop`) through MagicDNS. Windows and Android are next (see [Roadmap](#roadmap)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/admin-machines-dark.png">
@@ -22,6 +22,7 @@ A self-hosted mesh VPN built on WireGuard, for Linux, Windows and Android. One s
   - [3. Use the admin web UI](#3-use-the-admin-web-ui)
   - [4. Install and join clients](#4-install-and-join-clients)
   - [5. Verify the mesh](#5-verify-the-mesh)
+  - [6. Use names (MagicDNS)](#6-use-names-magicdns)
   - [Manage from the command line](#manage-from-the-command-line)
 - [Configuration reference](#configuration-reference)
 - [Security notes](#security-notes)
@@ -40,7 +41,8 @@ A self-hosted mesh VPN built on WireGuard, for Linux, Windows and Android. One s
 3. **Data plane.** Each map is applied to WireGuard as a diff, so existing sessions survive. Every peer gets a /32 or /128 route on `tc0`.
 4. **Direct or relayed.** *magicsock*, TailConnect's WireGuard transport, picks a path for every packet. It sends directly over a path that has been confirmed, and otherwise through the **relay** built into `tc-control`. The relay only forwards packets that are already WireGuard-encrypted. A direct path that stops answering is detected in about 3 seconds, and traffic moves to the relay.
 5. **NAT traversal.** Each node learns its public address with **STUN**, sent from its WireGuard socket to `tc-control` (UDP 3478), and advertises it. When two peers start talking, they exchange authenticated **disco** pings with each other's addresses. A *CallMeMaybe* message sent through the relay makes both sides send at the same moment, which opens a hole in both NATs. The first authenticated pong confirms the path and measures its latency, and heartbeat pings keep it, and the NAT mapping, alive while the peers are active. Each node picks the relay region with the lowest STUN round-trip time as its home relay.
-6. **Resilience.** If the control server goes away, the tunnel keeps running on the last map and `tcd` reconnects with backoff. If an admin removes a device, its tunnel is torn down and it must log in again.
+6. **MagicDNS.** Every client answers DNS for `<name>.<domain>` itself, from its network map, at `100.100.100.100` inside its own tunnel. `tcd` catches those packets on the TUN device before they reach WireGuard, so no socket is opened and peers can't query it. The OS is set up to send only that domain (plus reverse lookups of tunnel addresses) there, and to keep using its usual resolvers for everything else.
+7. **Resilience.** If the control server goes away, the tunnel keeps running on the last map and `tcd` reconnects with backoff. If an admin removes a device, its tunnel is torn down and it must log in again.
 
 ---
 
@@ -124,7 +126,27 @@ sudo tc up --server http://SERVER:8080 --authkey tc-auth-…
 
 - `tc status` lists every peer. `active` means a WireGuard handshake completed in the last 3 minutes. `direct ADDR (N ms)` means packets go straight to that address, often the peer's NAT-mapped public address, with the measured round-trip time. `relay N` means they currently go through relay region N (or would, for an idle peer). The header shows this node's home relay.
 - `tc ip -4 PEER` prints a peer's tunnel address.
-- `ip route show dev tc0` shows one route per peer, tagged `proto 124`.
+- `ip route show dev tc0` shows one route per peer, tagged `proto 124`, plus one for the MagicDNS address `100.100.100.100`.
+
+### 6. Use names (MagicDNS)
+
+Every machine is reachable as `<name>.<domain>` (`-domain` on the server, `tc.internal` by default). Thanks to the search domain, the short name works too: `ssh laptop`, `ping natbox`. Names are the ones shown in `tc status` and the admin UI. **Rename** a machine there, or with `tc-control nodes rename`, and the new name works everywhere within a few seconds.
+
+![Terminal: tc status shows MagicDNS via systemd-resolved; resolvectl shows tc0 using 100.100.100.100 for home.internal; getent and ping resolve devbox and natbox by short name; a reverse lookup returns devbox.home.internal; example.com still resolves via the Wi-Fi link](docs/images/term-magicdns.png)
+
+How `tcd` sets up the OS (`tcd -dns`, default `auto`):
+
+| Mode | When `auto` picks it | What it does |
+|---|---|---|
+| `systemd-resolved` | `/etc/resolv.conf` points at resolved's stub (127.0.0.53): Ubuntu, Fedora, Mint, Debian with resolved | Split DNS on the `tc0` link via `resolvectl`: only `.<domain>` and tunnel reverse zones go to MagicDNS. Reverted when `tcd` stops. |
+| `file` | any other `/etc/resolv.conf` | Rewrites `resolv.conf` to `nameserver 100.100.100.100` plus the search domain. MagicDNS forwards other names to the nameservers that were there before. The original is kept in the state directory and restored on stop (and at the next start, after a crash). |
+| `off` | `tcd -tun userspace`, or `tcd` running in a network namespace other than the host's | Leaves the OS alone. Query `100.100.100.100` directly, e.g. `dig @100.100.100.100 laptop.tc.internal`. |
+
+`tc status` shows the mode in use (`MagicDNS: home.internal (systemd-resolved, only .home.internal names)`), and any error configuring it.
+
+To send **all** DNS through the tunnel, for example to a resolver your devices should all use, start the server with `-dns-nameservers 1.1.1.1,9.9.9.9`. Clients then route every query to MagicDNS, which answers `.<domain>` itself and forwards the rest to those servers. Turn MagicDNS off for everyone with `-magic-dns=false`.
+
+> Limits for now: queries over UDP only (oversized forwarded answers come back truncated, and a TCP retry to `100.100.100.100` fails), and Windows/Android OS integration arrives with those ports.
 
 ### Manage from the command line
 
@@ -144,6 +166,8 @@ The admin CLI works directly on the database, so it works whether or not the ser
 | `-listen` | `:8080` | Control API that clients connect to |
 | `-admin-listen` | `127.0.0.1:8081` | Admin web UI and API (`""` disables it) |
 | `-domain` | `tc.internal` | MagicDNS suffix: machines are named `<name>.<domain>` |
+| `-magic-dns` | `true` | Clients resolve `<name>.<domain>` and point the OS at it (`=false` turns it off) |
+| `-dns-nameservers` | none | Comma-separated upstream resolvers. When set, clients send all DNS through MagicDNS, which forwards other names to these. |
 | `-public-url` | derived | URL shown in the admin UI |
 | `-tls-cert`, `-tls-key` | none | Turn on HTTPS for both listeners |
 | `-relay` | `true` | Serve the built-in relay at `/relay` on the control listener (registered nodes only) |
@@ -184,6 +208,8 @@ A relative URL such as `/relay` means "on the control server". `STUNPort` advert
 | `-socket` | `/run/tailconnect/tcd.sock` | Local API socket used by `tc` |
 | `-tun` | `tc0` | TUN interface name, or `userspace` for unprivileged mode |
 | `-port` | `41641` | WireGuard UDP port; falls back to a random port if busy |
+| `-dns` | `auto` | How to point the OS at MagicDNS: `auto`, `systemd-resolved`, `file` or `off` (see [MagicDNS](#6-use-names-magicdns)) |
+| `-resolv-conf` | `/etc/resolv.conf` | File rewritten in `file` mode |
 | `-verbose` | `false` | Log WireGuard internals |
 
 ### `tc`
@@ -192,7 +218,7 @@ A relative URL such as `/relay` means "on the control server". `STUNPort` advert
 |---|---|
 | `tc up [--server URL] [--authkey KEY] [--hostname NAME] [--server-key mkey:…]` | Register (first time) and connect. The auth key can also come from `$TC_AUTHKEY`. |
 | `tc down` | Stop the tunnel and keep the registration |
-| `tc status [--json]` | Show this machine and its peers |
+| `tc status [--json]` | Show this machine, its peers and the MagicDNS setup |
 | `tc ip [-4\|-6] [PEER]` | Print tunnel addresses |
 | `tc logout` | Remove this machine from the network and forget its keys |
 
@@ -219,6 +245,7 @@ Hole punching works through the usual home-router NATs, which keep the same publ
 - Over plain HTTP, a client trusts the server key it receives on first connection. Use `-tls-cert/-tls-key`, or pin the key with `tc up --server-key`.
 - Auth keys and the admin token are stored only as SHA-256 hashes. The admin UI uses HMAC-signed `SameSite=Strict` session cookies, accepts only JSON for writes, checks request origin, and sends a strict CSP.
 - Disco messages are sealed with NaCl box between the peers' disco keys (published in the network map), so path discovery can't be spoofed to divert traffic.
+- MagicDNS only answers the local host. Its packets are caught on the way into the tunnel, so peers can't reach it or use it as an open resolver.
 - WireGuard traffic is end-to-end encrypted between devices; the control server never sees it. Relays forward packets that are already encrypted. When a client connects to a relay, it proves it owns its node key with a NaCl box, so nobody can claim another node's key to intercept its packets. The built-in relay also refuses nodes that aren't registered.
 
 ---
@@ -239,6 +266,7 @@ Hole punching works through the usual home-router NATs, which keep the same publ
 | `internal/magicsock` | WireGuard transport: per-packet path choice, disco path discovery, STUN, home relay choice |
 | `internal/disco` | Path-discovery messages (ping, pong, CallMeMaybe), sealed with NaCl box |
 | `internal/stun` | STUN Binding client and server (RFC 5389) |
+| `internal/dns` | MagicDNS: resolver, TUN packet interception, OS configuration (systemd-resolved, resolv.conf) |
 | `internal/relay` | Relay protocol, server and client |
 | `internal/localapi` | `tc` ↔ `tcd` API over a Unix socket (SO_PEERCRED) |
 | `internal/admin` | Admin web server: JSON API and embedded UI |
@@ -255,7 +283,8 @@ go test -race ./...    # includes an in-process two-node mesh test (userspace ne
 tests/e2e/lan.sh       # real TUN, routes and ping across network namespaces;
                        # no root needed if unprivileged user namespaces are enabled
 tests/e2e/nat.sh       # two nodes behind separate NAT routers: hole punching,
-                       # relay fallback and recovery (TC_DISCO_DEBUG=1 logs disco)
+                       # relay fallback and recovery (TC_DISCO_DEBUG=1 logs disco),
+                       # and MagicDNS lookups through glibc (resolv.conf mode)
 GOOS=windows go build ./... && GOOS=android GOARCH=arm64 go build ./...
 ```
 
@@ -267,7 +296,7 @@ GOOS=windows go build ./... && GOOS=android GOARCH=arm64 go build ./...
 2. ✅ Linux client (`tcd`/`tc`), Noise control channel, streaming network map, WireGuard mesh, userspace mode, systemd units
 3. ✅ magicsock, relay fallback (built into `tc-control`, plus standalone `tc-relay`), ~3s failover
 4. ✅ NAT traversal: STUN, authenticated disco pings, CallMeMaybe hole punching, latency-based home relay
-5. MagicDNS (`<name>.<domain>` resolved on every device)
+5. ✅ MagicDNS: in-tunnel resolver, split DNS via systemd-resolved, resolv.conf fallback, reverse lookups, optional upstream forwarding
 6. Windows port (Wintun, Windows service, NRPT)
 7. Android port (gomobile, VpnService)
 8. Hardening: ACLs, key expiry, node approval, ephemeral node cleanup, packaging

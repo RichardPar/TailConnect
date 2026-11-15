@@ -42,10 +42,22 @@ type Status struct {
 	ListenPort uint16 `json:",omitempty"`
 	// HomeRelay is the relay region this node is reachable through, and
 	// RelayConnected whether that connection is up.
-	HomeRelay      int  `json:",omitempty"`
-	RelayConnected bool `json:",omitempty"`
+	HomeRelay      int        `json:",omitempty"`
+	RelayConnected bool       `json:",omitempty"`
+	DNS            *DNSStatus `json:",omitempty"`
 	Self           *PeerStatus
 	Peers          []PeerStatus
+}
+
+// DNSStatus describes MagicDNS on this node.
+type DNSStatus struct {
+	Domain   string     // names are <host>.Domain
+	Resolver netip.Addr // in-tunnel resolver
+	// HostConfig is how the OS is pointed at the resolver: "systemd-resolved",
+	// "file" (resolv.conf) or "off" (query the resolver directly).
+	HostConfig string
+	SplitDNS   bool   // only MagicDNS names go to the resolver
+	Error      string `json:",omitempty"` // last failure configuring the OS
 }
 
 type PeerStatus struct {

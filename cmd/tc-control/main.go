@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -123,6 +124,8 @@ func cmdServe(args []string) error {
 	listen := fs.String("listen", ":8080", "client-facing control API address")
 	adminListen := fs.String("admin-listen", "127.0.0.1:8081", `admin web UI/API address ("" disables)`)
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
+	magicDNS := fs.Bool("magic-dns", true, "clients resolve <node>.<domain> names in-tunnel and point the OS at them")
+	nameservers := fs.String("dns-nameservers", "", "comma-separated upstream resolvers for all other names; clients then send all DNS through MagicDNS (default: clients keep their own resolvers)")
 	publicURL := fs.String("public-url", "", "URL clients use to reach this server (shown in the admin UI)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file (enables HTTPS on both listeners)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
@@ -140,6 +143,21 @@ func cmdServe(args []string) error {
 
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return usageError("-tls-cert and -tls-key must be given together")
+	}
+	*domain = strings.TrimSuffix(strings.ToLower(*domain), ".")
+	if err := control.ValidDomain(*domain); err != nil {
+		return usageError("-domain: " + err.Error())
+	}
+	var upstream []netip.Addr
+	for _, f := range strings.Split(*nameservers, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		a, err := netip.ParseAddr(f)
+		if err != nil {
+			return usageError("-dns-nameservers: " + err.Error())
+		}
+		upstream = append(upstream, a)
 	}
 	d, err := openDB(*dbPath)
 	if err != nil {
@@ -188,7 +206,7 @@ func cmdServe(args []string) error {
 		defer relaySrv.Close()
 	}
 
-	ctl, err := control.New(ctx, d, control.Config{BaseDomain: *domain, Relays: relays}, log)
+	ctl, err := control.New(ctx, d, control.Config{BaseDomain: *domain, Relays: relays, DisableMagicDNS: !*magicDNS, Nameservers: upstream}, log)
 	if err != nil {
 		return err
 	}

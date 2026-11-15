@@ -17,6 +17,9 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 DeviceAllow=/dev/net/tun rw
 NoNewPrivileges=yes
 ProtectSystem=strict
+# MagicDNS: on hosts without systemd-resolved, tcd points resolv.conf at the
+# in-tunnel resolver (and restores it on stop). With resolved it uses D-Bus.
+ReadWritePaths=-/etc/resolv.conf
 ProtectHome=yes
 PrivateTmp=yes
 

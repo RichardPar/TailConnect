@@ -187,6 +187,21 @@ func cmdStatus(c *localapi.Client, args []string) error {
 	if st.Error != "" {
 		fmt.Println("Warning:", st.Error)
 	}
+	if d := st.DNS; d != nil {
+		how := d.HostConfig
+		switch {
+		case d.HostConfig == "off":
+			how = "host DNS not configured; query " + d.Resolver.String()
+		case d.SplitDNS:
+			how += ", only ." + d.Domain + " names"
+		default:
+			how += ", all names"
+		}
+		fmt.Printf("MagicDNS: %s (%s)\n", d.Domain, how)
+		if d.Error != "" {
+			fmt.Println("Warning: DNS:", d.Error)
+		}
+	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 3, ' ', 0)
 	if st.Self != nil {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", first4(st.Self.Addresses), shortName(st.Self.Name, st.Domain), st.Self.User, st.Self.OS, "(this machine)")

@@ -10,14 +10,17 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 
 	"tailconnect/internal/daemon"
+	"tailconnect/internal/dns"
 	"tailconnect/internal/engine"
 	"tailconnect/internal/localapi"
+	"tailconnect/internal/protocol"
 )
 
 var version = "dev"
@@ -27,6 +30,8 @@ func main() {
 	socket := flag.String("socket", localapi.DefaultSocket, "local API socket")
 	tunName := flag.String("tun", "tc0", `TUN interface name, or "userspace" for unprivileged in-process networking`)
 	port := flag.Uint("port", engine.DefaultPort, "WireGuard UDP port (0 = random)")
+	dnsMode := flag.String("dns", dns.ModeAuto, `how to point the host's DNS at MagicDNS: auto, systemd-resolved, file (rewrite resolv.conf) or off`)
+	resolvConf := flag.String("resolv-conf", "/etc/resolv.conf", "resolv.conf path (for -dns file)")
 	verbose := flag.Bool("verbose", false, "verbose WireGuard logging")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -80,8 +85,21 @@ func main() {
 				tdev.Close()
 				return nil, err
 			}
-			cfg.TUN, cfg.Router = tdev, r
-			return engine.New(cfg, ep.NodeKey)
+			osdns, err := dns.NewOSConfigurator(dns.OSOptions{
+				Mode: *dnsMode, Interface: name, ResolvConf: *resolvConf,
+				Backup: filepath.Join(*stateDir, "resolv.conf.backup"), Logf: logf,
+			})
+			if err != nil {
+				// The tunnel works without host DNS; report and carry on.
+				logf("%v; MagicDNS is only reachable at %s", err, protocol.MagicDNSAddr)
+				osdns = dns.NoopConfigurator{}
+			}
+			cfg.TUN, cfg.Router, cfg.DNS = tdev, r, osdns
+			e, err := engine.New(cfg, ep.NodeKey)
+			if err != nil {
+				osdns.Close()
+			}
+			return e, err
 		},
 	})
 	if err != nil {

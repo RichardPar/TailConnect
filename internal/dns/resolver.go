@@ -56,9 +56,9 @@ type Resolver struct {
 
 	mu     sync.RWMutex
 	cfg    Config
-	domain string                // "tc.internal." lowercase
+	domain string                  // "tc.internal." lowercase
 	hosts  map[string][]netip.Addr // keys with trailing dot
-	ptr    map[netip.Addr]string // address → FQDN with trailing dot
+	ptr    map[netip.Addr]string   // address → FQDN with trailing dot
 }
 
 func NewResolver(logf func(string, ...any)) *Resolver {

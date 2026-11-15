@@ -8,6 +8,25 @@ import (
 	"strings"
 )
 
+// DNS configuration modes (Linux; other platforms support auto and off).
+const (
+	ModeAuto     = "auto"             // systemd-resolved if it manages resolv.conf, else ModeFile
+	ModeResolved = "systemd-resolved" // per-link split DNS via resolvectl
+	ModeFile     = "file"             // rewrite resolv.conf (no split DNS)
+	ModeOff      = "off"
+)
+
+// OSOptions configures NewOSConfigurator.
+type OSOptions struct {
+	Mode       string // one of the Mode constants ("" = auto)
+	Interface  string // tunnel interface name (for systemd-resolved)
+	ResolvConf string // default /etc/resolv.conf
+	// Backup is where ModeFile keeps the original resolv.conf while it is
+	// replaced. A backup left by a crash is restored on start.
+	Backup string
+	Logf   func(string, ...any)
+}
+
 // OSConfig is the DNS configuration to apply to the host.
 type OSConfig struct {
 	// Nameservers to use (the in-tunnel resolver). Empty: revert to the
@@ -69,8 +88,9 @@ func parseResolvConf(b []byte) resolvConf {
 		switch f[0] {
 		case "nameserver":
 			if len(f) > 1 {
-				// Zone suffixes ("fe80::1%eth0") are dropped by ParseAddr failing.
-				if a, err := netip.ParseAddr(f[1]); err == nil {
+				// Link-local servers with a zone ("fe80::1%eth0") are skipped:
+				// they are only for forwarding, which needs a plain address.
+				if a, err := netip.ParseAddr(f[1]); err == nil && a.Zone() == "" {
 					rc.Nameservers = append(rc.Nameservers, a)
 				}
 			}
