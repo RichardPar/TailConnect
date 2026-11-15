@@ -186,7 +186,7 @@ func cmdServe(args []string) error {
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file (enables HTTPS on both listeners)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
 	acmeDomain := fs.String("acme-domain", "", "get HTTPS certificates from Let's Encrypt for this DNS name (comma-separated for several); the name must point at this server, and port 443 (or -acme-http-listen) be reachable from the internet")
-	acmeEmail := fs.String("acme-email", "", "email address for Let's Encrypt's expiry notices (optional)")
+	acmeEmail := fs.String("acme-email", "", "contact address for the Let's Encrypt account (optional)")
 	acmeHTTP := fs.String("acme-http-listen", "", `also serve Let's Encrypt's checks on this address, e.g. ":80" (needed unless -listen is on port 443; it redirects other requests to HTTPS)`)
 	acmeStaging := fs.Bool("acme-staging", false, "use Let's Encrypt's test service (untrusted certificates, for trying a setup)")
 	metricsListen := fs.String("metrics-listen", "", `serve metrics (Prometheus text format) at /metrics on this address, e.g. "127.0.0.1:7743" ("" = off)`)

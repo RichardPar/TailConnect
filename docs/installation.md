@@ -149,7 +149,7 @@ Over plain HTTP, the control channel is still encrypted and authenticated with N
 
 ```sh
 # /etc/default/tc-control
-TC_CONTROL_ARGS="-listen :443 -acme-domain vpn.example.com -acme-email you@example.com"
+TC_CONTROL_ARGS="-listen :443 -acme-domain vpn.example.com"
 ```
 
 ```sh
@@ -159,12 +159,13 @@ curl https://vpn.example.com/key       # the first request fetches the certifica
 
 Clients then join with `--server https://vpn.example.com`. Open TCP 443 instead of 7740.
 
-- **Another port than 443?** Let's Encrypt connects only to ports 443 and 80. Keep your port and also serve its checks on port 80: `-listen :7740 -acme-http-listen :80`. Port 80 then redirects everything else to HTTPS. Clients use `https://vpn.example.com:7740`.
-- **Trying it out:** `-acme-staging` uses Let's Encrypt's test service, with generous limits but certificates that clients don't trust. Remove it, and the `acme` folder next to the database, for real certificates.
-- **Where certificates live:** in `acme/` next to the database (`/var/lib/tc-control/acme`). They're renewed about a month before they expire, with no restart.
-- **Several names:** `-acme-domain vpn.example.com,vpn.example.org`.
-
-If it can't work (HTTPS on a port other than 443 with no `-acme-http-listen`), `tc-control` refuses to start and says why.
+**[HTTPS with Let's Encrypt](lets-encrypt.md)** is the full guide:
+- the DNS and port checklist;
+- using a port other than 443;
+- trying it first with the test service;
+- moving existing devices to HTTPS;
+- relays, renewals and rate limits;
+- fixes for each error.
 
 ### Your own certificate
 

@@ -66,6 +66,8 @@ You still tap Connect, and approve the VPN, on the device.
 
 ## Using it
 
+<img alt="The app connected, phone layout: this device's name and addresses, then four other devices, each reached directly with its round-trip time" src="images/android-phone.png" width="300">
+
 - **The screen** shows this device's name and addresses, and your other devices, each with how it is reached: **Direct** (with the round-trip time), **Relay**, or **Idle** (no traffic lately). Tap a device to copy its address.
 - **On a tablet** with room for it, the connection and the devices are side by side; **on a phone**, or a narrow tablet window (split screen), they are in one column. The layout follows rotation and window changes.
 - **Names work in every app:** open `http://jellyfin:8096` in a browser, or enter `jellyfin` (or `100.64.0.5`) as the server in an app.

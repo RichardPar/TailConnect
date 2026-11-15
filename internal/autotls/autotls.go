@@ -24,7 +24,7 @@ const StagingURL = "https://acme-staging-v02.api.letsencrypt.org/directory"
 type Config struct {
 	// Domains to get certificates for (required). Other names are refused.
 	Domains []string
-	// Email is given to the CA for expiry warnings (optional).
+	// Email is the contact address for the CA account (optional).
 	Email string
 	// CacheDir keeps the account key and certificates across restarts.
 	CacheDir string

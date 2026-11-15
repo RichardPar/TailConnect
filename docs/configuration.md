@@ -2,6 +2,7 @@
 
 Every option, file and port. For what to set and when, see [Installation](installation.md) and [Usage](usage.md).
 
+- [Settings at a glance](#settings-at-a-glance)
 - [tc-control serve](#tc-control-serve)
 - [tc-control admin commands](#tc-control-admin-commands)
 - [tcd](#tcd)
@@ -13,6 +14,80 @@ Every option, file and port. For what to set and when, see [Installation](instal
 - [Ports](#ports)
 - [Files and paths](#files-and-paths)
 - [Addresses](#addresses)
+
+---
+
+## Settings at a glance
+
+Every setting, and where to change it. *Server options* go in `/etc/default/tc-control` on the server (then `sudo systemctl restart tc-control`). *Portal* means the [web portal](portal.md). *CLI* means `sudo tc-control …` on the server.
+
+**The server** (server options; details [below](#tc-control-serve)):
+
+| Setting | Option | Default |
+|---|---|---|
+| MagicDNS domain | `-domain` | `tc.internal` |
+| MagicDNS on or off | `-magic-dns` | on |
+| Send all of the devices' DNS through MagicDNS | `-dns-nameservers 1.1.1.1,…` | off (devices keep their own DNS) |
+| Control and relay address | `-listen` | `:7740` |
+| Portal address | `-admin-listen` | `127.0.0.1:7741` |
+| URL shown for joining | `-public-url` | derived |
+| HTTPS: automatic (Let's Encrypt) | `-acme-domain`, `-acme-http-listen`, `-acme-email`, `-acme-staging` | off ([guide](lets-encrypt.md)) |
+| HTTPS: your own certificate | `-tls-cert`, `-tls-key` | off |
+| Who may create accounts | `-signup off\|approval\|invite\|open` | `approval` |
+| How long machines stay authorised | `-key-expiry 180d` or `never` | 180 days |
+| Removing offline ephemeral machines | `-ephemeral-timeout` | 30 minutes |
+| Built-in relay | `-relay` | on |
+| More relay regions | `-relay-map FILE` | none |
+| STUN server | `-stun-listen` | `:3478` |
+| Metrics | `-metrics-listen` | off |
+| JSON logs | `-log-json` | off |
+
+**Accounts:**
+
+| Setting | Portal | CLI |
+|---|---|---|
+| Create an account | Accounts → Add account | `users create NAME [-operator] [-password]` |
+| Approve, suspend, reactivate | Accounts | `users approve\|suspend\|activate NAME` |
+| Operator or tenant | Accounts → Make operator / Make tenant | `users role NAME operator\|tenant` |
+| Password | My account (own), Accounts → Reset password | `users passwd NAME` |
+| Require approval for new machines | My account | `users machine-approval NAME on\|off` |
+| Access rules | Access rules | `rules add -user NAME FROM TO [PORTS]`, `rules delete ID` |
+| Invites (sign-up without approval) | Accounts → Invites | `invites create [-expiration 168h]`, `invites revoke ID` |
+| Delete an account | Accounts → Delete | `users delete NAME` |
+
+**Machines:**
+
+| Setting | Portal | CLI |
+|---|---|---|
+| Name | Machines → Rename | `nodes rename ID NAME` |
+| Tags | Machines → Tags | `nodes tag ID TAG[,TAG…]` |
+| Key never expires, or normal lifetime | Machines → Never expire / Set expiry | `nodes expiry ID never\|DURATION` |
+| Approve | Machines → Approve | `nodes approve ID` |
+| Remove | Machines → Remove | `nodes delete ID` |
+| Share with another account | Sharing | `shares create ID ACCOUNT`, `shares link ID`, `shares accept ID`, `shares revoke ID` |
+
+**Joining:**
+
+| Setting | Portal | CLI |
+|---|---|---|
+| Auth key: account, expiry, reusable, ephemeral, pre-approved | Auth keys | `keys create -user NAME [-expiration 24h] [-reusable] [-ephemeral] [-preapproved]` |
+| Revoke a key | Auth keys → Revoke | `keys revoke ID` |
+| Standalone relay token | (CLI only) | `relays create NAME`, `relays delete NAME` |
+| Admin token (recovery, API) | (CLI only) | `admin-token` |
+
+**Linux devices** (`/etc/default/tcd`, then `sudo systemctl restart tcd`; or `tc up` options; details in [tcd](#tcd) and [tc](#tc)):
+
+| Setting | Where | Default |
+|---|---|---|
+| Server, auth key, name | `sudo tc up --server URL --authkey KEY --hostname NAME` | name: the OS hostname |
+| Pin the server key | `tc up --server-key mkey:…` | fetched (trust on first use, or checked by HTTPS) |
+| DNS integration | `-dns auto\|systemd-resolved\|file\|off` | `auto` |
+| WireGuard port | `-port` | `41641` |
+| Interface name | `-tun` (or `userspace`) | `tc0` |
+| Metrics | `-metrics-listen` | off |
+| Disconnect, reconnect, leave | `tc down`, `tc up`, `tc logout` | |
+
+**Android devices** (in the app; [details](android.md)): server, auth key and device name on the main screen; always-on VPN in Android's settings (VPN → TailConnect → Always-on VPN).
 
 ---
 
@@ -37,7 +112,7 @@ The coordination server: control API, built-in relay, STUN, web portal.
 | `-public-url` | derived from `-listen` | URL shown in the portal for clients to use |
 | `-acme-domain` | none | Get HTTPS certificates from Let's Encrypt for this DNS name (comma-separated for several), for both the control and portal listeners. The name must point at the server, and Let's Encrypt must reach port 443 (or `-acme-http-listen`). Certificates are kept in `acme/` next to the database and renewed automatically. ([How](installation.md#enable-https)) |
 | `-acme-http-listen` | none | Also serve Let's Encrypt's checks on this address (`:80`), and redirect other requests there to HTTPS. Needed when `-listen` isn't on port 443. |
-| `-acme-email` | none | Email for Let's Encrypt's expiry notices |
+| `-acme-email` | none | Contact address for the Let's Encrypt account (optional) |
 | `-acme-staging` | `false` | Use Let's Encrypt's test service (certificates clients won't trust) |
 | `-tls-cert`, `-tls-key` | none | Your own PEM certificate (with chain) and key, instead of `-acme-domain`. Turns on HTTPS for both the control and portal listeners. |
 | `-metrics-listen` | none | Serve [metrics](usage.md#monitoring) at `/metrics` on this address (plain HTTP, no login), e.g. `127.0.0.1:7743` |

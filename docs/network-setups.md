@@ -101,7 +101,7 @@ A server with a public address, for devices anywhere: at home, at work, on mobil
    sudo systemctl restart tc-control
    curl https://vpn.example.com/key            # the first request fetches the certificate (a few seconds)
    ```
-   `tc-control` gets a certificate from Let's Encrypt and renews it by itself. [Details and options](installation.md#automatic-certificates-lets-encrypt).
+   `tc-control` gets a certificate from Let's Encrypt and renews it by itself. [The full guide](lets-encrypt.md) has the checklist, options and fixes.
 
 ### Firewall
 

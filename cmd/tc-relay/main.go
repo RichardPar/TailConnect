@@ -44,7 +44,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")
 	acmeDomain := flag.String("acme-domain", "", "get HTTPS certificates from Let's Encrypt for this DNS name (it must point at this server; port 443, or -acme-http-listen, reachable from the internet)")
-	acmeEmail := flag.String("acme-email", "", "email address for Let's Encrypt's expiry notices (optional)")
+	acmeEmail := flag.String("acme-email", "", "contact address for the Let's Encrypt account (optional)")
 	acmeHTTP := flag.String("acme-http-listen", "", `also serve Let's Encrypt's checks on this address, e.g. ":80" (needed unless -listen is on port 443)`)
 	acmeDir := flag.String("acme-dir", "acme", "where certificates are kept")
 	acmeStaging := flag.Bool("acme-staging", false, "use Let's Encrypt's test service (untrusted certificates)")

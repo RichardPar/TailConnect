@@ -108,7 +108,7 @@ By default every machine of an account can reach every other, on any port. Acces
 | From, To | `*` (any of the account's machines), `tag:NAME`, or a machine name |
 | Ports | `*` (everything, including ping), or a comma-separated list of `22`, `8000-8100` (TCP and UDP), `tcp:443`, `udp:53`, `icmp` (ping) |
 
-![Access rules tab, operator view of the richard account: one rule, tag:staff → tag:web on icmp](images/portal-rules.png)
+![Access rules tab for the richard account: tag:staff may reach tag:media on tcp:8096 and ping, and tag:staff may reach everything](images/portal-rules.png)
 
 How they behave:
 
@@ -152,33 +152,21 @@ The one-way rule is enforced by the packet filter on each recipient machine, so 
 
 ## The web portal
 
-The portal listens on `http://127.0.0.1:7741` on the server by default. From your workstation:
+The portal is where you manage the network in a browser. It listens on `http://127.0.0.1:7741` on the server; from your workstation run `ssh -L 7741:127.0.0.1:7741 you@server` and open `http://localhost:7741`.
 
-```sh
-ssh -L 7741:127.0.0.1:7741 you@server      # then open http://localhost:7741
-```
+![Operator view of the Machines tab: six machines in two accounts, one waiting for approval](images/portal-machines.png)
 
-To let other people use it (to sign up, manage their machines and share), make it reachable over HTTPS: see [Open the portal to other people](installation.md#open-the-portal-to-other-people). Sessions last 12 hours.
+| Tab | For |
+|---|---|
+| **Machines** | Your machines: online state, addresses, key expiry; approve, tag, rename, remove |
+| **Auth keys** | Keys for joining devices: reusable, ephemeral, pre-approved |
+| **Access rules** | Who may reach what within the account |
+| **Sharing** | Share a machine with another account, or accept one shared with you |
+| **Accounts** | Operators: approve sign-ups, suspend, change roles, reset passwords, invites |
+| **My account** | Require approval for new machines; change your password |
 
-**Machines** lists your machines (operators: everyone's, with an Account column), with online state (seen in the last 5 minutes), names, addresses, OS, last contact and key status (*expires in 5 months*, *never expires*, *expired*, or *needs approval* with an **Approve** button; the tab shows a count of machines waiting). **Never expire** / **Set expiry** switches a machine between never expiring and the server's normal lifetime from now. **Rename** changes the machine's name; **Remove** disconnects it and deletes it from the network.
+**[The web portal](portal.md)** describes every tab, column, button and setting, with screenshots.
 
-![Operator view of the Machines tab: four machines across the richard and alice accounts](images/portal-machines.png)
-
-A tenant sees only its own machines, and no Accounts tab:
-
-![Tenant view of the Machines tab for alice: one machine, alicebox](images/portal-tenant-machines.png)
-
-**Auth keys** creates keys for your account (operators can pick any account). The key is shown once; the table shows each key's uses and status.
-
-![Auth keys tab for alice, with a newly generated key](images/portal-keys.png)
-
-**Access rules** and **Sharing** are described [above](#access-rules); operators can switch the Access rules tab to any account. **My account** turns machine approval on or off for your account and changes your password.
-
-**Accounts** (operators only) lists every account with its role, status and machine count. Pending sign-ups come first, with a count on the tab. From here you approve, suspend, reactivate, make operator or tenant, reset passwords and delete accounts (not your own, so you can't lock yourself out), and create and revoke invites.
-
-![Accounts tab: bob pending with Approve, alice and richard active; invites below](images/portal-accounts.png)
-
-**The admin token.** *Use the admin token* on the sign-in page signs in as an operator without an account; it's meant for recovery. Scripts use the same token with the HTTP API.
 
 ## Admin CLI
 
