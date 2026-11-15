@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tailconnect/internal/key"
@@ -38,6 +39,8 @@ type RemotePolicy struct {
 
 	flight   sync.Mutex
 	inflight map[pairKey]*lookup
+
+	requestsOK, requestsFailed atomic.Int64
 }
 
 // pairKey is an unordered pair of machines (the policy is symmetric).
@@ -100,9 +103,15 @@ func (p *RemotePolicy) call(ctx context.Context, method, path string, in, out an
 	}
 	resp, err := p.hc.Do(req)
 	if err != nil {
+		p.requestsFailed.Add(1)
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		p.requestsFailed.Add(1)
+	} else {
+		p.requestsOK.Add(1)
+	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return errUnauthorized
 	}

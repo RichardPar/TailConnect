@@ -41,6 +41,7 @@ type Server struct {
 	packetsForwarded atomic.Int64
 	packetsDropped   atomic.Int64
 	packetsDenied    atomic.Int64 // refused by the AllowFunc
+	bytesForwarded   atomic.Int64
 }
 
 type sclient struct {
@@ -232,6 +233,7 @@ func (s *Server) forward(srcKey, dst key.NodePublic, pkt []byte) {
 	select {
 	case dc.sendq <- frame:
 		s.packetsForwarded.Add(1)
+		s.bytesForwarded.Add(int64(len(pkt)))
 	default:
 		s.packetsDropped.Add(1) // receiver is slow; drop rather than block the sender
 	}
