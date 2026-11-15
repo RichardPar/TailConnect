@@ -1,10 +1,10 @@
 // Package magicsock is TailConnect's WireGuard transport (a conn.Bind). It
 // decides, packet by packet, how to reach each peer:
 //
-//   - directly over UDP, once packets from the peer have arrived on a direct
-//     path recently ("trusted" path), or
-//   - via the peer's relay server, while also spraying the best-guess direct
-//     address so a direct path can come up without waiting.
+//   - directly over UDP, once a direct path is trusted: confirmed by a disco
+//     pong or by the peer's WireGuard packets arriving on it, or
+//   - via the peer's relay server, while path discovery (see discovery.go)
+//     looks for a direct path, including through NATs.
 //
 // WireGuard is configured with each peer's endpoint set to the peer's node
 // key (see Endpoint) and with roaming disabled, so every packet for a peer
@@ -17,8 +17,8 @@
 // stays correct when several peers share an external address (NAT), and it
 // lets a NAT-mapped address become a direct path.
 //
-// Milestone 4 adds disco pings and STUN so direct paths through NATs can be
-// discovered and verified instead of inferred from received traffic.
+// The WireGuard UDP socket also carries STUN (to learn public addresses)
+// and disco (path discovery) packets; they are demultiplexed on receive.
 package magicsock
 
 import (
@@ -33,9 +33,11 @@ import (
 
 	"golang.zx2c4.com/wireguard/conn"
 
+	"tailconnect/internal/disco"
 	"tailconnect/internal/key"
 	"tailconnect/internal/protocol"
 	"tailconnect/internal/relay"
+	"tailconnect/internal/stun"
 )
 
 // A direct path is trusted (used exclusively) while both hold:
@@ -54,12 +56,22 @@ var errNoPath = errors.New("magicsock: no path to peer")
 
 type Options struct {
 	PrivateKey key.NodePrivate
-	Logf       func(format string, args ...any)
+	// DiscoKey enables path discovery (disco). Without it, magicsock still
+	// works but only finds direct paths that peers' traffic reveals.
+	DiscoKey key.DiscoPrivate
+	Logf     func(format string, args ...any)
+	// OnEndpointsChanged is called (in its own goroutine) when this node's
+	// advertised endpoints change, e.g. a new public address from STUN.
+	OnEndpointsChanged func()
 }
 
 type Conn struct {
-	logf func(string, ...any)
-	priv key.NodePrivate
+	logf        func(string, ...any)
+	priv        key.NodePrivate
+	disco       key.DiscoPrivate
+	onEndpoints func()
+	stop        chan struct{}
+	loopDone    chan struct{}
 
 	relayRecv chan relayPacket // from all relay clients; persists across Open/Close
 
@@ -73,6 +85,14 @@ type Conn struct {
 	pconn     *net.UDPConn
 	closing   chan struct{} // closed by Close; ends the current ReceiveFuncs
 	shutdown  bool
+
+	byDisco       map[key.DiscoPublic]*peer
+	pings         map[disco.TxID]pendingPing
+	local         []netip.AddrPort // local interface endpoints
+	stunTx        map[stun.TxID]stunRequest
+	stunAddrs     map[int]netip.AddrPort // public address seen by each region's STUN server
+	regionLatency map[int]time.Duration
+	lastSTUN      time.Time
 }
 
 type indexEntry struct {
@@ -92,9 +112,16 @@ type relayPacket struct {
 type peer struct {
 	key        key.NodePublic
 	ep         *Endpoint
-	candidates []netip.AddrPort
-	best       netip.AddrPort
+	discoKey   key.DiscoPublic
+	candidates []netip.AddrPort // as reported through control
+	best       netip.AddrPort   // best guess among candidates, before discovery
 	homeRelay  int
+	eps        map[netip.AddrPort]*epState
+
+	lastActive      time.Time // data sent to or received from the peer
+	lastPingAll     time.Time
+	lastCallMeMaybe time.Time
+	latency         time.Duration // of directAddr, from disco
 
 	directAddr      netip.AddrPort
 	lastDirectRecv  time.Time
@@ -108,14 +135,29 @@ func New(opts Options) *Conn {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	return &Conn{
-		logf:      opts.Logf,
-		priv:      opts.PrivateKey,
-		relayRecv: make(chan relayPacket, 512),
-		peers:     map[key.NodePublic]*peer{},
-		indexes:   map[uint32]indexEntry{},
-		relays:    map[int]*relay.Client{},
+	c := &Conn{
+		logf:          opts.Logf,
+		priv:          opts.PrivateKey,
+		disco:         opts.DiscoKey,
+		onEndpoints:   opts.OnEndpointsChanged,
+		stop:          make(chan struct{}),
+		loopDone:      make(chan struct{}),
+		relayRecv:     make(chan relayPacket, 512),
+		peers:         map[key.NodePublic]*peer{},
+		indexes:       map[uint32]indexEntry{},
+		relays:        map[int]*relay.Client{},
+		byDisco:       map[key.DiscoPublic]*peer{},
+		pings:         map[disco.TxID]pendingPing{},
+		stunTx:        map[stun.TxID]stunRequest{},
+		stunAddrs:     map[int]netip.AddrPort{},
+		regionLatency: map[int]time.Duration{},
 	}
+	go c.loop()
+	return c
+}
+
+func newPeer(k key.NodePublic) *peer {
+	return &peer{key: k, ep: &Endpoint{key: k}, eps: map[netip.AddrPort]*epState{}}
 }
 
 // ---- endpoints ----
@@ -165,7 +207,16 @@ func (c *Conn) SetNetworkMap(peers []protocol.Node, relays protocol.RelayMap, lo
 	if c.shutdown {
 		return
 	}
-	c.relayMap = relays
+	if !relayMapEqual(c.relayMap, relays) {
+		c.relayMap = relays
+		c.lastSTUN = time.Time{} // measure the new regions soon
+		for id := range c.regionLatency {
+			if _, ok := c.regionURL(id); !ok {
+				delete(c.regionLatency, id)
+				delete(c.stunAddrs, id)
+			}
+		}
+	}
 	c.updateRelaysLocked()
 
 	want := map[key.NodePublic]bool{}
@@ -176,23 +227,53 @@ func (c *Conn) SetNetworkMap(peers []protocol.Node, relays protocol.RelayMap, lo
 		want[n.NodeKey] = true
 		p := c.peers[n.NodeKey]
 		if p == nil {
-			p = &peer{key: n.NodeKey, ep: &Endpoint{key: n.NodeKey}}
+			p = newPeer(n.NodeKey)
 			c.peers[n.NodeKey] = p
 		}
 		if !slices.Equal(p.candidates, n.Endpoints) && p.candidates != nil {
 			// The peer's network changed (restart, new port, Wi-Fi switch):
-			// its old direct path is suspect until traffic confirms a new one.
+			// its old direct path is suspect until confirmed again.
 			p.directAddr, p.firstUnanswered = netip.AddrPort{}, time.Time{}
+			p.lastPingAll = time.Time{}
+			for _, ep := range p.eps {
+				ep.lastPong, ep.latency = time.Time{}, 0
+			}
 		}
 		p.candidates = slices.Clone(n.Endpoints)
 		p.best, _ = PickEndpoint(n.Endpoints, local)
 		p.homeRelay = n.HomeRelay
+		p.discoKey = n.DiscoKey
+		for _, ep := range p.eps {
+			ep.netmap = false
+		}
+		for _, a := range n.Endpoints {
+			a = unmap(a)
+			if !usableAddr(a) {
+				continue
+			}
+			if p.eps[a] == nil {
+				p.eps[a] = &epState{}
+			}
+			p.eps[a].netmap = true
+		}
 	}
 	for k := range c.peers {
 		if !want[k] {
 			delete(c.peers, k)
 		}
 	}
+	c.byDisco = map[key.DiscoPublic]*peer{}
+	for _, p := range c.peers {
+		if !p.discoKey.IsZero() {
+			c.byDisco[p.discoKey] = p
+		}
+	}
+}
+
+func relayMapEqual(a, b protocol.RelayMap) bool {
+	return slices.EqualFunc(a.Regions, b.Regions, func(x, y protocol.RelayRegion) bool {
+		return x.ID == y.ID && slices.Equal(x.Nodes, y.Nodes)
+	})
 }
 
 // HomeRelay is the relay region this node is reachable through (0 = none).
@@ -230,18 +311,18 @@ func (c *Conn) regionURL(id int) (string, bool) {
 	return "", false
 }
 
-// updateRelaysLocked picks the home region (lowest ID for now; latency-based
-// in milestone 4), connects to it, and drops clients for removed regions.
+// updateRelaysLocked picks the home region (see chooseHomeLocked), connects
+// to it, and drops clients for removed regions.
 func (c *Conn) updateRelaysLocked() {
-	home := 0
-	for _, r := range c.relayMap.Regions {
-		if _, ok := c.regionURL(r.ID); ok && (home == 0 || r.ID < home) {
-			home = r.ID
-		}
-	}
+	home := c.chooseHomeLocked()
 	if home != c.home {
-		c.logf("magicsock: home relay region %d → %d", c.home, home)
+		if lat, ok := c.regionLatency[home]; ok {
+			c.logf("magicsock: home relay region %d → %d (%v)", c.home, home, lat.Round(time.Millisecond))
+		} else {
+			c.logf("magicsock: home relay region %d → %d", c.home, home)
+		}
 		c.home = home
+		c.notifyEndpointsLocked() // the home relay is advertised alongside endpoints
 	}
 	for id, rc := range c.relays {
 		u, ok := c.regionURL(id)
@@ -332,6 +413,11 @@ func (c *Conn) Close() error {
 func (c *Conn) Shutdown() {
 	c.Close()
 	c.mu.Lock()
+	if c.shutdown {
+		c.mu.Unlock()
+		return
+	}
+	close(c.stop)
 	c.shutdown = true
 	rs := c.relays
 	c.relays = map[int]*relay.Client{}
@@ -339,6 +425,7 @@ func (c *Conn) Shutdown() {
 	for _, rc := range rs {
 		rc.Close()
 	}
+	<-c.loopDone
 }
 
 func (c *Conn) SetMark(uint32) error { return nil }
@@ -350,7 +437,7 @@ func (c *Conn) ParseEndpoint(s string) (conn.Endpoint, error) {
 		defer c.mu.Unlock()
 		p := c.peers[k]
 		if p == nil {
-			p = &peer{key: k, ep: &Endpoint{key: k}}
+			p = newPeer(k)
 			c.peers[k] = p
 		}
 		return p.ep, nil
@@ -368,43 +455,75 @@ func unmap(ap netip.AddrPort) netip.AddrPort {
 
 func (c *Conn) receiveUDP(pc *net.UDPConn) conn.ReceiveFunc {
 	return func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-		n, ap, err := pc.ReadFromUDPAddrPort(packets[0])
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return 0, net.ErrClosed
+		for {
+			n, ap, err := pc.ReadFromUDPAddrPort(packets[0])
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return 0, net.ErrClosed
+				}
+				return 0, err
 			}
-			return 0, err
+			ap = unmap(ap)
+			b := packets[0][:n]
+			c.mu.Lock()
+			switch {
+			case stun.IsResponse(b):
+				c.handleSTUNLocked(b)
+				c.mu.Unlock()
+				continue
+			case disco.Looks(b):
+				c.handleDiscoLocked(b, ap, false, key.NodePublic{})
+				c.mu.Unlock()
+				continue
+			}
+			sizes[0] = n
+			if p := c.attributeLocked(b); p != nil {
+				now := time.Now()
+				// The peer's WireGuard traffic proves this path. Adopt it unless
+				// discovery has already chosen a (better) path that still works.
+				if ap == p.directAddr || !p.trusted(now) {
+					p.directAddr, p.lastDirectRecv, p.firstUnanswered = ap, now, time.Time{}
+				}
+				if wgType(b) == wgTransport {
+					p.lastActive = now
+				}
+				eps[0] = p.ep
+			} else {
+				eps[0] = &rawEndpoint{ap: ap}
+			}
+			c.mu.Unlock()
+			return 1, nil
 		}
-		ap = unmap(ap)
-		sizes[0] = n
-		c.mu.Lock()
-		if p := c.attributeLocked(packets[0][:n]); p != nil {
-			p.directAddr, p.lastDirectRecv, p.firstUnanswered = ap, time.Now(), time.Time{}
-			eps[0] = p.ep
-		} else {
-			eps[0] = &rawEndpoint{ap: ap}
-		}
-		c.mu.Unlock()
-		return 1, nil
 	}
 }
 
 func (c *Conn) receiveRelay(closing chan struct{}) conn.ReceiveFunc {
 	return func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-		select {
-		case <-closing:
-			return 0, net.ErrClosed
-		case rp := <-c.relayRecv:
-			sizes[0] = copy(packets[0], rp.data)
-			c.mu.Lock()
-			if p := c.peers[rp.src]; p != nil {
-				p.lastRelayRecv = time.Now()
-				eps[0] = p.ep
-			} else {
-				eps[0] = &Endpoint{key: rp.src}
+		for {
+			select {
+			case <-closing:
+				return 0, net.ErrClosed
+			case rp := <-c.relayRecv:
+				c.mu.Lock()
+				if disco.Looks(rp.data) {
+					c.handleDiscoLocked(rp.data, netip.AddrPort{}, true, rp.src)
+					c.mu.Unlock()
+					continue
+				}
+				sizes[0] = copy(packets[0], rp.data)
+				if p := c.peers[rp.src]; p != nil {
+					now := time.Now()
+					p.lastRelayRecv = now
+					if wgType(rp.data) == wgTransport {
+						p.lastActive = now
+					}
+					eps[0] = p.ep
+				} else {
+					eps[0] = &Endpoint{key: rp.src}
+				}
+				c.mu.Unlock()
+				return 1, nil
 			}
-			c.mu.Unlock()
-			return 1, nil
 		}
 	}
 }
@@ -442,6 +561,9 @@ func (c *Conn) sendPeer(k key.NodePublic, bufs [][]byte) error {
 	now := time.Now()
 	for _, b := range bufs {
 		c.noteSentLocked(k, b, now)
+		if wgType(b) == wgTransport {
+			p.lastActive = now
+		}
 	}
 	if p.trusted(now) {
 		addr := p.directAddr
@@ -467,6 +589,7 @@ func (c *Conn) sendPeer(k key.NodePublic, bufs [][]byte) error {
 		spray = p.directAddr
 	}
 	rc := c.relayClientLocked(p.homeRelay)
+	c.discoverLocked(p, now, true) // look for a direct path now, not at the next tick
 	c.mu.Unlock()
 
 	sent := false
@@ -507,7 +630,9 @@ type PathInfo struct {
 	// Direct is the trusted direct address, if the peer is reachable directly.
 	Direct netip.AddrPort
 	// Relay is the relay region in use when there is no trusted direct path.
-	Relay          int
+	Relay int
+	// Latency is the disco round-trip time on the direct path, if measured.
+	Latency        time.Duration
 	LastDirectRecv time.Time
 	LastRelayRecv  time.Time
 	TxDirect       uint64
@@ -524,6 +649,9 @@ func (c *Conn) Paths() map[key.NodePublic]PathInfo {
 		pi := PathInfo{LastDirectRecv: p.lastDirectRecv, LastRelayRecv: p.lastRelayRecv, TxDirect: p.txDirect, TxRelay: p.txRelay}
 		if p.trusted(now) {
 			pi.Direct = p.directAddr
+			if ep := p.eps[p.directAddr]; ep != nil && now.Sub(ep.lastPong) < TrustWindow {
+				pi.Latency = ep.latency
+			}
 		} else {
 			pi.Relay = p.homeRelay
 			if pi.Relay == 0 {

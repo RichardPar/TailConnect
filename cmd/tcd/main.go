@@ -17,7 +17,6 @@ import (
 
 	"tailconnect/internal/daemon"
 	"tailconnect/internal/engine"
-	"tailconnect/internal/key"
 	"tailconnect/internal/localapi"
 )
 
@@ -49,21 +48,23 @@ func main() {
 		TUNName:    *tunName,
 		ListenPort: uint16(*port),
 		Logf:       logf,
-		NewEngine: func(priv key.NodePrivate, addrs []netip.Prefix, port uint16) (*engine.Engine, error) {
+		NewEngine: func(ep daemon.EngineParams) (*engine.Engine, error) {
+			cfg := engine.Config{ListenPort: ep.Port, DiscoKey: ep.DiscoKey, OnEndpointsChanged: ep.OnEndpointsChanged, Logf: logf, Verbose: *verbose}
 			if *tunName == "userspace" {
 				// Userspace networking: WireGuard terminates in an in-process
 				// gVisor stack. No root or TUN device needed, and the OS routing
 				// table is untouched. The node answers ping on its tunnel
 				// addresses but the host's own services are not exposed.
 				var ips []netip.Addr
-				for _, p := range addrs {
+				for _, p := range ep.Addrs {
 					ips = append(ips, p.Addr())
 				}
 				tdev, _, err := netstack.CreateNetTUN(ips, nil, engine.DefaultMTU)
 				if err != nil {
 					return nil, err
 				}
-				return engine.New(engine.Config{TUN: tdev, ListenPort: port, Logf: logf, Verbose: *verbose}, priv)
+				cfg.TUN = tdev
+				return engine.New(cfg, ep.NodeKey)
 			}
 			tdev, err := tun.CreateTUN(*tunName, engine.DefaultMTU)
 			if err != nil {
@@ -79,7 +80,8 @@ func main() {
 				tdev.Close()
 				return nil, err
 			}
-			return engine.New(engine.Config{TUN: tdev, Router: r, ListenPort: port, Logf: logf, Verbose: *verbose}, priv)
+			cfg.TUN, cfg.Router = tdev, r
+			return engine.New(cfg, ep.NodeKey)
 		},
 	})
 	if err != nil {

@@ -23,6 +23,7 @@ import (
 	"tailconnect/internal/engine"
 	"tailconnect/internal/key"
 	"tailconnect/internal/localapi"
+	"tailconnect/internal/stun"
 )
 
 // testNode is a daemon whose engine runs on a userspace netstack TUN.
@@ -60,16 +61,20 @@ func newTestNodeEP(t *testing.T, name string, eps func(uint16) ([]netip.AddrPort
 	d, err := New(Options{
 		StateDir: filepath.Join(t.TempDir(), name),
 		Logf:     func(f string, a ...any) { t.Logf("[%s] "+f, append([]any{name}, a...)...) },
-		NewEngine: func(priv key.NodePrivate, addrs []netip.Prefix, port uint16) (*engine.Engine, error) {
+		NewEngine: func(ep EngineParams) (*engine.Engine, error) {
 			var ips []netip.Addr
-			for _, p := range addrs {
+			for _, p := range ep.Addrs {
 				ips = append(ips, p.Addr())
 			}
 			tdev, tnet, err := netstack.CreateNetTUN(ips, nil, engine.DefaultMTU)
 			if err != nil {
 				return nil, err
 			}
-			e, err := engine.New(engine.Config{TUN: tdev, ListenPort: 0, Verbose: os.Getenv("TC_WG_VERBOSE") != "", Logf: func(f string, a ...any) { t.Logf("[%s] "+f, append([]any{name}, a...)...) }}, priv)
+			e, err := engine.New(engine.Config{
+				TUN: tdev, ListenPort: 0, DiscoKey: ep.DiscoKey, OnEndpointsChanged: ep.OnEndpointsChanged,
+				Verbose: os.Getenv("TC_WG_VERBOSE") != "",
+				Logf:    func(f string, a ...any) { t.Logf("[%s] "+f, append([]any{name}, a...)...) },
+			}, ep.NodeKey)
 			if err != nil {
 				return nil, err
 			}
@@ -162,10 +167,20 @@ func ping(n *testNode, dst netip.Addr, msg string) (out string, err error) {
 	return string(b), err
 }
 
-// newControl starts tc-control with its embedded relay and returns the
-// database, URL and a reusable auth key.
-func newControl(t *testing.T) (*db.DB, string, string) {
+// newControl starts tc-control with its embedded relay (and a STUN server
+// unless noSTUN) and returns the database, URL and a reusable auth key.
+func newControl(t *testing.T, noSTUN ...bool) (*db.DB, string, string) {
 	t.Helper()
+	relays := control.EmbeddedRelayMap(0)
+	if len(noSTUN) == 0 || !noSTUN[0] {
+		pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { pc.Close() })
+		go stun.Serve(pc)
+		relays = control.EmbeddedRelayMap(pc.LocalAddr().(*net.UDPAddr).Port)
+	}
 	cdb, err := db.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +191,7 @@ func newControl(t *testing.T) (*db.DB, string, string) {
 		t.Fatal(err)
 	}
 	ctl, err := control.New(context.Background(), cdb, control.Config{
-		BaseDomain: "e2e.internal", PollInterval: 50 * time.Millisecond, Relays: control.EmbeddedRelayMap(),
+		BaseDomain: "e2e.internal", PollInterval: 50 * time.Millisecond, Relays: relays,
 	}, log)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +309,7 @@ func TestEndToEndMesh(t *testing.T) {
 
 func TestStatePersists(t *testing.T) {
 	dir := t.TempDir()
-	d, err := New(Options{StateDir: dir, NewEngine: func(key.NodePrivate, []netip.Prefix, uint16) (*engine.Engine, error) {
+	d, err := New(Options{StateDir: dir, NewEngine: func(EngineParams) (*engine.Engine, error) {
 		return nil, fmt.Errorf("unused")
 	}})
 	if err != nil {
@@ -314,7 +329,8 @@ func TestStatePersists(t *testing.T) {
 }
 
 func TestRelayFallback(t *testing.T) {
-	cdb, url, authKey := newControl(t)
+	// No STUN: it would reveal the loopback path and discovery would use it.
+	cdb, url, authKey := newControl(t, true)
 	a, b := newTestNodeEP(t, "alpha", deadEndpoints), newTestNodeEP(t, "beta", deadEndpoints)
 	for _, n := range []struct {
 		n    *testNode

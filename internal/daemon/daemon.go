@@ -37,12 +37,23 @@ type Options struct {
 	ListenPort uint16 // preferred WireGuard port; falls back to random if busy
 	Logf       func(format string, args ...any)
 	// NewEngine creates the data plane once the node's addresses are known.
-	NewEngine func(priv key.NodePrivate, addrs []netip.Prefix, port uint16) (*engine.Engine, error)
+	NewEngine func(EngineParams) (*engine.Engine, error)
 	// Endpoints discovers this host's candidate endpoints and attached
 	// prefixes (nil = LocalEndpoints).
 	Endpoints func(port uint16) ([]netip.AddrPort, []netip.Prefix)
 	// EndpointInterval is how often endpoints are re-discovered (default 15s).
 	EndpointInterval time.Duration
+}
+
+// EngineParams is what the daemon passes to Options.NewEngine.
+type EngineParams struct {
+	NodeKey  key.NodePrivate
+	DiscoKey key.DiscoPrivate
+	Addrs    []netip.Prefix // this node's tunnel addresses
+	Port     uint16         // preferred WireGuard port (0 = random)
+	// OnEndpointsChanged must be passed to engine.Config so the daemon
+	// re-reports endpoints when STUN finds a new public address.
+	OnEndpointsChanged func()
 }
 
 // persist is the on-disk state (state.json, mode 0600).
@@ -344,6 +355,7 @@ func (d *Daemon) Status() localapi.Status {
 			ps := peerStatus(p)
 			if st, ok := stats[p.NodeKey]; ok {
 				ps.CurrentEndpoint, ps.Relay, ps.RxBytes, ps.TxBytes = st.Endpoint, st.Relay, st.RxBytes, st.TxBytes
+				ps.LatencyMS = float64(st.Latency.Microseconds()) / 1000
 				if !st.LastHandshake.IsZero() {
 					t := st.LastHandshake
 					ps.LastHandshake = &t
@@ -389,10 +401,19 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 	}
 	defer cc.Close()
 
-	eng, err := d.opts.NewEngine(st.NodeKey, st.Self.Addresses, d.opts.ListenPort)
+	kick := make(chan struct{}, 1) // re-report endpoints now
+	kickNow := func() {
+		select {
+		case kick <- struct{}{}:
+		default:
+		}
+	}
+	params := EngineParams{NodeKey: st.NodeKey, DiscoKey: st.DiscoKey, Addrs: st.Self.Addresses, Port: d.opts.ListenPort, OnEndpointsChanged: kickNow}
+	eng, err := d.opts.NewEngine(params)
 	if err != nil && d.opts.ListenPort != 0 {
 		logf("port %d unavailable (%v); using a random port", d.opts.ListenPort, err)
-		eng, err = d.opts.NewEngine(st.NodeKey, st.Self.Addresses, 0)
+		params.Port = 0
+		eng, err = d.opts.NewEngine(params)
 	}
 	if err != nil {
 		fail(localapi.StateStopped, fmt.Errorf("start tunnel: %w", err))
@@ -422,13 +443,15 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 	var repMu sync.Mutex
 	var reported []netip.AddrPort
 	reportedRelay := 0
-	kick := make(chan struct{}, 1) // re-report now (e.g. home relay changed)
+	// discover scans local interfaces and returns what to advertise: local
+	// endpoints plus public ones learned by STUN.
 	discover := func() []netip.AddrPort {
 		eps, local := d.opts.Endpoints(port)
 		d.mu.Lock()
 		d.local = local
 		d.mu.Unlock()
-		return eps
+		eng.SetLocalEndpoints(eps)
+		return eng.Endpoints()
 	}
 
 	// Re-report endpoints when interfaces change (DHCP renewals, Wi-Fi switches).
@@ -484,10 +507,7 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 				relayChanged := eng.HomeRelay() != reportedRelay
 				repMu.Unlock()
 				if relayChanged {
-					select {
-					case kick <- struct{}{}:
-					default:
-					}
+					kickNow()
 				}
 				d.mu.Lock()
 				d.netmap, d.state = m, localapi.StateRunning

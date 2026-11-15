@@ -69,8 +69,13 @@ type Config struct {
 	TUN        tun.Device
 	Router     Router // nil = NoopRouter
 	ListenPort uint16 // 0 = random
-	Logf       func(format string, args ...any)
-	Verbose    bool // log wireguard-go internals
+	// DiscoKey enables NAT traversal (disco path discovery).
+	DiscoKey key.DiscoPrivate
+	// OnEndpointsChanged is called when this node's advertised endpoints or
+	// home relay change (e.g. STUN learned a new public address).
+	OnEndpointsChanged func()
+	Logf               func(format string, args ...any)
+	Verbose            bool // log wireguard-go internals
 }
 
 type peerState struct {
@@ -99,7 +104,7 @@ func New(cfg Config, priv key.NodePrivate) (*Engine, error) {
 	if cfg.Router == nil {
 		cfg.Router = NoopRouter{}
 	}
-	magic := magicsock.New(magicsock.Options{PrivateKey: priv, Logf: cfg.Logf})
+	magic := magicsock.New(magicsock.Options{PrivateKey: priv, DiscoKey: cfg.DiscoKey, Logf: cfg.Logf, OnEndpointsChanged: cfg.OnEndpointsChanged})
 	wgLog := &device.Logger{Verbosef: device.DiscardLogf, Errorf: prefixed(cfg.Logf, "wg: ")}
 	if cfg.Verbose {
 		wgLog.Verbosef = prefixed(cfg.Logf, "wg: ")
@@ -152,6 +157,12 @@ func (e *Engine) HomeRelay() int { return e.magic.HomeRelay() }
 
 // RelayConnected reports whether the home relay connection is up.
 func (e *Engine) RelayConnected() bool { return e.magic.RelayConnected() }
+
+// SetLocalEndpoints records this host's local interface endpoints.
+func (e *Engine) SetLocalEndpoints(eps []netip.AddrPort) { e.magic.SetLocalEndpoints(eps) }
+
+// Endpoints returns the endpoints to advertise: local plus public (STUN).
+func (e *Engine) Endpoints() []netip.AddrPort { return e.magic.Endpoints() }
 
 // Reconfig applies a network map. local lists this host's interface prefixes,
 // used to choose each peer's best-guess direct address.
@@ -277,6 +288,7 @@ type PeerStats struct {
 	// relay region carrying the traffic.
 	Endpoint      netip.AddrPort
 	Relay         int
+	Latency       time.Duration // disco round trip on the direct path, if measured
 	LastHandshake time.Time
 	RxBytes       int64
 	TxBytes       int64
@@ -288,7 +300,7 @@ func (e *Engine) Stats() map[key.NodePublic]PeerStats {
 	defer func() {
 		for k, pi := range e.magic.Paths() {
 			st := out[k]
-			st.Endpoint, st.Relay = pi.Direct, pi.Relay
+			st.Endpoint, st.Relay, st.Latency = pi.Direct, pi.Relay, pi.Latency
 			out[k] = st
 		}
 	}()

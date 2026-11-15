@@ -61,6 +61,7 @@ type PeerStatus struct {
 	Endpoints       []netip.AddrPort `json:",omitempty"`
 	CurrentEndpoint netip.AddrPort   `json:",omitempty"`
 	Relay           int              `json:",omitempty"`
+	LatencyMS       float64          `json:",omitempty"` // round trip on the direct path
 	LastHandshake   *time.Time       `json:",omitempty"`
 	RxBytes         int64
 	TxBytes         int64

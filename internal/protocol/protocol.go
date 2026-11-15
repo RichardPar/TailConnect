@@ -16,8 +16,12 @@ import (
 // CurrentVersion is the protocol version spoken by this build.
 const CurrentVersion = 1
 
-// MagicDNSAddr is the in-tunnel resolver address every client serves.
-var MagicDNSAddr = netip.MustParseAddr("100.100.100.100")
+// MagicDNSAddr is the in-tunnel resolver address every client serves, and
+// MagicDNSAddr6 its IPv6 equivalent (in the reserved part of the ULA range).
+var (
+	MagicDNSAddr  = netip.MustParseAddr("100.100.100.100")
+	MagicDNSAddr6 = netip.MustParseAddr("fd7c:7c0e:a1e0::6464:6464")
+)
 
 type NodeID int64
 
@@ -103,6 +107,11 @@ type Node struct {
 	KeyExpiry *time.Time `json:",omitempty"`
 }
 
+// DNSConfig tells clients how to resolve names. With MagicDNS on, each
+// client answers names under Domain from the network map at Resolver, and
+// the OS sends queries for Domain (and reverse lookups for tunnel addresses)
+// there. If Nameservers is set, all other queries go there too (through the
+// in-tunnel resolver); otherwise the OS keeps its own resolvers for them.
 type DNSConfig struct {
 	MagicDNS    bool
 	Domain      string       // base domain, e.g. "home.internal"
@@ -125,9 +134,11 @@ type RelayNode struct {
 	Name string
 	// URL of the relay endpoint. A URL without scheme and host (e.g. "/relay")
 	// is relative to the control server URL: the relay embedded in tc-control.
-	URL      string
-	HostName string `json:",omitempty"` // for STUN (milestone 4)
-	STUNPort int    `json:",omitempty"` // 0 = default 3478
+	URL string
+	// STUN server for this region: HostName (default: the relay URL's host)
+	// and STUNPort (0 = the region has no STUN server).
+	HostName string `json:",omitempty"`
+	STUNPort int    `json:",omitempty"`
 }
 
 // ErrorResponse is the body of any non-2xx response.

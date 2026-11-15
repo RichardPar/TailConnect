@@ -25,6 +25,7 @@ import (
 	"tailconnect/internal/key"
 	"tailconnect/internal/protocol"
 	"tailconnect/internal/relay"
+	"tailconnect/internal/stun"
 )
 
 var version = "dev"
@@ -35,6 +36,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")
 	publicURL := flag.String("public-url", "", "URL clients use, for the example relay map (e.g. https://relay.example.com/relay)")
+	stunListen := flag.String("stun-listen", ":3478", `UDP address for the STUN server ("" disables)`)
 	allowAny := flag.Bool("allow-any", false, "serve any node that proves ownership of its key (required: client verification against tc-control is not implemented yet)")
 	logJSON := flag.Bool("log-json", false, "log in JSON format")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -87,9 +89,20 @@ func main() {
 		}
 		*publicURL = scheme + "://" + ln.Addr().String() + "/relay"
 	}
+	stunPort := 0
+	if *stunListen != "" {
+		pc, err := net.ListenPacket("udp", *stunListen)
+		if err != nil {
+			log.Error("STUN listener", "err", err)
+			os.Exit(1)
+		}
+		defer pc.Close()
+		go stun.Serve(pc)
+		stunPort = pc.LocalAddr().(*net.UDPAddr).Port
+	}
 	example, _ := json.MarshalIndent(protocol.RelayMap{Regions: []protocol.RelayRegion{
-		{ID: 1, Code: "control", Name: "tc-control (embedded)", Nodes: []protocol.RelayNode{{Name: "1a", URL: "/relay"}}},
-		{ID: 2, Code: "edge", Name: "tc-relay", Nodes: []protocol.RelayNode{{Name: "2a", URL: *publicURL}}},
+		{ID: 1, Code: "control", Name: "tc-control (embedded)", Nodes: []protocol.RelayNode{{Name: "1a", URL: "/relay", STUNPort: 3478}}},
+		{ID: 2, Code: "edge", Name: "tc-relay", Nodes: []protocol.RelayNode{{Name: "2a", URL: *publicURL, STUNPort: stunPort}}},
 	}}, "", "  ")
 	log.Warn("serving any node that proves its key (-allow-any)")
 	log.Info("tc-relay started", "version", version, "addr", ln.Addr().String(), "key", priv.Public().ShortString())

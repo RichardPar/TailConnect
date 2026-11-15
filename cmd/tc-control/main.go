@@ -32,6 +32,7 @@ import (
 	"tailconnect/internal/db"
 	"tailconnect/internal/protocol"
 	"tailconnect/internal/relay"
+	"tailconnect/internal/stun"
 )
 
 // version is set at build time: -ldflags "-X main.version=v0.1.0".
@@ -128,6 +129,7 @@ func cmdServe(args []string) error {
 	logJSON := fs.Bool("log-json", false, "log in JSON format")
 	embedRelay := fs.Bool("relay", true, "serve the built-in relay at /relay on the control listener")
 	relayMapFile := fs.String("relay-map", "", "JSON relay map to advertise instead of the built-in relay (see docs)")
+	stunListen := fs.String("stun-listen", ":3478", `UDP address for the built-in STUN server ("" disables; clients use it to find their public address)`)
 	fs.Parse(args)
 
 	var h slog.Handler = slog.NewTextHandler(os.Stderr, nil)
@@ -159,7 +161,24 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("parse %s: %w", *relayMapFile, err)
 		}
 	case *embedRelay:
-		relays = control.EmbeddedRelayMap()
+		stunPort := 0
+		if *stunListen != "" {
+			_, p, err := net.SplitHostPort(*stunListen)
+			if err != nil {
+				return usageError("bad -stun-listen: " + err.Error())
+			}
+			stunPort, _ = strconv.Atoi(p)
+		}
+		relays = control.EmbeddedRelayMap(stunPort)
+	}
+	if *stunListen != "" {
+		pc, err := net.ListenPacket("udp", *stunListen)
+		if err != nil {
+			return fmt.Errorf("STUN listener: %w", err)
+		}
+		defer pc.Close()
+		go stun.Serve(pc)
+		log.Info("listening", "server", "stun", "addr", "udp://"+pc.LocalAddr().String())
 	}
 	var relaySrv *relay.Server
 	if *embedRelay {

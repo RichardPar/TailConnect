@@ -19,10 +19,11 @@ const EmbeddedRelayPath = "/relay"
 
 // EmbeddedRelayMap advertises the built-in relay as region 1. Its URL is
 // relative, so clients resolve it against the control URL they already use.
-func EmbeddedRelayMap() protocol.RelayMap {
+// stunPort > 0 advertises a STUN server on the control host at that port.
+func EmbeddedRelayMap(stunPort int) protocol.RelayMap {
 	return protocol.RelayMap{Regions: []protocol.RelayRegion{{
 		ID: 1, Code: "control", Name: "tc-control (embedded)",
-		Nodes: []protocol.RelayNode{{Name: "1a", URL: EmbeddedRelayPath}},
+		Nodes: []protocol.RelayNode{{Name: "1a", URL: EmbeddedRelayPath, STUNPort: stunPort}},
 	}}}
 }
 

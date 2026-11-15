@@ -200,6 +200,9 @@ func cmdStatus(c *localapi.Client, args []string) error {
 		switch {
 		case p.CurrentEndpoint.IsValid():
 			detail += "; direct " + p.CurrentEndpoint.String()
+			if p.LatencyMS > 0 {
+				detail += fmt.Sprintf(" (%.1fms)", p.LatencyMS)
+			}
 		case p.Relay != 0:
 			detail += fmt.Sprintf("; relay %d", p.Relay)
 		case len(p.Endpoints) == 0:

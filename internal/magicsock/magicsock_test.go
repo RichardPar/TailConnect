@@ -117,3 +117,32 @@ func TestIndexAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestChooseHome(t *testing.T) {
+	c := New(Options{PrivateKey: key.NewPrivate[key.NodeKind]()})
+	defer c.Shutdown()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.relayMap = protocol.RelayMap{Regions: []protocol.RelayRegion{
+		{ID: 1, Nodes: []protocol.RelayNode{{URL: "https://r1.example/relay"}}},
+		{ID: 2, Nodes: []protocol.RelayNode{{URL: "https://r2.example/relay"}}},
+		{ID: 3, Nodes: []protocol.RelayNode{{URL: "https://r3.example/relay"}}},
+	}}
+	if h := c.chooseHomeLocked(); h != 1 {
+		t.Fatalf("before measurements: home=%d, want lowest ID 1", h)
+	}
+	c.home = 1
+	c.regionLatency = map[int]time.Duration{1: 50 * time.Millisecond, 2: 40 * time.Millisecond, 3: 20 * time.Millisecond}
+	if h := c.chooseHomeLocked(); h != 3 {
+		t.Fatalf("home=%d, want fastest region 3", h)
+	}
+	c.home = 3
+	c.regionLatency[2] = 16 * time.Millisecond // faster, but not by enough to switch
+	if h := c.chooseHomeLocked(); h != 3 {
+		t.Fatalf("home=%d, hysteresis should keep region 3", h)
+	}
+	c.regionLatency[2] = 10 * time.Millisecond // now clearly faster
+	if h := c.chooseHomeLocked(); h != 2 {
+		t.Fatalf("home=%d, want region 2", h)
+	}
+}
