@@ -88,19 +88,32 @@ func (t *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	if rp == nil || n == 0 {
 		return n, err
 	}
-	now := t.now()
-	t.mu.Lock()
+	locked := false
+	var now time.Time
 	for i := 0; i < n; i++ {
-		pk, ok := parse(bufs[i][offset : offset+sizes[i]])
-		if !ok || !(*rp)[pk.dst] {
+		b := bufs[i][offset : offset+sizes[i]]
+		// Cheap address check first: most packets go to unrestricted peers.
+		if dst, ok := dstAddr(b); !ok || !(*rp)[dst] {
 			continue
 		}
-		if k, ok := pk.outboundKey(); ok {
-			t.trackLocked(k, pk, now)
+		pk, ok := parse(b)
+		if !ok {
+			continue
 		}
+		k, ok := pk.outboundKey()
+		if !ok {
+			continue
+		}
+		if !locked {
+			t.mu.Lock()
+			locked, now = true, t.now()
+		}
+		t.trackLocked(k, pk, now)
 	}
-	t.gcLocked(now)
-	t.mu.Unlock()
+	if locked {
+		t.gcLocked(now)
+		t.mu.Unlock()
+	}
 	return n, err
 }
 
@@ -111,28 +124,41 @@ func (t *TUN) Write(bufs [][]byte, offset int) (int, error) {
 	if rp == nil {
 		return t.Device.Write(bufs, offset)
 	}
-	now := t.now()
-	keep := bufs[:0:0]
-	t.mu.Lock()
-	for _, b := range bufs {
-		pk, ok := parse(b[offset:])
-		if !ok {
-			// Unparseable from a restricted peer (fragments, extension
-			// headers): refuse; from anyone else: pass.
-			if src, isIP := srcAddr(b[offset:]); isIP && (*rp)[src] {
-				t.dropped.Add(1)
-				continue
+	var keep [][]byte // allocated only once something is dropped
+	locked := false
+	var now time.Time
+	for i, b := range bufs {
+		pkt := b[offset:]
+		src, isIP := srcAddr(pkt)
+		if !isIP || !(*rp)[src] {
+			if keep != nil {
+				keep = append(keep, b)
 			}
-			keep = append(keep, b)
 			continue
 		}
-		if !(*rp)[pk.src] || t.allowInboundLocked(pk, now) {
-			keep = append(keep, b)
+		if !locked {
+			t.mu.Lock()
+			locked, now = true, t.now()
+		}
+		// From a restricted peer: unparseable packets (fragments, extension
+		// headers) are refused, the rest must belong to one of our flows.
+		if pk, ok := parse(pkt); ok && t.allowInboundLocked(pk, now) {
+			if keep != nil {
+				keep = append(keep, b)
+			}
 			continue
 		}
 		t.dropped.Add(1)
+		if keep == nil {
+			keep = append(make([][]byte, 0, len(bufs)), bufs[:i]...)
+		}
 	}
-	t.mu.Unlock()
+	if locked {
+		t.mu.Unlock()
+	}
+	if keep == nil {
+		keep = bufs
+	}
 	if len(keep) == 0 {
 		return len(bufs), nil
 	}
@@ -243,6 +269,16 @@ func (p packet) timeout() time.Duration {
 		return udpTimeout
 	}
 	return icmpTimeout
+}
+
+func dstAddr(b []byte) (netip.Addr, bool) {
+	switch {
+	case len(b) >= 20 && b[0]>>4 == 4:
+		return netip.AddrFrom4([4]byte(b[16:20])), true
+	case len(b) >= 40 && b[0]>>4 == 6:
+		return netip.AddrFrom16([16]byte(b[24:40])).Unmap(), true
+	}
+	return netip.Addr{}, false
 }
 
 func srcAddr(b []byte) (netip.Addr, bool) {

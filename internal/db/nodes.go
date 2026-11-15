@@ -338,19 +338,34 @@ func usedIPv4s(ctx context.Context, q querier) (map[netip.Addr]bool, error) {
 // among userID's nodes (ignoring node selfID). Names are unique per tenant:
 // two tenants can both have a "laptop".
 func uniqueGivenName(ctx context.Context, q querier, userID int64, base string, selfID int64) (string, error) {
+	// One query for the account's names, then pick in memory: probing
+	// candidates one query at a time made a fleet of N same-named machines
+	// cost O(N²) queries to join.
+	rows, err := q.QueryContext(ctx, `SELECT given_name FROM nodes WHERE user_id = ? AND id != ?`, userID, selfID)
+	if err != nil {
+		return "", err
+	}
+	taken := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return "", err
+		}
+		taken[n] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
 	for i := 1; ; i++ {
 		cand := base
 		if i > 1 {
 			suffix := "-" + strconv.Itoa(i)
 			cand = strings.TrimRight(truncate(base, 63-len(suffix)), "-") + suffix
 		}
-		var id int64
-		err := q.QueryRowContext(ctx, `SELECT id FROM nodes WHERE user_id = ? AND given_name = ?`, userID, cand).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) || (err == nil && id == selfID) {
+		if !taken[cand] {
 			return cand, nil
-		}
-		if err != nil {
-			return "", err
 		}
 	}
 }

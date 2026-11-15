@@ -58,7 +58,7 @@ func newTestNode(t *testing.T, name string) *testNode {
 	return newTestNodeEP(t, name, loopbackEndpoints)
 }
 
-func newTestNodeEP(t *testing.T, name string, eps func(uint16) ([]netip.AddrPort, []netip.Prefix)) *testNode {
+func newTestNodeEP(t testing.TB, name string, eps func(uint16) ([]netip.AddrPort, []netip.Prefix)) *testNode {
 	t.Helper()
 	n := &testNode{}
 	d, err := New(Options{
@@ -172,7 +172,7 @@ func ping(n *testNode, dst netip.Addr, msg string) (out string, err error) {
 
 // newControl starts tc-control with its embedded relay (and a STUN server
 // unless noSTUN) and returns the database, URL and a reusable auth key.
-func newControl(t *testing.T, noSTUN ...bool) (*db.DB, string, string) {
+func newControl(t testing.TB, noSTUN ...bool) (*db.DB, string, string) {
 	t.Helper()
 	relays := control.EmbeddedRelayMap(0)
 	if len(noSTUN) == 0 || !noSTUN[0] {

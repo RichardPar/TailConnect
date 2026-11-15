@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := -trimpath
 ARCHES  ?= amd64 arm64
 
-.PHONY: build test e2e cross dist install-server install-client clean
+.PHONY: build test e2e bench perf perf-budget cross dist install-server install-client clean
 
 build: ## bin/tc-control, bin/tcd, bin/tc, bin/tc-relay
 	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/ ./cmd/...
@@ -18,6 +18,15 @@ test:
 e2e: ## network-namespace tests (no root needed with unprivileged user namespaces)
 	tests/e2e/lan.sh
 	tests/e2e/nat.sh
+
+bench: ## Go benchmarks: packet paths, control-plane scale, end-to-end tunnel
+	go test -run '^$$' -bench . -benchmem ./...
+
+perf: ## throughput and latency with real kernel TUN devices (network namespaces)
+	tests/perf/throughput.sh
+
+perf-budget: ## fail if key operations exceed their performance budgets
+	TC_PERF_BUDGET=1 go test -count=1 -run PerfBudget ./...
 
 cross: ## compile checks for the other target platforms
 	CGO_ENABLED=0 GOOS=windows go build ./...

@@ -149,3 +149,18 @@ func TestTUNIntercept(t *testing.T) {
 	}
 	<-ft.written
 }
+
+// loopTUN returns the same packet from every Read and discards writes.
+type loopTUN struct{ pkt []byte }
+
+func (l *loopTUN) File() *os.File           { return nil }
+func (l *loopTUN) MTU() (int, error)        { return 1280, nil }
+func (l *loopTUN) Name() (string, error)    { return "loop", nil }
+func (l *loopTUN) Events() <-chan tun.Event { return nil }
+func (l *loopTUN) Close() error             { return nil }
+func (l *loopTUN) BatchSize() int           { return 1 }
+func (l *loopTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	sizes[0] = copy(bufs[0][offset:], l.pkt)
+	return 1, nil
+}
+func (l *loopTUN) Write(bufs [][]byte, _ int) (int, error) { return len(bufs), nil }

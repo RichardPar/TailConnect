@@ -36,6 +36,16 @@ Debugging options for `nat.sh`:
 - `TC_DISCO_DEBUG=1` logs disco messages;
 - `TC_NAT_PCAP=1` records UDP on both routers' WAN side with `tests/e2e/udpsniff.py`.
 
+## Performance
+
+```sh
+make bench          # Go benchmarks
+make perf           # throughput and latency through real kernel TUN devices
+make perf-budget    # fail if key operations exceed their budgets
+```
+
+What each measures, current figures with charts and the known limits are in [Performance](performance.md).
+
 ## Code layout
 
 | Path | What |
@@ -63,6 +73,7 @@ Debugging options for `nat.sh`:
 | `internal/ipam`, `internal/key` | Address allocation, typed keys |
 | `packaging/linux` | systemd units, settings files, `install.sh` |
 | `tests/e2e` | Network-namespace test scripts and helpers |
+| `tests/perf` | Throughput script and its measuring tool (`tput`) |
 
 ## Conventions
 

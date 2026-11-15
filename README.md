@@ -55,6 +55,7 @@ On the server, open **TCP 7740** and **UDP 3478**. On devices with a firewall, o
 | [Configuration](docs/configuration.md) | Every flag, settings file, environment variable, port and file path |
 | [How it works](docs/how-it-works.md) | Architecture, NAT traversal, MagicDNS, tenants and sharing, security model |
 | [Troubleshooting](docs/troubleshooting.md) | Diagnosing joins, paths, DNS and services |
+| [Performance](docs/performance.md) | Throughput, latency and server scale, with charts; how to measure it |
 | [Development](docs/development.md) | Building, tests, end-to-end test scripts, code layout |
 
 ## Roadmap

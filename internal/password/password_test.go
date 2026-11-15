@@ -52,3 +52,23 @@ func TestDummyCost(t *testing.T) {
 		t.Fatalf("dummy verify too cheap: %v vs %v", dummy, real)
 	}
 }
+
+// Hashing cost bounds sign-ins and sign-ups per second (the portal runs at
+// most four at once).
+func BenchmarkHash(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := Hash("correct horse battery"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkVerify(b *testing.B) {
+	h, _ := Hash("correct horse battery")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Verify("correct horse battery", h)
+	}
+}
