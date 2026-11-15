@@ -2,6 +2,8 @@
 
 This guide sets up a TailConnect network: one **control server** (`tc-control`) and any number of **devices** running the client daemon (`tcd`) and CLI (`tc`). It covers Linux. Windows and Android clients are on the [roadmap](../README.md#roadmap).
 
+**First decide where the server goes:** only on your LAN, on the internet, or at home but reachable from outside. [LAN and internet setups](network-setups.md) has the settings, ports and pitfalls for each.
+
 - [Requirements](#requirements)
 - [Get the software](#get-the-software)
 - [Install the control server](#install-the-control-server)
@@ -60,7 +62,7 @@ The installer works from a source checkout too: it takes binaries from `bin/`.
 
 ## Install the control server
 
-Pick a machine every device can reach: a small VPS, a home server, or one of the devices itself. Then, from the tarball or source directory:
+Pick a machine every device can reach: a small VPS, a home server, or one of the devices itself ([which setup?](network-setups.md#which-setup)). Then, from the tarball or source directory:
 
 ```sh
 sudo ./packaging/linux/install.sh server
@@ -127,7 +129,7 @@ On a cloud VM, open the same ports in the provider's security group.
 
 ```sh
 systemctl status tc-control
-curl http://localhost:7740/key        # {"Version":1,"MachineKey":"mkey:…"}
+curl http://localhost:7740/key        # {"Version":2,"MachineKey":"mkey:…"}
 journalctl -u tc-control -f           # logs
 ```
 

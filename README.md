@@ -52,6 +52,7 @@ On the server, open **TCP 7740** and **UDP 3478**. On devices with a firewall, o
 |---|---|
 | [Installation](docs/installation.md) | Requirements, building, installing the server and clients, HTTPS, upgrading, uninstalling |
 | [Usage](docs/usage.md) | Accounts and sign-up, joining devices, sharing machines, the web portal, admin CLI and API, the `tc` client, MagicDNS, relays |
+| [LAN and internet setups](docs/network-setups.md) | Where to put the server: LAN only, on the internet, or at home reachable from outside; settings, ports and pitfalls |
 | [Configuration](docs/configuration.md) | Every flag, settings file, environment variable, port and file path |
 | [How it works](docs/how-it-works.md) | Architecture, NAT traversal, MagicDNS, tenants and sharing, security model |
 | [Troubleshooting](docs/troubleshooting.md) | Diagnosing joins, paths, DNS and services |
