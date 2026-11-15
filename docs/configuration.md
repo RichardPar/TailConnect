@@ -29,7 +29,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 | MagicDNS on or off | `-magic-dns` | on |
 | Send all of the devices' DNS through MagicDNS | `-dns-nameservers 1.1.1.1,…` | off (devices keep their own DNS) |
 | Control and relay address | `-listen` | `:7740` |
-| Portal address | `-admin-listen` | `127.0.0.1:7741` |
+| Portal address | `-admin-listen` | `:7741` (every address) |
 | URL shown for joining | `-public-url` | derived |
 | HTTPS: automatic (Let's Encrypt) | `-acme-domain`, `-acme-http-listen`, `-acme-email`, `-acme-staging` | off ([guide](lets-encrypt.md)) |
 | HTTPS: your own certificate | `-tls-cert`, `-tls-key` | off |
@@ -99,7 +99,7 @@ The coordination server: control API, built-in relay, STUN, web portal.
 |---|---|---|
 | `-db` | see [below](#tc-control-admin-commands) | SQLite database. The packaged unit uses `/var/lib/tc-control/control.db`. |
 | `-listen` | `:7740` | Control API and built-in relay (TCP) |
-| `-admin-listen` | `127.0.0.1:7741` | Web portal and its API. `""` turns them off. Keep it on loopback, or use TLS if other people sign in to it ([how](installation.md#open-the-portal-to-other-people)). |
+| `-admin-listen` | `:7741` | Web portal and its API: `:7741` on every address, `127.0.0.1:7741` on the server only (reach it with an SSH tunnel), `""` turns them off. Without HTTPS, passwords cross the network unencrypted, and `tc-control` logs a warning. |
 | `-key-expiry` | `180d` | How long machines stay authorised after joining or re-authenticating: days (`90d`), a Go duration (`720h`), or `never`. Machines set to never expire, and machines that joined before this existed, are unaffected. |
 | `-ephemeral-timeout` | `30m` | Remove ephemeral machines that have been offline this long (`0` keeps them). |
 | `-signup` | `approval` | Who may create accounts in the portal: `off`, `approval` (pending until an operator approves), `invite` (needs an invite code) or `open`. A valid invite skips approval in every mode except `off`. |
@@ -257,7 +257,7 @@ Restart the service after editing. Variables inside these files are **not** expa
 |---|---|---|---|
 | 7740 | TCP | control server | devices → control API and built-in relay |
 | 3478 | UDP | control server, `tc-relay` | devices → STUN |
-| 7741 | TCP | control server (loopback by default) | operators and tenants → web portal and API |
+| 7741 | TCP | control server | operators and tenants → web portal and API |
 | 7742 | TCP | `tc-relay` | devices → standalone relay |
 | 443 | TCP | control server or `tc-relay`, with `-listen :443` | devices → HTTPS; Let's Encrypt → certificate checks (`-acme-domain`) |
 | 80 | TCP | with `-acme-http-listen :80` | Let's Encrypt → certificate checks |

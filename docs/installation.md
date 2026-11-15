@@ -82,9 +82,14 @@ Where will your devices reach this server?
      from the internet (a free certificate comes from Let's Encrypt automatically)
 Choose 1 or 2 [1]:
 This server's address on the LAN (give it a fixed address on your router) [192.168.10.124]:
+
+The web portal (port 7741) is where you manage accounts, machines and keys. Who may open it?
+  1) Anyone who can reach this server; they still need to sign in (plain HTTP: passwords typed into it cross your network unencrypted)
+  2) Only this machine: from your computer, through an SSH tunnel
+Choose 1 or 2 [1]:
   saved in /etc/default/tc-control
 tc-control is running (v0.6.0-dev).
-  If this machine or your network has a firewall, open: 7740/tcp 3478/udp
+  If this machine or your network has a firewall, open: 7740/tcp 3478/udp 7741/tcp
 
 == Your account
 You sign in to the web portal with it, and your devices join it. It's an operator
@@ -103,9 +108,11 @@ Join your devices with this key. It works for 24 hours, on any number of devices
   Linux:    sudo ./packaging/linux/install.sh client     (asks for the server and the key)
   Android:  in the TailConnect app, Server: http://192.168.10.124:7740  and the key above
   Server URL for devices: http://192.168.10.124:7740
+
+Web portal: http://192.168.10.124:7741   (sign in as alice)
 ```
 
-With choice **2**, it asks for the server's DNS name, the HTTPS port (443, or another with port 80 for Let's Encrypt's checks) and an optional e-mail, and turns on [automatic HTTPS](lets-encrypt.md). If `ufw` or `firewalld` is active, it offers to open the ports.
+With choice **2**, it asks for the server's DNS name, the HTTPS port (443, or another with port 80 for Let's Encrypt's checks) and an optional e-mail, and turns on [automatic HTTPS](lets-encrypt.md). The web portal is open to the network by default, on port 7741; choose **2** at that question to keep it on the server only. If `ufw` or `firewalld` is active, it offers to open the ports.
 
 The installer:
 - copies `tc-control` to `/usr/local/bin`;
@@ -152,7 +159,7 @@ All options are listed in the [configuration reference](configuration.md#tc-cont
 |---|---|---|
 | 7740 | TCP | Control API and built-in relay (clients connect here) |
 | 3478 | UDP | STUN: clients learn their public address, needed for NAT traversal |
-| 7741 | TCP | Web portal. It listens on 127.0.0.1 only by default; open it only if [other people use it](#open-the-portal-to-other-people). |
+| 7741 | TCP | Web portal (unless you chose to keep it on the server only) |
 
 ```sh
 sudo ufw allow 7740/tcp && sudo ufw allow 3478/udp                     # Ubuntu/Debian with ufw
@@ -169,7 +176,7 @@ curl http://localhost:7740/key        # {"Version":2,"MachineKey":"mkey:…"}
 journalctl -u tc-control -f           # logs
 ```
 
-The **web portal** is at `http://127.0.0.1:7741` on the server. From your workstation, run `ssh -L 7741:127.0.0.1:7741 server`, open `http://localhost:7741`, and sign in with your account. See [the web portal](usage.md#the-web-portal).
+The **web portal** is at `http://SERVER:7741` (`https://` with HTTPS). Sign in with your account. If you kept it on the server only, run `ssh -L 7741:127.0.0.1:7741 server` from your computer and open `http://localhost:7741`. See [the web portal](usage.md#the-web-portal).
 
 ---
 
@@ -232,17 +239,18 @@ TC_CONTROL_ARGS="-listen :443 -public-url https://vpn.example.com -tls-cert /run
 
 ## Open the portal to other people
 
-If only you manage the server, keep the portal on 127.0.0.1 and reach it through SSH. If other people should sign up, add their own devices and share machines, they need to reach it, and since they type passwords into it, **over HTTPS only**:
+The portal is reachable on port 7741 by default, so people on the network can already open it. For other people to sign up, add their own devices and share machines:
 
-1. Set up HTTPS as in [Enable HTTPS](#enable-https); the certificate covers the portal too.
-2. Listen on a reachable address and choose who may sign up:
+1. **Use HTTPS** ([how](#enable-https)): they type passwords into the portal. The portal uses the server's certificate.
+2. **Choose who may sign up**, in `/etc/default/tc-control`, then restart:
    ```sh
-   # /etc/default/tc-control
-   TC_CONTROL_ARGS="-listen :443 -acme-domain vpn.example.com -admin-listen :7741 -signup approval"
+   TC_CONTROL_ARGS="… -signup approval"
    ```
-3. Open TCP 7741, restart (`sudo systemctl restart tc-control`), and send people `https://vpn.example.com:7741`.
+3. **Open TCP 7741** in the firewall (and on the router, for people outside), and send people `https://vpn.example.com:7741`.
 
-With `-signup approval` (the default), new accounts wait in the Accounts tab until an operator approves them; `invite` needs a code you hand out; `off` hides sign-up. `tc-control` logs a warning if the portal listens on a non-loopback address without TLS. There's no e-mail on the server, so forgotten passwords are reset by an operator (Accounts → Reset password, or `tc-control users passwd NAME`).
+With `-signup approval` (the default), new accounts wait in the Accounts tab until an operator approves them; `invite` needs a code you hand out; `off` hides sign-up. There's no e-mail on the server, so forgotten passwords are reset by an operator (Accounts → Reset password, or `tc-control users passwd NAME`).
+
+To keep the portal private instead, run the installer with `--reconfigure` and choose "only this machine", or set `-admin-listen 127.0.0.1:7741`.
 
 ---
 

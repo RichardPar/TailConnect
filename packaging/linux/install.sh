@@ -169,6 +169,7 @@ server_questions() {
 		server_url="http://$addr:7740"
 		server_args="-domain $domain -public-url $server_url"
 		server_ports="7740/tcp 3478/udp"
+		portal_questions "http://$addr:7741" "plain HTTP: passwords typed into it cross your network unencrypted"
 		return
 	fi
 	while :; do
@@ -199,6 +200,38 @@ server_questions() {
 		server_ports="$server_ports 80/tcp"
 	fi
 	[ -z "$email" ] || server_args="$server_args -acme-email $email"
+	portal_questions "https://$name:7741" "HTTPS, with the same certificate"
+}
+
+# portal_questions URL NOTE: where the web portal listens. Sets portal_url
+# ("" when it's only on this machine) and adds to server_args/server_ports.
+portal_questions() {
+	echo
+	echo "The web portal (port 7741) is where you manage accounts, machines and keys. Who may open it?"
+	echo "  1) Anyone who can reach this server; they still need to sign in ($2)"
+	echo "  2) Only this machine: from your computer, through an SSH tunnel"
+	while :; do
+		ask portal "Choose 1 or 2" "1"
+		case $portal in 1 | 2) break ;; esac
+	done
+	if [ "$portal" = 1 ]; then
+		portal_url=$1
+		server_ports="$server_ports 7741/tcp"
+	else
+		portal_url=
+		server_args="$server_args -admin-listen 127.0.0.1:7741"
+	fi
+}
+
+# portal_hint: how to open the portal, from the saved settings.
+portal_hint() {
+	if grep -q -- '-admin-listen 127.0.0.1' "$DEFAULTS/tc-control" 2>/dev/null; then
+		echo "Web portal: only on this machine; from your computer: ssh -L 7741:127.0.0.1:7741 ${SUDO_USER:-you}@$(hostname), then open http://localhost:7741"
+	elif grep -q -- '-admin-listen ""' "$DEFAULTS/tc-control" 2>/dev/null; then
+		echo "Web portal: turned off (-admin-listen \"\")"
+	else
+		echo "Web portal: port 7741 on this server, e.g. http://$(lan_address):7741 (https:// with automatic HTTPS)"
+	fi
 }
 
 # write_server_settings ARGS: put ARGS in /etc/default/tc-control,
@@ -251,8 +284,12 @@ server_finish() {
 	echo "  Android:  in the TailConnect app, Server: $url  and the key above"
 	echo "  Server URL for devices: $url"
 	echo
-	echo "Web portal: http://127.0.0.1:7741 on this machine; from your computer:"
-	echo "  ssh -L 7741:127.0.0.1:7741 ${SUDO_USER:-you}@$(hostname)   then open http://localhost:7741 and sign in as $admin"
+	if [ -n "${portal_url:-}" ]; then
+		echo "Web portal: $portal_url   (sign in as $admin)"
+	else
+		echo "Web portal: from your computer, ssh -L 7741:127.0.0.1:7741 ${SUDO_USER:-you}@$(hostname)"
+		echo "  then open http://localhost:7741 and sign in as $admin"
+	fi
 	echo "More keys: sudo tc-control keys create -user $admin   (or Auth keys in the portal)"
 }
 
@@ -345,7 +382,7 @@ main() {
 				echo "Next (once): sudo tc-control users create NAME -operator -password   # your account for the web portal"
 				echo "             sudo tc-control keys create -user NAME -reusable -expiration 24h"
 			fi
-			echo "Web portal:  http://127.0.0.1:7741 on this machine (from elsewhere: ssh -L 7741:127.0.0.1:7741 $(hostname))"
+			portal_hint
 		fi
 		;;
 	relay)

@@ -62,8 +62,9 @@ func newTestNodeEP(t testing.TB, name string, eps func(uint16) ([]netip.AddrPort
 	t.Helper()
 	n := &testNode{}
 	d, err := New(Options{
-		StateDir: filepath.Join(t.TempDir(), name),
-		Logf:     func(f string, a ...any) { t.Logf("[%s] "+f, append([]any{name}, a...)...) },
+		StateDir:        filepath.Join(t.TempDir(), name),
+		TrafficInterval: 300 * time.Millisecond,
+		Logf:            func(f string, a ...any) { t.Logf("[%s] "+f, append([]any{name}, a...)...) },
 		NewEngine: func(ep EngineParams) (*engine.Engine, error) {
 			var ips []netip.Addr
 			for _, p := range ep.Addrs {
@@ -180,6 +181,13 @@ func newControl(t testing.TB, noSTUN ...bool) (*db.DB, string, string) {
 // newControlWith is newControl with control settings adjusted by mod.
 func newControlWith(t testing.TB, mod func(*control.Config), noSTUNFlag bool) (*db.DB, string, string) {
 	t.Helper()
+	d, url, key, _ := newControlServer(t, mod, noSTUNFlag)
+	return d, url, key
+}
+
+// newControlServer is newControlWith, also returning the control server.
+func newControlServer(t testing.TB, mod func(*control.Config), noSTUNFlag bool) (*db.DB, string, string, *control.Server) {
+	t.Helper()
 	noSTUN := []bool{noSTUNFlag}
 	relays := control.EmbeddedRelayMap(0)
 	if len(noSTUN) == 0 || !noSTUN[0] {
@@ -216,7 +224,7 @@ func newControlWith(t testing.TB, mod func(*control.Config), noSTUNFlag bool) (*
 	t.Cleanup(func() { ctl.Close(); rs.Close(); ts.Close(); cdb.Close() })
 	u, _ := cdb.CreateUser(context.Background(), "alice")
 	authKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: u.ID, Reusable: true, TTL: time.Hour})
-	return cdb, ts.URL, authKey
+	return cdb, ts.URL, authKey, ctl
 }
 
 func TestEndToEndMesh(t *testing.T) {

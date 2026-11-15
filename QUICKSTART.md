@@ -39,9 +39,14 @@ Where will your devices reach this server?
   2) From anywhere, over HTTPS: needs a DNS name pointing here, and port 443 reachable …
 Choose 1 or 2 [1]:
 This server's address on the LAN (give it a fixed address on your router) [192.168.1.10]:
+
+The web portal (port 7741) is where you manage accounts, machines and keys. Who may open it?
+  1) Anyone who can reach this server; they still need to sign in (plain HTTP: passwords …)
+  2) Only this machine: from your computer, through an SSH tunnel
+Choose 1 or 2 [1]:
   saved in /etc/default/tc-control
 tc-control is running (v0.6.0-dev).
-Open 7740/tcp 3478/udp in the firewall (ufw)? (y/n) [y]:
+Open 7740/tcp 3478/udp 7741/tcp in the firewall (ufw)? (y/n) [y]:
 
 == Your account
 Account name [alice]:
@@ -55,6 +60,8 @@ Join your devices with this key. It works for 24 hours, on any number of devices
 
   Linux:    sudo ./packaging/linux/install.sh client     (asks for the server and the key)
   Android:  in the TailConnect app, Server: http://192.168.1.10:7740  and the key above
+
+Web portal: http://192.168.1.10:7741   (sign in as alice)
 ```
 
 | Question | What to answer |
@@ -62,6 +69,7 @@ Join your devices with this key. It works for 24 hours, on any number of devices
 | MagicDNS domain | The end of your machines' names: `laptop.alice.home.internal`. Pick it now: changing it later renames every machine. |
 | Where devices reach the server | **1** for a server only on your LAN. **2** for one reachable from anywhere: you give its DNS name, and it gets a free HTTPS certificate from Let's Encrypt by itself ([what that needs](docs/lets-encrypt.md#what-you-need)). |
 | Address, or DNS name and port | What devices connect to. On a LAN, give the server a fixed address on your router. |
+| Web portal | **1** (the default): anyone who can reach the server can open the sign-in page, on port 7741. Over plain HTTP (a LAN server), passwords cross your network unencrypted; with HTTPS, the portal uses the same certificate. **2**: only the server itself; you reach it through an SSH tunnel. |
 | Firewall | Asked only if `ufw` or `firewalld` is active. Otherwise, open the ports it lists, and on a router or cloud VM also forward or allow them there. |
 | Account and password | Your account, an operator: you sign in to the web portal with it, and your devices join it. You don't create anything in the portal first: this is the first account. |
 
@@ -106,11 +114,9 @@ ping laptop          # other devices by name
 
 ## 5. Open the web portal
 
-The portal listens on the server only. From your workstation:
+Open **http://SERVER:7741** (or **https://vpn.example.com:7741** with HTTPS) in a browser and sign in as alice. The installer printed the exact address.
 
-```sh
-ssh -L 7741:127.0.0.1:7741 you@SERVER       # then open http://localhost:7741 and sign in as alice
-```
+If you chose to keep the portal on the server only, tunnel to it from your computer instead: `ssh -L 7741:127.0.0.1:7741 you@SERVER`, then open http://localhost:7741.
 
 ![Web portal, Machines tab: six machines in two accounts, one waiting for approval](docs/images/portal-machines.png)
 

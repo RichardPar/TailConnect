@@ -7,6 +7,7 @@ The portal is where you manage the network in a browser: machines, auth keys, ac
 - [Open the portal](#open-the-portal)
 - [Sign in and sign up](#sign-in-and-sign-up)
 - [Machines](#machines)
+- [Traffic](#traffic)
 - [Auth keys](#auth-keys)
 - [Access rules](#access-rules)
 - [Sharing](#sharing)
@@ -19,13 +20,14 @@ The portal is where you manage the network in a browser: machines, auth keys, ac
 
 ## Open the portal
 
-The portal listens on `http://127.0.0.1:7741` on the server, so by default only the server itself can reach it. From your workstation, tunnel to it over SSH:
+Open **port 7741 on the server** in a browser: `http://192.168.1.10:7741`, or `https://vpn.example.com:7741` on a server with HTTPS. The installer prints the address at the end.
 
-```sh
-ssh -L 7741:127.0.0.1:7741 you@server      # then open http://localhost:7741
-```
-
-To let other people use it, to sign up, manage their own machines and share, it must be reachable, and **over HTTPS only**, because people type passwords into it. See [Open the portal to other people](installation.md#open-the-portal-to-other-people) and [HTTPS with Let's Encrypt](lets-encrypt.md).
+- **Over plain HTTP**, passwords typed into the portal cross your network unencrypted. On a network you trust that may be fine. Otherwise turn on [HTTPS](lets-encrypt.md); the portal then uses the same certificate.
+- **To keep the portal on the server only**, choose that in the installer (`sudo ./packaging/linux/install.sh server --reconfigure`), or set `-admin-listen 127.0.0.1:7741`. Then reach it through an SSH tunnel from your computer:
+  ```sh
+  ssh -L 7741:127.0.0.1:7741 you@server      # then open http://localhost:7741
+  ```
+- For other people to sign up, see [Open the portal to other people](installation.md#open-the-portal-to-other-people).
 
 The portal follows your system's light or dark setting.
 
@@ -48,6 +50,16 @@ The portal follows your system's light or dark setting.
 - **Passwords** are at least 10 characters. There's no e-mail on the server, so an operator resets forgotten ones.
 - **Use the admin token** signs in as an operator without an account. It's for recovery, for example when no operator can sign in. Create one with `sudo tc-control admin-token`; scripts use the same token with the API.
 
+**No one can sign in yet?** The installer creates your operator account on a new server. A server set up another way, or upgraded from an older version, may have no account with both a password and the operator role. Check, then fix it on the server:
+
+```sh
+sudo tc-control users list                        # PASSWORD column: yes/no; ROLE: operator/tenant
+sudo tc-control users role richard operator       # make an existing account an operator
+sudo tc-control users passwd richard              # give it a password (asked twice, at least 10 characters)
+```
+
+Or create a new operator account: `sudo tc-control users create NAME -operator -password`. Then sign in with that name and password.
+
 ## Machines
 
 The machines of your account. An operator sees every account's machines, with an Account column.
@@ -59,6 +71,7 @@ The machines of your account. An operator sees every account's machines, with an
 | Addresses | Its IPv4 and IPv6 tunnel addresses |
 | OS | Its operating system, and the device's own hostname |
 | Last seen | When it last contacted the server |
+| Traffic | Its current download and upload speed, and how much it has received and sent since its tunnel started. Click it for the breakdown per peer ([below](#traffic)). `–`: it hasn't reported any traffic. |
 | Key | When its authorisation expires (*expires in 6 months*, *never expires*), *expired*, or *needs approval* |
 
 | Button | What it does |
@@ -73,7 +86,23 @@ A tenant sees only their own machines:
 
 ![Tenant view of the Machines tab for alice: one machine, alicebox](images/portal-tenant-machines.png)
 
-The cards along the top show machines online, accounts, machines waiting for approval (for operators), the MagicDNS domain, and the server's version.
+The cards along the top show machines online, accounts, machines waiting for approval (for operators), the MagicDNS domain, and the server's version. The tab refreshes every 10 seconds.
+
+## Traffic
+
+Click a machine's traffic to see whom it exchanges data with: the speed in each direction, and the totals, per peer.
+
+![Machines tab with jellyfin's traffic opened: 2.1 MB/s up to the laptop, 177 KB/s to the tablet](images/portal-traffic.png)
+
+How the numbers come about:
+- **Machines report them.** Traffic between your devices goes directly from one to the other, or through a relay, so the server never sees most of it. Every machine counts the bytes it exchanges with each peer, as `tc status` shows. It sends the counts to the server every 30 seconds while they change, over its encrypted control connection.
+- **Speeds** are averages over the last 30 seconds. A machine whose traffic stops sends no more reports, so its speeds drop to zero after about a minute and a half.
+- **Totals** count from when the machine's tunnel last started (when `tcd` started, or after `tc up`). They're not a lifetime total.
+- **Each direction is from the machine's point of view:** ↓ is what it received, ↑ what it sent. The laptop's download from jellyfin is jellyfin's upload to the laptop.
+- **The server keeps only the latest report**, in memory: nothing is stored on disk or kept as history. After a server restart, numbers return with the next reports.
+- **`–`** means the machine hasn't reported anything: it's idle, offline, or runs an older client that doesn't report traffic.
+
+Operators see every machine's traffic; tenants see their own machines'.
 
 ## Auth keys
 
@@ -173,7 +202,7 @@ The server's own settings are command-line options, set in `/etc/default/tc-cont
 | When ephemeral machines are removed | `-ephemeral-timeout 30m` | 30 minutes |
 | The MagicDNS domain | `-domain home.internal` | `tc.internal` |
 | The URL shown for joining | `-public-url` | derived from `-listen` |
-| Where the portal listens | `-admin-listen` | `127.0.0.1:7741` |
+| Where the portal listens | `-admin-listen` | `:7741` (every address) |
 | HTTPS | `-acme-domain NAME`, or `-tls-cert`/`-tls-key` | off |
 
 All of them are in the [configuration reference](configuration.md#tc-control-serve). [Settings at a glance](configuration.md#settings-at-a-glance) lists every setting and where it's changed.

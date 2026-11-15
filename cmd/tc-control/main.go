@@ -175,7 +175,7 @@ func openDB(path string) (*db.DB, error) {
 func cmdServe(args []string) error {
 	fs, dbPath := flags("serve")
 	listen := fs.String("listen", ":7740", "client-facing control API address")
-	adminListen := fs.String("admin-listen", "127.0.0.1:7741", `web portal and API address ("" disables; other people need it reachable over TLS)`)
+	adminListen := fs.String("admin-listen", ":7741", `web portal and API address: ":7741" for every network, "127.0.0.1:7741" for this machine only (reach it with an SSH tunnel), "" to turn it off`)
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
 	keyExpiry := fs.String("key-expiry", "180d", `how long machines stay authorised before they must re-authenticate ("never", or e.g. 90d, 720h)`)
 	ephemeralTimeout := fs.Duration("ephemeral-timeout", 30*time.Minute, "remove ephemeral machines offline this long (0 = keep them)")
@@ -357,7 +357,8 @@ func cmdServe(args []string) error {
 			}
 		}
 		if !isLoopback(*adminListen) && *tlsCert == "" && certs == nil {
-			log.Warn("web portal is on a non-loopback address without TLS; passwords, the admin token and session cookies travel in clear text",
+			log.Warn("the web portal is reachable over plain HTTP: passwords and session cookies cross the network unencrypted; "+
+				"turn on HTTPS (-acme-domain), or keep the portal on this machine (-admin-listen 127.0.0.1:7741)",
 				"listen", *adminListen)
 		}
 		if *signup != admin.SignupOff && isLoopback(*adminListen) {
@@ -366,6 +367,7 @@ func cmdServe(args []string) error {
 		}
 		adm := admin.New(d, admin.Info{
 			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, ControlURL: *publicURL, Version: version, Signup: *signup, KeyExpiry: keyLife,
+			Traffic: ctl.Traffic,
 		}, log)
 		servers = append(servers, &http.Server{
 			Addr: *adminListen, Handler: adm.Handler(),

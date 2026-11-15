@@ -57,6 +57,7 @@ Allow the ports from the LAN only:
 ```sh
 sudo ufw allow from 192.168.1.0/24 to any port 7740 proto tcp     # control API and relay
 sudo ufw allow from 192.168.1.0/24 to any port 3478 proto udp     # STUN
+sudo ufw allow from 192.168.1.0/24 to any port 7741 proto tcp     # web portal
 ```
 
 Don't forward anything on the router.
@@ -78,7 +79,7 @@ sudo tc up --server http://192.168.1.10:7740 --server-key mkey:520ff7… --authk
 ### Good to know
 
 - **Use the address, or a name your router's DNS knows.** `--server http://pi.lan:7740` works if every device resolves `pi.lan`. Don't use a name that only some devices know.
-- **The web portal** listens on the server's loopback only. Reach it from your workstation with `ssh -L 7741:127.0.0.1:7741 192.168.1.10`, then open `http://localhost:7741`. To let other people on the LAN sign in, see [Open the portal to other people](installation.md#open-the-portal-to-other-people). That needs HTTPS, because they type passwords.
+- **The web portal** is at `http://192.168.1.10:7741`. On plain HTTP, passwords typed into it cross the LAN unencrypted. If you don't trust everyone on the network, keep the portal on the server only (the installer offers this) and reach it with `ssh -L 7741:127.0.0.1:7741 192.168.1.10`.
 - **Wi-Fi client isolation** (common on guest networks) stops devices from reaching each other directly. Traffic then goes through the relay on the server, which still works but is slower. `tc status` shows `relay 1` instead of `direct` for those peers.
 
 ---
@@ -114,7 +115,7 @@ A server with a public address, for devices anywhere: at home, at work, on mobil
 sudo ufw allow 443/tcp && sudo ufw allow 3478/udp
 ```
 
-On a cloud VM, also open them in the provider's firewall ("security group"). Keep SSH open for yourself. Don't open 7741 (the portal) unless [other people use it](installation.md#open-the-portal-to-other-people).
+On a cloud VM, also open them in the provider's firewall ("security group"). Keep SSH open for yourself. Open TCP 7741 too, to use the web portal from your browser (over HTTPS, with the same certificate); or keep it closed and reach the portal through an SSH tunnel.
 
 ### Devices
 
@@ -128,7 +129,7 @@ Devices need no open ports. They connect out to the server, and they find each o
 
 - **Direct connections need outgoing UDP.** Most networks allow it. Where it's blocked, devices fall back to the relay. `tc status` shows which path each peer uses.
 - **Two devices at home** still talk directly over your LAN, not through the server.
-- **The portal stays private** by default: reach it with `ssh -L 7741:127.0.0.1:7741 vpn.example.com`.
+- **The portal** is at `https://vpn.example.com:7741` once TCP 7741 is open. On a server that's reachable from the internet, anyone can see the sign-in page. To keep it private, choose "only this machine" in the installer and use `ssh -L 7741:127.0.0.1:7741 vpn.example.com`.
 - **Machines far from the server:** relayed traffic crosses to the server and back. If many of your machines are on another continent, add a [standalone relay](usage.md#relays) near them.
 - **Watch it:** add `-metrics-listen 127.0.0.1:7743` and see [Monitoring](usage.md#monitoring).
 

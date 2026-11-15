@@ -152,13 +152,13 @@ The one-way rule is enforced by the packet filter on each recipient machine, so 
 
 ## The web portal
 
-The portal is where you manage the network in a browser. It listens on `http://127.0.0.1:7741` on the server; from your workstation run `ssh -L 7741:127.0.0.1:7741 you@server` and open `http://localhost:7741`.
+The portal is where you manage the network in a browser, at port 7741 on the server: for example `http://192.168.1.10:7741`, or `https://vpn.example.com:7741` with HTTPS.
 
 ![Operator view of the Machines tab: six machines in two accounts, one waiting for approval](images/portal-machines.png)
 
 | Tab | For |
 |---|---|
-| **Machines** | Your machines: online state, addresses, key expiry; approve, tag, rename, remove |
+| **Machines** | Your machines: online state, addresses, traffic per peer, key expiry; approve, tag, rename, remove |
 | **Auth keys** | Keys for joining devices: reusable, ephemeral, pre-approved |
 | **Access rules** | Who may reach what within the account |
 | **Sharing** | Share a machine with another account, or accept one shared with you |
@@ -201,7 +201,7 @@ The portal is built on a JSON API at the same address. Browsers use the session 
 
 ```sh
 export TC_ADMIN_TOKEN=tc-admin-…
-curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://127.0.0.1:7741/api/v1/nodes
+curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://SERVER:7741/api/v1/nodes
 ```
 
 **Public (no sign-in):**

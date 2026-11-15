@@ -95,7 +95,8 @@ type Server struct {
 	conns  map[net.Conn]struct{}
 	online map[int64]int // node ID → number of open map streams
 
-	stats stats // counters for RegisterMetrics
+	stats   stats        // counters for RegisterMetrics
+	traffic trafficTable // machines' reported traffic (traffic.go)
 }
 
 const settingMachineKey = "control.machine_key"
@@ -175,6 +176,7 @@ func (s *Server) noiseHandler() http.Handler {
 	mux.HandleFunc("POST /machine/register", s.handleRegister)
 	mux.HandleFunc("POST /machine/map", s.handleMap)
 	mux.HandleFunc("POST /machine/logout", s.handleLogout)
+	mux.HandleFunc("POST /machine/traffic", s.handleTraffic)
 	return mux
 }
 

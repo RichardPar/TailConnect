@@ -146,13 +146,7 @@ New devices join with `--server https://vpn.example.com` from the start. Devices
 
 ## The web portal
 
-The portal uses the same certificate. To let other people sign in, listen on a reachable address too:
-
-```sh
-TC_CONTROL_ARGS="-listen :443 -acme-domain vpn.example.com -admin-listen :7741 -signup approval"
-```
-
-Open TCP 7741 and send people `https://vpn.example.com:7741`. See [Open the portal to other people](installation.md#open-the-portal-to-other-people).
+The portal uses the same certificate: it's at `https://vpn.example.com:7741` once TCP 7741 is open. See [Open the portal to other people](installation.md#open-the-portal-to-other-people) for letting others sign up.
 
 ## Standalone relays
 

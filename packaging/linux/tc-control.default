@@ -2,7 +2,7 @@
 # Restart after editing:  sudo systemctl restart tc-control
 #
 # Defaults: control API and built-in relay on :7740, web portal on
-# 127.0.0.1:7741, STUN on UDP :3478, MagicDNS domain tc.internal, sign-up
+# :7741, STUN on UDP :3478, MagicDNS domain tc.internal, sign-up
 # with operator approval (only useful once others can reach the portal).
 #
 # Examples:
@@ -15,7 +15,7 @@
 #                                              HTTPS with your own certificate (files must be
 #                                              readable by the service; see docs/installation.md#enable-https)
 #   -signup off|approval|invite|open           who may create accounts in the portal
-#   -admin-listen :7741                        let other people reach the portal (use TLS!)
+#   -admin-listen 127.0.0.1:7741               keep the portal on this machine (reach it with an SSH tunnel)
 #   -dns-nameservers 1.1.1.1,9.9.9.9           send all client DNS through MagicDNS
 #   -log-json                                  structured logs for a log collector
 #   -metrics-listen 127.0.0.1:7743             metrics at /metrics (docs/usage.md#monitoring)

@@ -45,6 +45,9 @@ type Info struct {
 	Version    string
 	Signup     string        // sign-up mode (SignupOff, ...); "" = off
 	KeyExpiry  time.Duration // default key lifetime for machines (0 = never)
+	// Traffic returns what machine id reported about its traffic (nil if
+	// nothing), from the control server. nil: no traffic in the portal.
+	Traffic func(id int64) *protocol.MachineTraffic
 }
 
 type Server struct {
@@ -231,13 +234,62 @@ type apiNode struct {
 	Created   time.Time        `json:"created"`
 	LastSeen  *time.Time       `json:"lastSeen,omitempty"`
 	Online    bool             `json:"online"`
+	Traffic   *apiTraffic      `json:"traffic,omitempty"`
+}
+
+// apiTraffic is a machine's traffic as it reported it: totals since its
+// tunnel started, current rates in bytes per second, and per peer.
+type apiTraffic struct {
+	Updated time.Time        `json:"updated"`
+	Rx      int64            `json:"rx"`
+	Tx      int64            `json:"tx"`
+	RxRate  float64          `json:"rxRate"`
+	TxRate  float64          `json:"txRate"`
+	Peers   []apiPeerTraffic `json:"peers"`
+}
+
+type apiPeerTraffic struct {
+	Name   string  `json:"name"`
+	FQDN   string  `json:"fqdn"`
+	Rx     int64   `json:"rx"`
+	Tx     int64   `json:"tx"`
+	RxRate float64 `json:"rxRate"`
+	TxRate float64 `json:"txRate"`
+}
+
+// traffic converts what the control server knows about machine id for the
+// API, naming peers from byKey (node key → node).
+func (s *Server) traffic(id int64, byKey map[string]db.Node) *apiTraffic {
+	if s.info.Traffic == nil {
+		return nil
+	}
+	mt := s.info.Traffic(id)
+	if mt == nil {
+		return nil
+	}
+	out := &apiTraffic{Updated: mt.Updated, Rx: mt.RxBytes, Tx: mt.TxBytes, RxRate: mt.RxRate, TxRate: mt.TxRate,
+		Peers: make([]apiPeerTraffic, 0, len(mt.Peers))}
+	for _, p := range mt.Peers {
+		ap := apiPeerTraffic{Rx: p.RxBytes, Tx: p.TxBytes, RxRate: p.RxRate, TxRate: p.TxRate}
+		if n, ok := byKey[p.NodeKey.String()]; ok {
+			ap.Name, ap.FQDN = n.GivenName, s.fqdn(n)
+		} else {
+			ap.Name = "a removed machine"
+		}
+		out.Peers = append(out.Peers, ap)
+	}
+	return out
+}
+
+func (s *Server) fqdn(n db.Node) string {
+	return n.GivenName + "." + db.TenantLabel(n.UserName) + "." + s.info.BaseDomain
 }
 
 func (s *Server) toAPINode(n db.Node) apiNode {
 	var hi protocol.Hostinfo
 	_ = json.Unmarshal([]byte(n.Hostinfo), &hi)
 	out := apiNode{
-		ID: n.ID, Name: n.GivenName, FQDN: n.GivenName + "." + db.TenantLabel(n.UserName) + "." + s.info.BaseDomain, User: n.UserName,
+		ID: n.ID, Name: n.GivenName, FQDN: s.fqdn(n), User: n.UserName,
 		Hostname: n.Hostname, OS: hi.OS, IPv4: n.IPv4, IPv6: n.IPv6, Endpoints: n.Endpoints,
 		NodeKey: n.NodeKey, Ephemeral: n.Ephemeral, Approved: n.Approved, Tags: n.Tags, Expired: n.Expired(s.now()), Created: n.CreatedAt,
 	}
@@ -456,9 +508,26 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, "list nodes", err)
 		return
 	}
+	// Peers in traffic reports are named from all machines: a machine's
+	// peers include machines shared from other accounts, which are in its
+	// network map anyway.
+	var byKey map[string]db.Node
+	if s.info.Traffic != nil {
+		all, err := s.db.ListNodes(r.Context(), 0)
+		if err != nil {
+			s.internal(w, "list nodes", err)
+			return
+		}
+		byKey = make(map[string]db.Node, len(all))
+		for _, n := range all {
+			byKey[n.NodeKey] = n
+		}
+	}
 	out := make([]apiNode, 0, len(nodes))
 	for _, n := range nodes {
-		out = append(out, s.toAPINode(n))
+		an := s.toAPINode(n)
+		an.Traffic = s.traffic(n.ID, byKey)
+		out = append(out, an)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

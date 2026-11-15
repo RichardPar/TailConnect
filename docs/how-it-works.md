@@ -156,10 +156,11 @@ With `-dns-nameservers` on the server, devices send everything to MagicDNS (reso
   - HMAC-signed `SameSite=Strict` session cookies, valid for 12 hours. A password change, suspension or role change ends that account's sessions; replacing the admin token ends token sessions.
   - Sign-in and sign-up: 10 attempts per IP address, then one every 6 seconds; failed sign-ins take the same time whether or not the account exists; at most four password hashes are computed at once.
   - Writes are accepted only as JSON, and the request origin is checked. A strict Content Security Policy.
-  - It listens on loopback by default; `tc-control` warns if it listens elsewhere without TLS.
+  - It listens on port 7741 on every address by default (or only on the server, if you choose). Without TLS, `tc-control` warns that passwords cross the network unencrypted.
 - **Sharing.** One-way, enforced by the receiving machines' packet filter ([details](#sharing-and-the-packet-filter)).
 - **Path discovery.** Disco messages are sealed with NaCl box between the peers' disco keys, which are published in the network map. Discovery can't be spoofed to divert traffic.
 - **Data.** WireGuard traffic is encrypted end to end between devices. Neither the control server nor the relays can read it.
+- **Traffic reports.** For the portal's traffic view, every machine sends the server how many bytes it exchanged with each peer, over its control connection. Only counts: nothing about what the traffic is or where else it goes. The server keeps the latest report in memory, for operators and the machine's own account to see.
 - **Relays.** A device must prove it owns its node key before the relay accepts packets for it, so nobody can claim another device's key to intercept its packets. Relays serve only registered machines of active accounts, and only between machines that may talk. The built-in relay knows this directly; a standalone `tc-relay` asks the control server, authenticated with its own revocable token, and caches the answers until the rules change (unless it is run as an open relay with `-allow-any`).
 - **HTTPS.** `tc-control` and `tc-relay` serve HTTPS themselves, with certificates from Let's Encrypt (`-acme-domain`, renewed automatically) or your own files. Nothing needs to run in front of them.
 - **MagicDNS.** It answers only the local device and isn't reachable from peers, so it can't be used as an open resolver.

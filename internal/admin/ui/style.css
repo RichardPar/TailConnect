@@ -130,3 +130,10 @@ td.actions button { margin-left: 4px; }
 .stack { display: grid; gap: 10px; }
 h3 { font-size: 14px; margin: 8px 0 0; font-weight: 600; }
 .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; }
+
+/* Traffic: the cell is a button that opens the per-peer breakdown. */
+button.traffic-link { background: none; border: none; padding: 0; text-align: left; color: inherit; cursor: pointer; font: inherit; white-space: nowrap; }
+button.traffic-link:hover div:first-child { text-decoration: underline; }
+tr.detail > td { background: var(--bg); }
+table.peer-traffic { width: auto; margin-top: 6px; }
+table.peer-traffic td { padding: 4px 18px 4px 0; border: none; white-space: nowrap; }

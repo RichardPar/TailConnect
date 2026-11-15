@@ -7,6 +7,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,9 @@ type Options struct {
 	Endpoints func(port uint16) ([]netip.AddrPort, []netip.Prefix)
 	// EndpointInterval is how often endpoints are re-discovered (default 15s).
 	EndpointInterval time.Duration
+	// TrafficInterval is how often traffic counters are reported to the
+	// control server, when they changed (default 30s).
+	TrafficInterval time.Duration
 }
 
 // EngineParams is what the daemon passes to Options.NewEngine.
@@ -102,6 +106,9 @@ func New(opts Options) (*Daemon, error) {
 	}
 	if opts.EndpointInterval <= 0 {
 		opts.EndpointInterval = 15 * time.Second
+	}
+	if opts.TrafficInterval <= 0 {
+		opts.TrafficInterval = 30 * time.Second
 	}
 	if err := os.MkdirAll(opts.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("daemon: state dir: %w", err)
@@ -510,6 +517,8 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		}
 	}()
 
+	go d.reportTraffic(ctx, cc, eng, nk)
+
 	backoff := time.Second
 	for {
 		eps := discover()
@@ -635,4 +644,42 @@ func (d *Daemon) sameServer(url string, pinned key.MachinePublic) bool {
 	defer cancel()
 	sk, err := controlclient.FetchServerKey(ctx, url, nil)
 	return err == nil && sk.Equal(pinned)
+}
+
+// reportTraffic sends the control server this machine's per-peer WireGuard
+// counters when they change, for the web portal's traffic view. It stops if
+// the server doesn't support it.
+func (d *Daemon) reportTraffic(ctx context.Context, cc *controlclient.Client, eng *engine.Engine, nk key.NodePublic) {
+	t := time.NewTicker(d.opts.TrafficInterval)
+	defer t.Stop()
+	var last []protocol.PeerTraffic
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		var peers []protocol.PeerTraffic
+		for k, st := range eng.Stats() {
+			if st.RxBytes > 0 || st.TxBytes > 0 {
+				peers = append(peers, protocol.PeerTraffic{NodeKey: k, RxBytes: st.RxBytes, TxBytes: st.TxBytes})
+			}
+		}
+		slices.SortFunc(peers, func(a, b protocol.PeerTraffic) int {
+			ka, kb := a.NodeKey.Raw(), b.NodeKey.Raw()
+			return bytes.Compare(ka[:], kb[:])
+		})
+		if slices.Equal(peers, last) {
+			continue // idle: nothing new to say
+		}
+		err := cc.ReportTraffic(ctx, protocol.TrafficRequest{NodeKey: nk, Peers: peers})
+		switch {
+		case err == nil:
+			last = peers
+		case controlclient.IsNotFound(err):
+			return // an older server
+		case ctx.Err() == nil:
+			d.opts.Logf("report traffic: %v", err)
+		}
+	}
 }

@@ -124,12 +124,13 @@ dig @100.100.100.100 peer.your-domain            # ask the resolver directly
 
 ## Web portal and accounts
 
-- **Can't open it.** It listens on `127.0.0.1:7741` on the server only, unless you [opened it](installation.md#open-the-portal-to-other-people). Use `ssh -L 7741:127.0.0.1:7741 server` and open `http://localhost:7741`.
-- **Nobody can sign in.** Create an operator account on the server: `sudo tc-control users create NAME -operator -password` (or give an existing account a password with `users passwd NAME` and `users role NAME operator`). The server logs a warning at start while no operator can sign in. The admin token (`sudo tc-control admin-token`) also signs in as operator.
+- **Can't open it.** Check that TCP 7741 is open in the server's firewall, and that the settings don't keep the portal on the server only (`-admin-listen 127.0.0.1:7741`). In that case, use `ssh -L 7741:127.0.0.1:7741 server` and open `http://localhost:7741`.
+- **Nobody can sign in.** `sudo tc-control users list` shows each account's role and whether it has a password. Create an operator account on the server: `sudo tc-control users create NAME -operator -password` (or give an existing account a password with `users passwd NAME` and `users role NAME operator`). The server logs a warning at start while no operator can sign in. The admin token (`sudo tc-control admin-token`) also signs in as operator.
 - **"wrong name or password".** Names are lowercase. An account created without a password (`users create NAME` alone) can't sign in until it gets one. An operator can reset any password.
 - **"your account is waiting for the operator's approval" / "this account is suspended".** An operator approves or reactivates it in the Accounts tab, or with `tc-control users approve NAME`.
 - **"too many attempts".** 10 sign-in or sign-up attempts per IP address, then one every 6 seconds. Wait a minute.
 - **No "Create an account" link.** Sign-up is off on this server (`-signup off`). Ask the operator for an account or an invite.
+- **Traffic shows `–` for a machine.** It hasn't reported any: it's idle, offline, or runs a client from before traffic reporting (upgrade it with `sudo ./packaging/linux/install.sh client`, or install the current Android app). Reports arrive every 30 seconds while traffic flows, so a busy machine shows numbers within a minute. Speeds drop to zero about 90 seconds after traffic stops.
 - **Signed out unexpectedly.** Sessions last 12 hours. Changing your password signs out your other sessions; an operator suspending your account or changing its role signs out all of them.
 
 ## Debug logging

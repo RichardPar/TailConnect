@@ -342,6 +342,24 @@ func (c *Client) UpdateStatus(ctx context.Context, req protocol.MapRequest) erro
 	return nil
 }
 
+// ReportTraffic sends this machine's per-peer byte counters. A server
+// without traffic reporting answers 404 (see IsNotFound).
+func (c *Client) ReportTraffic(ctx context.Context, req protocol.TrafficRequest) error {
+	resp, err := c.do(ctx, "/machine/traffic", req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// IsNotFound reports whether err is a 404 from the server (e.g. a call an
+// older server doesn't know).
+func IsNotFound(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Code == http.StatusNotFound
+}
+
 // Logout removes the node from the network.
 func (c *Client) Logout(ctx context.Context, nk key.NodePublic) error {
 	resp, err := c.do(ctx, "/machine/logout", protocol.LogoutRequest{NodeKey: nk})

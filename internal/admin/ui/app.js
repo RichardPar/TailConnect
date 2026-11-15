@@ -208,11 +208,14 @@ async function loadStatus() {
 
 // ---- machines ----
 
+const openTraffic = new Set(); // machines whose per-peer traffic is shown
+
 async function loadNodes() {
   const nodes = await api("GET", "/api/v1/nodes");
   $("nodes-empty").hidden = nodes.length > 0;
+  const cols = me.operator ? 9 : 8;
   $("nodes-body").replaceChildren(
-    ...nodes.map((n) =>
+    ...nodes.flatMap((n) => [
       el("tr", {},
         el("td", {}, el("span", { class: "dot" + (n.online ? " on" : ""), title: n.online ? "online" : "offline" })),
         el("td", {}, el("div", {}, n.name), el("div", { class: "sub" }, n.fqdn),
@@ -222,6 +225,7 @@ async function loadNodes() {
         el("td", { class: "mono" }, el("div", {}, n.ipv4), el("div", { class: "sub" }, n.ipv6)),
         el("td", {}, n.os || "–", el("div", { class: "sub" }, n.hostname)),
         el("td", { title: n.lastSeen ? fmtDate(n.lastSeen) : "" }, ago(n.lastSeen)),
+        el("td", {}, trafficCell(n)),
         el("td", {}, keyCell(n)),
         el("td", { class: "actions" },
           !n.approved && el("button", { class: "primary small", onclick: () => approveNode(n) }, "Approve"),
@@ -231,9 +235,49 @@ async function loadNodes() {
           el("button", { class: "danger", onclick: () => deleteNode(n) }, "Remove"),
         ),
       ),
-    ),
+      openTraffic.has(n.id) && n.traffic && trafficDetail(n, cols),
+    ].filter(Boolean)),
   );
   $("nodes-updated").textContent = "updated " + new Date().toLocaleTimeString();
+}
+
+// ---- traffic ----
+
+function fmtBytes(b) {
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+  return (i === 0 || b >= 100 ? Math.round(b) : b.toFixed(1)) + " " + u[i];
+}
+const fmtRate = (r) => (r < 1 ? "0 B/s" : fmtBytes(r) + "/s");
+
+// trafficCell: current download and upload, and totals; click for per peer.
+function trafficCell(n) {
+  const t = n.traffic;
+  if (!t) return el("span", { class: "sub", title: "This machine hasn't reported any traffic (idle, offline, or an older client)" }, "–");
+  return el("button", {
+    class: "traffic-link", title: "Traffic per peer",
+    onclick: () => { openTraffic.has(n.id) ? openTraffic.delete(n.id) : openTraffic.add(n.id); loadNodes().catch(handleErr); },
+  },
+    el("div", {}, "↓ " + fmtRate(t.rxRate) + "  ↑ " + fmtRate(t.txRate)),
+    el("div", { class: "sub" }, fmtBytes(t.rx) + " in, " + fmtBytes(t.tx) + " out"),
+  );
+}
+
+// trafficDetail: a row under the machine with its traffic per peer.
+function trafficDetail(n, cols) {
+  const t = n.traffic;
+  const rows = t.peers.map((p) => el("tr", {},
+    el("td", {}, el("div", {}, p.name), el("div", { class: "sub" }, p.fqdn)),
+    el("td", {}, "↓ " + fmtRate(p.rxRate)), el("td", {}, "↑ " + fmtRate(p.txRate)),
+    el("td", {}, fmtBytes(p.rx) + " in"), el("td", {}, fmtBytes(p.tx) + " out"),
+  ));
+  return el("tr", { class: "detail" }, el("td", { colspan: cols },
+    el("div", { class: "sub" }, `${n.name}'s traffic with each peer, as it reported it (totals since its tunnel started; updated ${ago(t.updated)}):`),
+    t.peers.length
+      ? el("table", { class: "peer-traffic" }, el("tbody", {}, ...rows))
+      : el("div", { class: "sub" }, "No traffic yet."),
+  ));
 }
 
 // keyCell shows approval and key expiry.
