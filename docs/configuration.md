@@ -40,6 +40,7 @@ The coordination server: control API, built-in relay, STUN, web portal.
 | `-acme-email` | none | Email for Let's Encrypt's expiry notices |
 | `-acme-staging` | `false` | Use Let's Encrypt's test service (certificates clients won't trust) |
 | `-tls-cert`, `-tls-key` | none | Your own PEM certificate (with chain) and key, instead of `-acme-domain`. Turns on HTTPS for both the control and portal listeners. |
+| `-metrics-listen` | none | Serve [metrics](usage.md#monitoring) at `/metrics` on this address (plain HTTP, no login), e.g. `127.0.0.1:7743` |
 | `-log-json` | `false` | Log in JSON instead of text |
 
 ## tc-control admin commands
@@ -87,6 +88,7 @@ The client daemon. It runs as root, or with `CAP_NET_ADMIN`.
 | `-port` | `41641` | WireGuard UDP port. `0` = random. If the port is busy, a random one is used. |
 | `-dns` | `auto` | Host DNS integration: `auto`, `systemd-resolved`, `file` or `off` ([details](usage.md#magicdns)) |
 | `-resolv-conf` | `/etc/resolv.conf` | File rewritten in `file` mode |
+| `-metrics-listen` | none | Serve [metrics](usage.md#monitoring) at `/metrics` on this address, e.g. `127.0.0.1:7744` |
 | `-verbose` | `false` | Log WireGuard internals |
 | `-version` | | Print the version and exit |
 
@@ -119,6 +121,7 @@ A standalone relay and STUN server ([when to use one](usage.md#relays)).
 | `-acme-domain`, `-acme-http-listen`, `-acme-email`, `-acme-staging` | none | Automatic HTTPS from Let's Encrypt, as for `tc-control` |
 | `-acme-dir` | `acme` | Where `tc-relay` keeps its certificates |
 | `-tls-cert`, `-tls-key` | none | Serve HTTPS with your own certificate |
+| `-metrics-listen` | none | Serve [metrics](usage.md#monitoring) at `/metrics` on this address |
 | `-log-json` | `false` | JSON logs |
 | `-version` | | Print the version and exit |
 
@@ -183,6 +186,7 @@ Restart the service after editing. Variables inside these files are **not** expa
 | 7742 | TCP | `tc-relay` | devices → standalone relay |
 | 443 | TCP | control server or `tc-relay`, with `-listen :443` | devices → HTTPS; Let's Encrypt → certificate checks (`-acme-domain`) |
 | 80 | TCP | with `-acme-http-listen :80` | Let's Encrypt → certificate checks |
+| 7743, 7744 | TCP | with `-metrics-listen` (suggested ports; loopback or private) | your monitoring → metrics |
 | 41641 | UDP | every device | device ↔ device (WireGuard, path discovery) |
 | 53 | UDP and TCP | `100.100.100.100`, inside each device | the device's own programs → MagicDNS (never leaves the device) |
 

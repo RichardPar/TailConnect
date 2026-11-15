@@ -12,6 +12,7 @@ import (
 
 	"tailconnect/internal/db"
 	"tailconnect/internal/key"
+	"tailconnect/internal/metrics"
 	"tailconnect/internal/relay"
 )
 
@@ -169,6 +170,18 @@ func TestStandaloneRelayAsksControl(t *testing.T) {
 		ca1.Send(a2.Public(), []byte("still there?"))
 		return rs.Denied() >= 2
 	})
+
+	// The relay's metrics agree.
+	reg := metrics.NewRegistry()
+	rs.RegisterMetrics(reg)
+	pol.RegisterMetrics(reg)
+	// (Packets sent to a2 while its deletion was reaching the relay may have
+	// been forwarded, so "forwarded" is at least the one before.)
+	fwd, denied := metricValue(t, reg, `tc_relay_packets_total{result="forwarded"}`), metricValue(t, reg, `tc_relay_packets_total{result="denied"}`)
+	clients, asked := metricValue(t, reg, `tc_relay_clients`), metricValue(t, reg, `tc_relay_control_requests_total{result="ok"}`)
+	if fwd < 1 || denied < 2 || clients != 3 || asked < 3 {
+		t.Errorf("relay metrics: forwarded %v, denied %v, clients %v, control requests %v", fwd, denied, clients, asked)
+	}
 
 	// Revoking the relay's token: new connections are refused.
 	if err := f.db.DeleteRelayToken(ctx, "edge"); err != nil {

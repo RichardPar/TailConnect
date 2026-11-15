@@ -1,6 +1,6 @@
 # Usage
 
-How to run a TailConnect server once it's [installed](installation.md): accounts and sign-up, adding devices, sharing machines between accounts, the web portal and admin tools, the `tc` client, MagicDNS and relays.
+How to run a TailConnect server once it's [installed](installation.md): accounts and sign-up, adding devices, sharing machines between accounts, the web portal and admin tools, the `tc` client, MagicDNS, relays and monitoring.
 
 - [Concepts](#concepts)
 - [Common tasks](#common-tasks)
@@ -14,6 +14,7 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 - [Check the mesh](#check-the-mesh)
 - [MagicDNS](#magicdns)
 - [Relays](#relays)
+- [Monitoring](#monitoring)
 
 ---
 
@@ -385,3 +386,51 @@ How a standalone relay checks machines:
 - `tc-control relays list` shows when each relay last checked in; `tc-control relays delete eu` cuts it off.
 
 `-allow-any` instead runs an **open relay** that asks nobody. Traffic stays end-to-end encrypted, and machines still only accept packets from their own peers, but anyone who can reach the relay can use its bandwidth. All options are in the [configuration reference](configuration.md#tc-relay).
+
+---
+
+## Monitoring
+
+`tc-control`, `tc-relay` and `tcd` can each serve metrics at `/metrics`, in the Prometheus text format, which Prometheus and most monitoring tools collect. It's plain text, so `curl` works too. Metrics are off until you choose an address:
+
+```sh
+# /etc/default/tc-control
+TC_CONTROL_ARGS="… -metrics-listen 127.0.0.1:7743"
+```
+
+```sh
+curl -s http://127.0.0.1:7743/metrics | grep -v '^#'
+```
+
+The metrics page has no login, so keep it on loopback or a private network.
+
+**Control server** (`tc-control -metrics-listen`):
+
+| Metric | What |
+|---|---|
+| `tc_control_machines{state}` | Machines `online` (connected), `offline`, or `cut_off` (unapproved, expired, or account not active) |
+| `tc_control_accounts{status}` | Accounts `active`, `pending` or `suspended` |
+| `tc_control_map_streams` | Connected machines' map streams |
+| `tc_control_map_messages_total{kind}`, `tc_control_map_bytes_total{kind}` | Maps sent: `full` maps or `delta`s with only what changed |
+| `tc_control_registrations_total{result}` | Joins and re-authentications, `ok` or `refused` (e.g. a bad auth key) |
+| `tc_relay_clients`, `tc_relay_packets_total{result}`, `tc_relay_bytes_forwarded_total` | The built-in relay: connected machines; packets `forwarded`, `dropped` (receiver gone or too slow) or `denied` (the machines may not talk) |
+| `tc_build_info{program,version}`, `tc_uptime_seconds` | Version and uptime |
+
+**Standalone relay** (`tc-relay -metrics-listen`): the `tc_relay_*` metrics above, plus `tc_relay_control_requests_total{result}` (questions to the control server, `ok` or `error`) and `tc_relay_cached_pairs`.
+
+**Client** (`tcd -metrics-listen`, set in `/etc/default/tcd`):
+
+| Metric | What |
+|---|---|
+| `tc_state{state}` | `Running`, `Starting`, `Stopped` (`tc down`) or `NeedsLogin` |
+| `tc_peers{path}` | Peers on a `direct` path, through a `relay`, or `idle` (no traffic for 3 minutes) |
+| `tc_peer_received_bytes_total{peer}`, `tc_peer_sent_bytes_total{peer}` | Traffic per peer |
+| `tc_peer_latency_seconds{peer}` | Round trip on each direct path |
+| `tc_relay_connected` | `1` while the home relay connection is up |
+| `tc_filter_dropped_packets_total` | Connection attempts refused by sharing or access rules |
+| `tc_key_expiry_timestamp_seconds` | When this machine must re-authenticate (absent if never) |
+
+Useful alerts:
+- a key expiring within two weeks: `tc_key_expiry_timestamp_seconds - time() < 14*86400`;
+- machines falling back to the relay (`tc_peers{path="relay"} > 0` for a long time), which usually means blocked UDP;
+- a standalone relay that can't reach the control server (`rate(tc_relay_control_requests_total{result="error"}[5m]) > 0`).

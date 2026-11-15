@@ -121,7 +121,9 @@ func formatValue(v float64) string {
 	case v == math.Trunc(v) && math.Abs(v) < 1e15:
 		return strconv.FormatInt(int64(v), 10)
 	}
-	return strconv.FormatFloat(v, 'g', -1, 64)
+	// 12 significant digits hide floating-point noise (0.01356, not
+	// 0.013560000000000001) and are far more than any metric needs.
+	return strconv.FormatFloat(v, 'g', 12, 64)
 }
 
 var helpEscaper = strings.NewReplacer(`\`, `\\`, "\n", `\n`)

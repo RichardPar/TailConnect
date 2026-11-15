@@ -30,6 +30,7 @@ import (
 
 	"tailconnect/internal/autotls"
 	"tailconnect/internal/key"
+	"tailconnect/internal/metrics"
 	"tailconnect/internal/protocol"
 	"tailconnect/internal/relay"
 	"tailconnect/internal/stun"
@@ -52,6 +53,7 @@ func main() {
 	controlURL := flag.String("control-url", "", "tc-control URL to check machines with (e.g. https://ctl.example.com)")
 	tokenFile := flag.String("token-file", "", "file with the relay token from `tc-control relays create` (or set TC_RELAY_TOKEN)")
 	allowAny := flag.Bool("allow-any", false, "serve any machine that proves its key, without asking tc-control (an open relay)")
+	metricsListen := flag.String("metrics-listen", "", `serve metrics (Prometheus text format) at /metrics on this address, e.g. "127.0.0.1:7743" ("" = off)`)
 	logJSON := flag.Bool("log-json", false, "log in JSON format")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -125,11 +127,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var srv *relay.Server
+	var pol *relay.RemotePolicy
 	if *allowAny {
 		srv = relay.NewServer(priv, nil, log)
 		log.Warn("open relay: serving any machine that proves its key (-allow-any)")
 	} else {
-		pol := relay.NewRemotePolicy(*controlURL, token, log)
+		pol = relay.NewRemotePolicy(*controlURL, token, log)
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		err := pol.Check(cctx)
 		cancel()
@@ -143,6 +146,25 @@ func main() {
 		log.Info("serving machines of the control server's network", "control", *controlURL)
 	}
 
+	if *metricsListen != "" {
+		reg := metrics.NewRegistry()
+		srv.RegisterMetrics(reg)
+		if pol != nil {
+			pol.RegisterMetrics(reg)
+		}
+		reg.Collect("tc_build_info", "The running program and version (always 1).", "gauge", func(emit func([]string, float64)) {
+			emit([]string{"program", "tc-relay", "version", version}, 1)
+		})
+		mmux := http.NewServeMux()
+		mmux.Handle("GET /metrics", reg)
+		go func() {
+			ms := &http.Server{Addr: *metricsListen, Handler: mmux, ReadHeaderTimeout: 10 * time.Second}
+			if err := ms.ListenAndServe(); err != nil {
+				log.Error("metrics listener", "err", err)
+				os.Exit(1)
+			}
+		}()
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/relay", srv)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {

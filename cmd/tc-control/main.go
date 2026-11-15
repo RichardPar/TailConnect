@@ -40,6 +40,7 @@ import (
 	"tailconnect/internal/autotls"
 	"tailconnect/internal/control"
 	"tailconnect/internal/db"
+	"tailconnect/internal/metrics"
 	"tailconnect/internal/password"
 	"tailconnect/internal/protocol"
 	"tailconnect/internal/relay"
@@ -188,6 +189,7 @@ func cmdServe(args []string) error {
 	acmeEmail := fs.String("acme-email", "", "email address for Let's Encrypt's expiry notices (optional)")
 	acmeHTTP := fs.String("acme-http-listen", "", `also serve Let's Encrypt's checks on this address, e.g. ":80" (needed unless -listen is on port 443; it redirects other requests to HTTPS)`)
 	acmeStaging := fs.Bool("acme-staging", false, "use Let's Encrypt's test service (untrusted certificates, for trying a setup)")
+	metricsListen := fs.String("metrics-listen", "", `serve metrics (Prometheus text format) at /metrics on this address, e.g. "127.0.0.1:7743" ("" = off)`)
 	logJSON := fs.Bool("log-json", false, "log in JSON format")
 	embedRelay := fs.Bool("relay", true, "serve the built-in relay at /relay on the control listener")
 	relayMapFile := fs.String("relay-map", "", "JSON relay map to advertise instead of the built-in relay (see docs)")
@@ -381,6 +383,22 @@ func cmdServe(args []string) error {
 	if certs != nil && *acmeHTTP != "" {
 		servers = append(servers, &http.Server{Addr: *acmeHTTP, Handler: certs.HTTPHandler(), ReadHeaderTimeout: 10 * time.Second})
 		names = append(names, "certificate checks")
+	}
+
+	if *metricsListen != "" {
+		reg := metrics.NewRegistry()
+		ctl.RegisterMetrics(reg)
+		if relaySrv != nil {
+			relaySrv.RegisterMetrics(reg)
+		}
+		addBuildInfo(reg, "tc-control")
+		mmux := http.NewServeMux()
+		mmux.Handle("GET /metrics", reg)
+		servers = append(servers, &http.Server{Addr: *metricsListen, Handler: mmux, ReadHeaderTimeout: 10 * time.Second})
+		names = append(names, "metrics")
+		if !isLoopback(*metricsListen) {
+			log.Warn("metrics are served without authentication; keep -metrics-listen on a private address", "listen", *metricsListen)
+		}
 	}
 
 	errc := make(chan error, len(servers))
@@ -1214,4 +1232,13 @@ func cmdRelays(args []string) error {
 	default:
 		return usageError("relays: unknown subcommand " + sub)
 	}
+}
+
+// addBuildInfo adds the conventional build-info metric.
+func addBuildInfo(r *metrics.Registry, program string) {
+	r.Collect("tc_build_info", "The running program and version (always 1).", "gauge", func(emit func([]string, float64)) {
+		emit([]string{"program", program, "version", version}, 1)
+	})
+	start := time.Now()
+	r.GaugeFunc("tc_uptime_seconds", "Seconds since the program started.", func() float64 { return time.Since(start).Seconds() })
 }

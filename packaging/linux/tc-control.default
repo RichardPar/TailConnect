@@ -18,4 +18,5 @@
 #   -admin-listen :7741                        let other people reach the portal (use TLS!)
 #   -dns-nameservers 1.1.1.1,9.9.9.9           send all client DNS through MagicDNS
 #   -log-json                                  structured logs for a log collector
+#   -metrics-listen 127.0.0.1:7743             metrics at /metrics (docs/usage.md#monitoring)
 TC_CONTROL_ARGS=""

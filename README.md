@@ -68,4 +68,4 @@ On the server, open **TCP 7740** and **UDP 3478**. On devices with a firewall, o
 6. ✅ Multi-tenant: accounts with passwords, sign-up modes and approval, isolated networks per account, one-way machine sharing with an in-tunnel packet filter
 7. Windows port (Wintun, Windows service, NRPT)
 8. Android port (gomobile, VpnService)
-9. Hardening: ACLs within an account, key expiry, node approval, ephemeral node cleanup, packaging
+9. ✅ Hardening: key expiry, machine approval and ephemeral cleanup; access rules with tags; batched UDP and delta maps; standalone relays checked against the server; MagicDNS over TCP; built-in HTTPS from Let's Encrypt; metrics

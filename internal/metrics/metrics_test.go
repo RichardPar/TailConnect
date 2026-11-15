@@ -11,7 +11,7 @@ func TestExposition(t *testing.T) {
 	c := r.Counter("tc_test_packets_total", "Packets seen.")
 	c.Add(41)
 	c.Inc()
-	r.GaugeFunc("tc_test_ratio", "A ratio.", func() float64 { return 0.25 })
+	r.GaugeFunc("tc_test_ratio", "A ratio.", func() float64 { return 13.56 / 1000 })
 	r.Collect("tc_test_peers", "Peers by path.", "gauge", func(emit func([]string, float64)) {
 		emit([]string{"path", "direct"}, 3)
 		emit([]string{"path", `odd "quoted"\name`, "region", "1"}, 1)
@@ -27,7 +27,7 @@ tc_test_peers{path="direct"} 3
 tc_test_peers{path="odd \"quoted\"\\name",region="1"} 1
 # HELP tc_test_ratio A ratio.
 # TYPE tc_test_ratio gauge
-tc_test_ratio 0.25
+tc_test_ratio 0.01356
 `
 	if got := rec.Body.String(); got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)

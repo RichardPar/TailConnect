@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -22,11 +23,17 @@ const (
 )
 
 type tcpStack struct {
-	dev  tun.Device
-	tnet *netstack.Net
-	lns  []net.Listener
-	sem  chan struct{}
+	dev   tun.Device
+	tnet  *netstack.Net
+	lns   []net.Listener
+	sem   chan struct{}
+	conns sync.WaitGroup // accept loops and connections
 }
+
+// tcpQuiesce is how long the stack gets, after its connections close, to
+// send its last packets before it is shut down: wireguard-go's netstack
+// device mustn't be closed while the stack is still writing to it.
+const tcpQuiesce = 100 * time.Millisecond
 
 // isTCPToResolver reports whether pkt is a TCP segment for a resolver
 // address (any port: the stack answers other ports with a reset).
@@ -94,9 +101,9 @@ func (t *TUN) startTCP() (*tcpStack, error) {
 			return nil, err
 		}
 		s.lns = append(s.lns, ln)
-		t.wg.Add(1)
+		s.conns.Add(1)
 		go func() {
-			defer t.wg.Done()
+			defer s.conns.Done()
 			t.acceptTCP(s, ln)
 		}()
 	}
@@ -108,10 +115,14 @@ func (t *TUN) startTCP() (*tcpStack, error) {
 	return s, nil
 }
 
+// close shuts the stack down; the TUN's context must already be cancelled
+// (which closes open connections).
 func (s *tcpStack) close() {
 	for _, ln := range s.lns {
 		ln.Close()
 	}
+	s.conns.Wait()
+	time.Sleep(tcpQuiesce)
 	s.dev.Close()
 }
 
@@ -146,9 +157,9 @@ func (t *TUN) acceptTCP(s *tcpStack, ln net.Listener) {
 			c.Close() // too many connections
 			continue
 		}
-		t.wg.Add(1)
+		s.conns.Add(1)
 		go func() {
-			defer t.wg.Done()
+			defer s.conns.Done()
 			defer func() { <-s.sem }()
 			t.serveTCP(c)
 		}()

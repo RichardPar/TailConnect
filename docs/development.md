@@ -54,7 +54,7 @@ What each measures, current figures with charts and the known limits are in [Per
 | `cmd/tcd` | Client daemon: TUN or userspace networking, wiring for OS integration |
 | `cmd/tc` | Client CLI |
 | `cmd/tc-relay` | Standalone relay and STUN server |
-| `internal/control` | Control API: Noise upgrade, register, map streaming, logout; embedded relay setup |
+| `internal/control` | Control API: Noise upgrade, register, map streaming (full maps, then deltas), logout; embedded relay setup; the relay API standalone relays ask |
 | `internal/controlclient` | Client side of the control protocol |
 | `internal/noise` | Noise IK handshake and encrypted framed stream |
 | `internal/protocol` | Wire types shared by client and server |
@@ -63,13 +63,16 @@ What each measures, current figures with charts and the known limits are in [Per
 | `internal/magicsock` | WireGuard transport: per-packet path choice, disco path discovery, STUN, home relay |
 | `internal/disco` | Path-discovery messages (ping, pong, CallMeMaybe), sealed with NaCl box |
 | `internal/stun` | STUN Binding client and server (RFC 5389) |
-| `internal/relay` | Relay protocol, server and client |
-| `internal/dns` | MagicDNS: resolver, TUN packet interception, OS configuration (systemd-resolved, resolv.conf) |
+| `internal/relay` | Relay protocol, server and client; `RemotePolicy`, a standalone relay's cached answers from the control server |
+| `internal/dns` | MagicDNS: resolver, TUN packet interception (UDP; TCP through a small in-process stack), OS configuration (systemd-resolved, resolv.conf) |
 | `internal/filter` | In-tunnel stateful packet filter that makes sharing one-way |
 | `internal/password` | Password hashing (argon2id) |
 | `internal/localapi` | `tc` ↔ `tcd` API over a Unix socket (SO_PEERCRED) |
 | `internal/admin` | Web portal: accounts, sign-up, sessions, sharing; JSON API and embedded UI (`ui/`) |
 | `internal/db` | SQLite store (pure Go): accounts, machines, keys, invites, shares; a change counter kept by triggers |
+| `internal/acl` | Access rules: selectors (`tag:`, names), ports, and who may reach whom |
+| `internal/autotls` | HTTPS certificates from Let's Encrypt, obtained and renewed in the process |
+| `internal/metrics` | Counters and gauges in the Prometheus text format (no dependencies) |
 | `internal/ipam`, `internal/key` | Address allocation, typed keys |
 | `packaging/linux` | systemd units, settings files, `install.sh` |
 | `tests/e2e` | Network-namespace test scripts and helpers |
