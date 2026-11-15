@@ -17,7 +17,11 @@ make dist           # release tarballs in dist/
 - removal, logout and rejoining;
 - relay fallback;
 - MagicDNS lookups, reverse lookups and renames;
-- moving the server to a new address.
+- moving the server to a new address;
+- tenant isolation (no peers, names or traffic across accounts) and account suspension;
+- one-way sharing: the recipient reaches the shared machine, the shared machine can't open connections back, revoking ends it.
+
+Other packages test the pieces directly: accounts, invites and shares in `internal/db`; sign-up modes, tenant scoping, sessions and rate limits in `internal/admin`; map isolation, sharing and the relay policy in `internal/control`; the packet filter with crafted IPv4 and IPv6 packets in `internal/filter`.
 
 ## End-to-end scripts
 
@@ -26,11 +30,21 @@ These build the binaries, then run them in private network namespaces with real 
 | Script | What it checks |
 |---|---|
 | `tests/e2e/lan.sh` | Two devices on a bridged LAN: join, ping, routes, relay failover and recovery (via blackhole routes), admin removal, logout |
-| `tests/e2e/nat.sh` | Two devices behind separate NAT routers (OpenWrt-style firewalls): STUN, hole punching on the first packet, relay fallback when UDP is cut, recovery. Then MagicDNS through glibc: short names, reverse lookups, NXDOMAIN, forwarding to a fake upstream, and `resolv.conf` restored on stop. |
+| `tests/e2e/nat.sh` | Two devices behind separate NAT routers (OpenWrt-style firewalls): STUN, hole punching on the first packet, relay fallback when UDP is cut, recovery. Then MagicDNS through glibc (short names, reverse lookups, NXDOMAIN, forwarding to a fake upstream); a second account's machine on another network behind site b's router (isolation, then a one-way share and its revocation); and `resolv.conf` restored on stop. |
 
 Debugging options for `nat.sh`:
 - `TC_DISCO_DEBUG=1` logs disco messages;
 - `TC_NAT_PCAP=1` records UDP on both routers' WAN side with `tests/e2e/udpsniff.py`.
+
+## Performance
+
+```sh
+make bench          # Go benchmarks
+make perf           # throughput and latency through real kernel TUN devices
+make perf-budget    # fail if key operations exceed their budgets
+```
+
+What each measures, current figures with charts and the known limits are in [Performance](performance.md).
 
 ## Code layout
 
@@ -51,12 +65,15 @@ Debugging options for `nat.sh`:
 | `internal/stun` | STUN Binding client and server (RFC 5389) |
 | `internal/relay` | Relay protocol, server and client |
 | `internal/dns` | MagicDNS: resolver, TUN packet interception, OS configuration (systemd-resolved, resolv.conf) |
+| `internal/filter` | In-tunnel stateful packet filter that makes sharing one-way |
+| `internal/password` | Password hashing (argon2id) |
 | `internal/localapi` | `tc` ↔ `tcd` API over a Unix socket (SO_PEERCRED) |
-| `internal/admin` | Admin web server: JSON API and embedded UI (`ui/`) |
-| `internal/db` | SQLite store (pure Go) with a change counter kept by triggers |
+| `internal/admin` | Web portal: accounts, sign-up, sessions, sharing; JSON API and embedded UI (`ui/`) |
+| `internal/db` | SQLite store (pure Go): accounts, machines, keys, invites, shares; a change counter kept by triggers |
 | `internal/ipam`, `internal/key` | Address allocation, typed keys |
 | `packaging/linux` | systemd units, settings files, `install.sh` |
 | `tests/e2e` | Network-namespace test scripts and helpers |
+| `tests/perf` | Throughput script and its measuring tool (`tput`) |
 
 ## Conventions
 

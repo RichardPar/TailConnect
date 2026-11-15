@@ -517,6 +517,9 @@ func (c *Conn) receiveRelay(closing chan struct{}) conn.ReceiveFunc {
 					if wgType(rp.data) == wgTransport {
 						p.lastActive = now
 					}
+					if p.noteRelayRecv(now) {
+						c.logf("magicsock: %s is using the relay; direct path to it suspect", p.key.ShortString())
+					}
 					eps[0] = p.ep
 				} else {
 					eps[0] = &Endpoint{key: rp.src}
@@ -726,6 +729,26 @@ func (c *Conn) attributeLocked(b []byte) *peer {
 		return nil
 	}
 	return c.peers[e.peer]
+}
+
+// relayGrace: a peer that sent us a packet directly this recently can still
+// use the direct path, even if it is also sending through the relay (as it
+// does while discovering paths).
+const relayGrace = time.Second
+
+// noteRelayRecv handles a WireGuard packet from p that came through the
+// relay. A peer only uses the relay when it doesn't trust the direct path,
+// so if nothing has arrived directly for a while, stop trusting it too:
+// otherwise we keep sending into a dead path until our own UnansweredLimit
+// runs out, doubling the failover time. If the path does work for us, our
+// next direct packet makes the peer adopt it again. Reports whether trust
+// was withdrawn.
+func (p *peer) noteRelayRecv(now time.Time) bool {
+	if !p.trusted(now) || now.Sub(p.lastDirectRecv) < relayGrace {
+		return false
+	}
+	p.firstUnanswered = now.Add(-UnansweredLimit)
+	return true
 }
 
 func (p *peer) trusted(now time.Time) bool {

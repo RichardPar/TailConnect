@@ -40,6 +40,7 @@ func newFx(t *testing.T) *fx {
 		t.Fatal(err)
 	}
 	s := New(d, Info{BaseDomain: "home.internal"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.authLimit = newLimiter(time.Millisecond, 1000) // tests sign in a lot; TestLoginFailures checks the real limit
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	jar, _ := cookiejar.New(nil)
@@ -181,7 +182,7 @@ func TestCRUD(t *testing.T) {
 	if err := json.Unmarshal(raw, &nodes); err != nil || len(nodes) != 1 {
 		t.Fatalf("nodes: %s", raw)
 	}
-	if nodes[0].FQDN != "laptop.home.internal" || !nodes[0].Online {
+	if nodes[0].FQDN != "laptop.alice.home.internal" || !nodes[0].Online {
 		t.Fatalf("node: %+v", nodes[0])
 	}
 	id := nodes[0].ID

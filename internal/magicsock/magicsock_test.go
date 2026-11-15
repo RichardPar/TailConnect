@@ -146,3 +146,29 @@ func TestChooseHome(t *testing.T) {
 		t.Fatalf("home=%d, want region 2", h)
 	}
 }
+
+func TestRelayReceiveWithdrawsTrust(t *testing.T) {
+	now := time.Now()
+	addr := netip.MustParseAddrPort("10.0.0.2:41641")
+
+	// The failure this guards against: the path died while idle, the peer
+	// gave up on it and wrote through the relay. We heard from it directly
+	// 3s ago and haven't sent since, so we'd otherwise still trust direct.
+	p := peer{directAddr: addr, lastDirectRecv: now.Add(-3 * time.Second)}
+	if !p.trusted(now) {
+		t.Fatal("precondition: direct path trusted")
+	}
+	if !p.noteRelayRecv(now) || p.trusted(now) {
+		t.Fatal("a relayed packet should withdraw trust in a quiet direct path")
+	}
+	if p.noteRelayRecv(now) {
+		t.Fatal("already untrusted: nothing to withdraw")
+	}
+
+	// While discovering paths a peer sends both ways; a recent direct packet
+	// means the path works, so keep it.
+	q := peer{directAddr: addr, lastDirectRecv: now.Add(-200 * time.Millisecond)}
+	if q.noteRelayRecv(now) || !q.trusted(now) {
+		t.Fatal("recent direct traffic: trust must be kept")
+	}
+}

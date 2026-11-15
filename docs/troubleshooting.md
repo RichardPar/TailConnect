@@ -14,7 +14,8 @@ journalctl -u tc-control -e        # server log (on the server)
 - [A peer is missing or unreachable](#a-peer-is-missing-or-unreachable)
 - [Peers stay on relay](#peers-stay-on-relay)
 - [Names don't resolve](#names-dont-resolve)
-- [Admin UI](#admin-ui)
+- [Sharing](#sharing)
+- [Web portal and accounts](#web-portal-and-accounts)
 - [Debug logging](#debug-logging)
 - [Start over](#start-over)
 
@@ -32,7 +33,9 @@ journalctl -u tc-control -e        # server log (on the server)
 | `fetch server key: … connection refused` | Nothing listens at that address and port. Check the URL (default port **7740**), that `tc-control` is running, and the server's firewall. |
 | `fetch server key: … i/o timeout` | A firewall is dropping the connection, or the address is wrong |
 | `tls: failed to verify certificate: x509: certificate signed by unknown authority` | The server's certificate isn't trusted. Use a public CA, or add your CA to the system trust store and restart `tcd` ([details](installation.md#enable-https)). |
-| `Logged out … Note: this machine was removed from the network` | An admin removed the device. Rejoin with `sudo tc up --authkey …`. |
+| `register: control: 403 account is not active (pending approval or suspended)` | The auth key's account is waiting for approval or suspended. An operator approves or reactivates it (Accounts tab, or `tc-control users activate NAME`). |
+| `Notice: this machine's account is suspended or awaiting approval` (status) | Same cause, for a machine that already joined: it has no peers until the account is active again, then recovers by itself. |
+| `Logged out … Note: this machine was removed from the network` | The machine was removed (by its owner or an operator). Rejoin with `sudo tc up --authkey …`. |
 | `Warning: control unreachable: …` (status, while running) | The device lost contact with the server and is retrying. Tunnels keep working on the last map. Fix the server or the network; the device reconnects by itself. |
 | `create TUN tc0 (are you root?)` (tcd log) | See [tcd won't start](#tcd-wont-start) |
 
@@ -57,8 +60,11 @@ journalctl -u tcd -n 50
 
 ## A peer is missing or unreachable
 
-1. **Is it in `tc status`?** If not, it isn't registered or was removed: check `sudo tc-control nodes list` on the server.
-2. **Is it online?** The admin UI's Machines tab, or `LAST SEEN` in `nodes list`, shows when it last contacted the server.
+1. **Is it in `tc status`?** If not, check `sudo tc-control nodes list` on the server:
+   - it isn't registered, or was removed;
+   - it belongs to **another account**: accounts are separate networks. Join it to your account, or have its owner [share it](usage.md#sharing-a-machine) with you;
+   - its account is pending or suspended (`tc-control users list`).
+2. **Is it online?** The portal's Machines tab, or `LAST SEEN` in `nodes list`, shows when it last contacted the server.
 3. **Ping by address first:** `ping 100.64.x.y`.
    - If that works but the name doesn't, see [Names don't resolve](#names-dont-resolve).
    - If neither works, check `tcd` on the other device.
@@ -92,12 +98,26 @@ dig @100.100.100.100 peer.your-domain            # ask the resolver directly
   - Check `ip route get 100.100.100.100` goes via `tc0`.
 - **Short names don't work but full names do.** The search domain is missing. With systemd-resolved, check `resolvectl domain tc0`. Some tools, such as `nslookup` and `dig`, ignore search domains; use `getent hosts NAME` to test what programs actually see.
 - **A renamed device still resolves to its old name.** Answers are cached for up to 5 minutes. Run `resolvectl flush-caches`.
+- **`laptop.home.internal` stopped working after upgrading to 0.6.** Names now include the account: `laptop.richard.home.internal`. Short names (`laptop`) still work.
+- **Another account's machine doesn't resolve.** By design, unless it's shared with you: then it's `machine.owner` (for example `nas.alice`).
 
-## Admin UI
+## Sharing
 
-- **Can't open it.** It listens on `127.0.0.1:7741` on the server only. Use `ssh -L 7741:127.0.0.1:7741 server` and open `http://localhost:7741`.
-- **"no admin token configured".** Run `sudo tc-control admin-token` on the server.
-- **Signed out unexpectedly.** Sessions last 12 hours, and creating a new admin token signs everyone out.
+- **I accepted a share but can't reach the machine.**
+  - `tc status` on your machine should list it as `shared with you`. If it doesn't, check the share's status in the portal (Sharing tab) or with `tc-control shares list`: it may still be pending, revoked, or the owner's account may be suspended.
+  - If it's listed but unreachable, go through [A peer is missing or unreachable](#a-peer-is-missing-or-unreachable); the owner's host firewall must allow incoming traffic on `tc0`.
+- **The shared machine can't reach my machines.** That's the design: sharing is one-way, and your machines' packet filter drops connections it opens (`FilterDropped` in `tc status --json` counts them). For a connection the other way, share one of your machines with its account too.
+- **A share link says "invalid, expired or already-used".** Links work once and expire (7 days by default). Ask the owner for a new one. You can't redeem a link to your own machine.
+
+## Web portal and accounts
+
+- **Can't open it.** It listens on `127.0.0.1:7741` on the server only, unless you [opened it](installation.md#open-the-portal-to-other-people). Use `ssh -L 7741:127.0.0.1:7741 server` and open `http://localhost:7741`.
+- **Nobody can sign in.** Create an operator account on the server: `sudo tc-control users create NAME -operator -password` (or give an existing account a password with `users passwd NAME` and `users role NAME operator`). The server logs a warning at start while no operator can sign in. The admin token (`sudo tc-control admin-token`) also signs in as operator.
+- **"wrong name or password".** Names are lowercase. An account created without a password (`users create NAME` alone) can't sign in until it gets one. An operator can reset any password.
+- **"your account is waiting for the operator's approval" / "this account is suspended".** An operator approves or reactivates it in the Accounts tab, or with `tc-control users approve NAME`.
+- **"too many attempts".** 10 sign-in or sign-up attempts per IP address, then one every 6 seconds. Wait a minute.
+- **No "Create an account" link.** Sign-up is off on this server (`-signup off`). Ask the operator for an account or an invite.
+- **Signed out unexpectedly.** Sessions last 12 hours. Changing your password signs out your other sessions; an operator suspending your account or changing its role signs out all of them.
 
 ## Debug logging
 

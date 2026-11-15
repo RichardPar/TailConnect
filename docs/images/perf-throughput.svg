@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 250" width="760" height="250" role="img" aria-labelledby="t d">
+<title id="t">Tunnel throughput</title>
+<desc id="d">Direct path: Kernel TUN 928 Mbit/s, Userspace (in-process) 374 Mbit/s; Through the relay: Kernel TUN 613 Mbit/s, Userspace (in-process) 353 Mbit/s</desc>
+<style>
+  .surface { fill: #fcfcfb; stroke: #e3e6ea; }
+  .t1 { fill: #0b0b0b; } .t2 { fill: #52514e; } .t3 { fill: #6f6e69; }
+  .grid { stroke: #e7e6e2; } .axis { stroke: #c9c8c2; }
+  .s1 { fill: #2a78d6; } .s2 { fill: #eb6834; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; stroke: #33332f; }
+    .t1 { fill: #f0efec; } .t2 { fill: #c3c2b7; } .t3 { fill: #9a998f; }
+    .grid { stroke: #2e2e2b; } .axis { stroke: #4a4a45; }
+    .s1 { fill: #3987e5; } .s2 { fill: #d95926; }
+  }
+  text { font-family: system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }
+</style>
+<rect class="surface" x="0.5" y="0.5" width="759" height="249" rx="12"/>
+<text class="t1" x="24" y="36" font-size="17" font-weight="600">Tunnel throughput</text>
+<text class="t2" x="24" y="58" font-size="13">TCP over the tunnel between two machines. Bare network for reference: 20,008 Mbit/s.</text>
+<rect class="s1" x="24" y="73" width="12" height="12" rx="3"/>
+<text class="t2" x="42" y="83" font-size="13">Kernel TUN</text>
+<rect class="s2" x="142.0" y="73" width="12" height="12" rx="3"/>
+<text class="t2" x="160.0" y="83" font-size="13">Userspace (in-process)</text>
+<line class="grid" x1="190.0" y1="90" x2="190.0" y2="208" stroke-width="1"/>
+<text class="t3" x="190.0" y="226" font-size="12" text-anchor="middle">0</text>
+<line class="grid" x1="305.0" y1="90" x2="305.0" y2="208" stroke-width="1"/>
+<text class="t3" x="305.0" y="226" font-size="12" text-anchor="middle">250</text>
+<line class="grid" x1="420.0" y1="90" x2="420.0" y2="208" stroke-width="1"/>
+<text class="t3" x="420.0" y="226" font-size="12" text-anchor="middle">500</text>
+<line class="grid" x1="535.0" y1="90" x2="535.0" y2="208" stroke-width="1"/>
+<text class="t3" x="535.0" y="226" font-size="12" text-anchor="middle">750</text>
+<line class="grid" x1="650.0" y1="90" x2="650.0" y2="208" stroke-width="1"/>
+<text class="t3" x="650.0" y="226" font-size="12" text-anchor="middle">1,000 Mbit/s</text>
+<line class="axis" x1="190" y1="90" x2="190" y2="208" stroke-width="1"/>
+<text class="t1" x="178" y="120.0" font-size="13.5" text-anchor="end">Direct path</text>
+<path class="s1" d="M190.0,96.0 H612.9 Q616.9,96.0 616.9,100.0 V110.0 Q616.9,114.0 612.9,114.0 H190.0 Z"/>
+<text class="t2" x="622.9" y="109.5" font-size="12.5">928 Mbit/s</text>
+<path class="s2" d="M190.0,116.0 H358.0 Q362.0,116.0 362.0,120.0 V130.0 Q362.0,134.0 358.0,134.0 H190.0 Z"/>
+<text class="t2" x="368.0" y="129.5" font-size="12.5">374 Mbit/s</text>
+<text class="t1" x="178" y="184.0" font-size="13.5" text-anchor="end">Through the relay</text>
+<path class="s1" d="M190.0,160.0 H468.0 Q472.0,160.0 472.0,164.0 V174.0 Q472.0,178.0 468.0,178.0 H190.0 Z"/>
+<text class="t2" x="478.0" y="173.5" font-size="12.5">613 Mbit/s</text>
+<path class="s2" d="M190.0,180.0 H348.4 Q352.4,180.0 352.4,184.0 V194.0 Q352.4,198.0 348.4,198.0 H190.0 Z"/>
+<text class="t2" x="358.4" y="193.5" font-size="12.5">353 Mbit/s</text>
+</svg>

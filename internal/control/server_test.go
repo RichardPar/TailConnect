@@ -162,7 +162,7 @@ func TestRegisterAndMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ra.Node.Name != "laptop.home.internal" || ra.Node.Addresses[0] != netip.MustParsePrefix("100.64.0.1/32") {
+	if ra.Node.Name != "laptop.alice.home.internal" || ra.Node.Addresses[0] != netip.MustParsePrefix("100.64.0.1/32") {
 		t.Fatalf("unexpected node a: %+v", ra.Node)
 	}
 	// Re-registering the same node key needs no auth key.
@@ -181,7 +181,7 @@ func TestRegisterAndMap(t *testing.T) {
 	if !m.Self.NodeKey.Equal(a.nk) || len(m.Peers) != 1 || !m.Peers[0].NodeKey.Equal(b.nk) {
 		t.Fatalf("unexpected map: %+v", m)
 	}
-	if !m.DNS.MagicDNS || m.DNS.Domain != "home.internal" {
+	if !m.DNS.MagicDNS || m.DNS.Domain != "home.internal" || len(m.DNS.Search) != 2 || m.DNS.Search[0] != "alice.home.internal" || m.DNS.Search[1] != "home.internal" {
 		t.Fatalf("dns: %+v", m.DNS)
 	}
 	m, err = b.c.Map(context.Background(), protocol.MapRequest{NodeKey: b.nk, DiscoKey: b.disco})
@@ -331,4 +331,164 @@ func TestKeepAliveFiltered(t *testing.T) {
 	if time.Since(n.LastSeen) > 2*time.Second {
 		t.Fatal("keep-alives did not refresh last_seen")
 	}
+}
+
+func TestTenantIsolationInMapsAndRelay(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	reg := func(user, host string) (int64, key.NodePublic) {
+		u, err := f.db.GetUser(ctx, user)
+		if err != nil {
+			u, _ = f.db.CreateUser(ctx, user)
+		}
+		k, _, _ := f.db.CreatePreAuthKey(ctx, db.CreatePreAuthKeyParams{UserID: u.ID, TTL: time.Hour})
+		nk := key.NewPrivate[key.NodeKind]().Public()
+		res, err := f.db.RegisterNode(ctx, db.RegisterParams{
+			MachineKey: key.NewPrivate[key.MachineKind]().Public().String(), NodeKey: nk.String(),
+			DiscoKey: key.NewPrivate[key.DiscoKind]().Public().String(), Hostname: host, AuthKey: k, Alloc: f.srv.ipam.Next,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Node.ID, nk
+	}
+	a1, ka1 := reg("acme", "laptop")
+	_, ka2 := reg("acme", "desk")
+	g1, kg1 := reg("globex", "laptop")
+	f.srv.checkGeneration()
+
+	m, err := f.srv.BuildMap(ctx, a1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Peers) != 1 || m.Peers[0].Name != "desk.acme.home.internal" || m.Self.Name != "laptop.acme.home.internal" {
+		t.Fatalf("acme map: self=%s peers=%v", m.Self.Name, m.Peers)
+	}
+	if len(m.DNS.Search) != 2 || m.DNS.Search[0] != "acme.home.internal" {
+		t.Fatalf("acme search domains: %v", m.DNS.Search)
+	}
+	if g, _ := f.srv.BuildMap(ctx, g1); len(g.Peers) != 0 || g.Self.Name != "laptop.globex.home.internal" {
+		t.Fatalf("globex map: self=%s peers=%d", g.Self.Name, len(g.Peers))
+	}
+
+	if !f.srv.RelayAllowed(ka1, ka2) || !f.srv.RelayAllowed(ka2, ka1) {
+		t.Fatal("same-tenant relaying refused")
+	}
+	if f.srv.RelayAllowed(ka1, kg1) || f.srv.RelayAllowed(kg1, ka1) {
+		t.Fatal("cross-tenant relaying allowed")
+	}
+	if f.srv.RelayAllowed(ka1, key.NewPrivate[key.NodeKind]().Public()) {
+		t.Fatal("relaying to an unknown key allowed")
+	}
+	// Suspension takes effect in the relay as soon as the generation is seen.
+	f.db.SetUserStatus(ctx, "acme", db.StatusSuspended)
+	f.srv.checkGeneration()
+	if f.srv.RelayAllowed(ka1, ka2) {
+		t.Fatal("suspended tenant still relayed")
+	}
+}
+
+func TestTenantLabel(t *testing.T) {
+	for in, want := range map[string]string{"acme": "acme", "a.b_c": "a-b-c", "Mixed": "mixed", "...": "tenant"} {
+		if got := db.TenantLabel(in); got != want {
+			t.Errorf("db.TenantLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSharingInMapsAndRelay(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	reg := func(user, host string) (int64, key.NodePublic) {
+		u, err := f.db.GetUser(ctx, user)
+		if err != nil {
+			u, _ = f.db.CreateUser(ctx, user)
+		}
+		k, _, _ := f.db.CreatePreAuthKey(ctx, db.CreatePreAuthKeyParams{UserID: u.ID, TTL: time.Hour})
+		nk := key.NewPrivate[key.NodeKind]().Public()
+		res, err := f.db.RegisterNode(ctx, db.RegisterParams{
+			MachineKey: key.NewPrivate[key.MachineKind]().Public().String(), NodeKey: nk.String(),
+			DiscoKey: key.NewPrivate[key.DiscoKind]().Public().String(), Hostname: host, AuthKey: k, Alloc: f.srv.ipam.Next,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Node.ID, nk
+	}
+	nas, kNas := reg("acme", "nas")
+	desk, kDesk := reg("acme", "desk")
+	laptop, kLaptop := reg("globex", "laptop")
+	peers := func(id int64) map[string]protocol.Node {
+		m, err := f.srv.BuildMap(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]protocol.Node{}
+		for _, p := range m.Peers {
+			out[p.Name] = p
+		}
+		return out
+	}
+
+	sh, err := f.db.ShareWith(ctx, nas, "globex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv.checkGeneration()
+	if p := peers(laptop); len(p) != 0 {
+		t.Fatalf("pending share already visible: %v", p)
+	}
+	if f.srv.RelayAllowed(kLaptop, kNas) {
+		t.Fatal("pending share already relayed")
+	}
+
+	f.db.AcceptShare(ctx, sh.ID, mustUserID(t, f, "globex"))
+	f.srv.checkGeneration()
+	lp := peers(laptop)
+	if len(lp) != 1 || !lp["nas.acme.home.internal"].Shared || !lp["nas.acme.home.internal"].NoInitiate {
+		t.Fatalf("globex laptop's peers: %+v", lp)
+	}
+	np := peers(nas)
+	if l := np["laptop.globex.home.internal"]; len(np) != 2 || !l.Shared || l.NoInitiate || np["desk.acme.home.internal"].Shared {
+		t.Fatalf("nas's peers: %+v", np)
+	}
+	if dp := peers(desk); len(dp) != 1 {
+		t.Fatalf("acme desk must not see globex: %+v", dp)
+	}
+	if !f.srv.RelayAllowed(kLaptop, kNas) || !f.srv.RelayAllowed(kNas, kLaptop) {
+		t.Fatal("shared pair not relayed")
+	}
+	if f.srv.RelayAllowed(kLaptop, kDesk) {
+		t.Fatal("unshared machine relayed to the other tenant")
+	}
+
+	// Mutual sharing: each may initiate to the other's shared machine.
+	back, _ := f.db.ShareWith(ctx, laptop, "acme")
+	f.db.AcceptShare(ctx, back.ID, mustUserID(t, f, "acme"))
+	f.srv.checkGeneration()
+	if l := peers(nas)["laptop.globex.home.internal"]; l.NoInitiate {
+		t.Fatal("nas is shared with globex, so globex's laptop may initiate to it")
+	}
+	if n := peers(laptop)["nas.acme.home.internal"]; n.NoInitiate {
+		t.Fatal("laptop is shared with acme, so acme's nas may initiate to it")
+	}
+	if d := peers(desk)["laptop.globex.home.internal"]; !d.Shared || !d.NoInitiate {
+		t.Fatalf("desk sees the laptop shared with acme as no-initiate: %+v", d)
+	}
+
+	// Revoking ends it.
+	f.db.DeleteShare(ctx, sh.ID, 0)
+	f.db.DeleteShare(ctx, back.ID, 0)
+	f.srv.checkGeneration()
+	if p := peers(laptop); len(p) != 0 || f.srv.RelayAllowed(kLaptop, kNas) {
+		t.Fatalf("after revoking: peers=%v", p)
+	}
+}
+
+func mustUserID(t *testing.T, f *fixture, name string) int64 {
+	u, err := f.db.GetUser(context.Background(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.ID
 }

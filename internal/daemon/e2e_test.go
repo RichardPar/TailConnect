@@ -58,7 +58,7 @@ func newTestNode(t *testing.T, name string) *testNode {
 	return newTestNodeEP(t, name, loopbackEndpoints)
 }
 
-func newTestNodeEP(t *testing.T, name string, eps func(uint16) ([]netip.AddrPort, []netip.Prefix)) *testNode {
+func newTestNodeEP(t testing.TB, name string, eps func(uint16) ([]netip.AddrPort, []netip.Prefix)) *testNode {
 	t.Helper()
 	n := &testNode{}
 	d, err := New(Options{
@@ -172,7 +172,7 @@ func ping(n *testNode, dst netip.Addr, msg string) (out string, err error) {
 
 // newControl starts tc-control with its embedded relay (and a STUN server
 // unless noSTUN) and returns the database, URL and a reusable auth key.
-func newControl(t *testing.T, noSTUN ...bool) (*db.DB, string, string) {
+func newControl(t testing.TB, noSTUN ...bool) (*db.DB, string, string) {
 	t.Helper()
 	relays := control.EmbeddedRelayMap(0)
 	if len(noSTUN) == 0 || !noSTUN[0] {
@@ -199,6 +199,7 @@ func newControl(t *testing.T, noSTUN ...bool) (*db.DB, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rs.SetAllow(ctl.RelayAllowed)
 	mux := http.NewServeMux()
 	mux.Handle(control.EmbeddedRelayPath, rs)
 	mux.Handle("/", ctl.Handler())
@@ -236,7 +237,7 @@ func TestEndToEndMesh(t *testing.T) {
 
 	ipA, ipB := selfIP(t, a), selfIP(t, b)
 	t.Logf("alpha=%s beta=%s", ipA, ipB)
-	if st := a.d.Status(); st.Self.Name != "alpha.e2e.internal" || st.Peers[0].Name != "beta.e2e.internal" {
+	if st := a.d.Status(); st.Self.Name != "alpha.alice.e2e.internal" || st.Peers[0].Name != "beta.alice.e2e.internal" {
 		t.Fatalf("names: self=%s peer=%s", st.Self.Name, st.Peers[0].Name)
 	}
 
@@ -403,27 +404,27 @@ func TestMagicDNS(t *testing.T) {
 	waitFor(t, "beta running with 1 peer", running(b, 1))
 	ipA, ipB := selfIP(t, a), selfIP(t, b)
 
-	if d := a.d.Status().DNS; d == nil || d.Domain != "e2e.internal" || d.HostConfig != "off" {
+	if d := a.d.Status().DNS; d == nil || d.Domain != "alice.e2e.internal" || d.Base != "e2e.internal" || d.HostConfig != "off" {
 		t.Fatalf("DNS status: %+v", d)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	r := resolver(a)
-	addrs, err := r.LookupNetIP(ctx, "ip", "Beta.E2E.internal")
+	addrs, err := r.LookupNetIP(ctx, "ip", "Beta.Alice.E2E.internal")
 	if err != nil {
 		t.Fatalf("lookup beta: %v", err)
 	}
 	if len(addrs) != 2 || !slices.Contains(addrs, ipB) {
 		t.Fatalf("beta resolves to %v, want %v and its IPv6 address", addrs, ipB)
 	}
-	if self, err := r.LookupNetIP(ctx, "ip4", "alpha.e2e.internal"); err != nil || len(self) != 1 || self[0] != ipA {
+	if self, err := r.LookupNetIP(ctx, "ip4", "alpha.alice.e2e.internal"); err != nil || len(self) != 1 || self[0] != ipA {
 		t.Fatalf("self lookup: %v %v", self, err)
 	}
-	if names, err := r.LookupAddr(ctx, ipB.String()); err != nil || len(names) != 1 || names[0] != "beta.e2e.internal." {
+	if names, err := r.LookupAddr(ctx, ipB.String()); err != nil || len(names) != 1 || names[0] != "beta.alice.e2e.internal." {
 		t.Fatalf("reverse lookup of %s: %v %v", ipB, names, err)
 	}
 	var dnsErr *net.DNSError
-	if _, err := r.LookupNetIP(ctx, "ip", "gamma.e2e.internal"); !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
+	if _, err := r.LookupNetIP(ctx, "ip", "gamma.alice.e2e.internal"); !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
 		t.Fatalf("unknown name: want NXDOMAIN, got %v", err)
 	}
 
@@ -437,10 +438,10 @@ func TestMagicDNS(t *testing.T) {
 		}
 	}
 	waitFor(t, "renamed node resolves", func() bool {
-		got, err := r.LookupNetIP(ctx, "ip4", "db-server.e2e.internal")
+		got, err := r.LookupNetIP(ctx, "ip4", "db-server.alice.e2e.internal")
 		return err == nil && len(got) == 1 && got[0] == ipB
 	})
-	if _, err := r.LookupNetIP(ctx, "ip4", "beta.e2e.internal"); err == nil {
+	if _, err := r.LookupNetIP(ctx, "ip4", "beta.alice.e2e.internal"); err == nil {
 		t.Fatal("old name still resolves after rename")
 	}
 }
@@ -477,4 +478,185 @@ func TestControlServerMoved(t *testing.T) {
 	if err := a.d.Up(localapi.UpRequest{ControlURL: other}); err == nil {
 		t.Fatal("switching to another server without an auth key should fail")
 	}
+}
+
+func TestSuspendedAccount(t *testing.T) {
+	cdb, url, _ := newControl(t)
+	bob, _ := cdb.CreateUser(context.Background(), "bob")
+	bobKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: bob.ID, Reusable: true, TTL: time.Hour})
+	b, c := newTestNode(t, "beta"), newTestNode(t, "gamma")
+	for _, n := range []struct {
+		n    *testNode
+		host string
+	}{{b, "beta"}, {c, "gamma"}} {
+		if err := n.n.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: bobKey, Hostname: n.host}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "bob's machines see each other", func() bool { return running(b, 1)() && running(c, 1)() })
+
+	// Suspending bob cuts his machines off: each gets an empty map with a
+	// notice explaining why.
+	if err := cdb.SetUserStatus(context.Background(), "bob", db.StatusSuspended); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "beta cut off with a notice", func() bool {
+		s := b.d.Status()
+		return len(s.Peers) == 0 && strings.Contains(s.Notice, "suspended")
+	})
+	// A suspended account's machines can't (re)register either.
+	if err := b.d.Up(localapi.UpRequest{AuthKey: bobKey}); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("re-register while suspended: %v", err)
+	}
+
+	// Reactivation restores everything without any action on the devices.
+	if err := cdb.SetUserStatus(context.Background(), "bob", db.StatusActive); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both see each other again", func() bool {
+		return running(b, 1)() && running(c, 1)() && b.d.Status().Notice == ""
+	})
+}
+
+func TestTenantsIsolated(t *testing.T) {
+	cdb, url, aliceKey := newControl(t)
+	bob, _ := cdb.CreateUser(context.Background(), "bob")
+	bobKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: bob.ID, TTL: time.Hour})
+	// Both tenants name a machine "laptop".
+	a, a2, b := newTestNode(t, "alice-laptop"), newTestNode(t, "alice-desk"), newTestNode(t, "bob-laptop")
+	for _, n := range []struct {
+		n    *testNode
+		key  string
+		host string
+	}{{a, aliceKey, "laptop"}, {a2, aliceKey, "desk"}, {b, bobKey, "laptop"}} {
+		if err := n.n.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: n.key, Hostname: n.host}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "alice's machines see each other", func() bool { return running(a, 1)() && running(a2, 1)() })
+	waitFor(t, "bob running", func() bool { return b.d.Status().State == localapi.StateRunning })
+	time.Sleep(300 * time.Millisecond) // let any (wrong) cross-tenant map updates arrive
+
+	if ps := b.d.Status().Peers; len(ps) != 0 {
+		t.Fatalf("bob sees %d peers from another tenant: %v", len(ps), ps[0].Name)
+	}
+	if st := a.d.Status(); st.Self.Name != "laptop.alice.e2e.internal" || st.Peers[0].Name != "desk.alice.e2e.internal" {
+		t.Fatalf("alice names: %s, %s", st.Self.Name, st.Peers[0].Name)
+	}
+	if st := b.d.Status(); st.Self.Name != "laptop.bob.e2e.internal" {
+		t.Fatalf("bob's laptop: %s", st.Self.Name)
+	}
+
+	// Names: alice's short name finds her own laptop; bob's machines don't exist for her.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ipA, ipB := selfIP(t, a), selfIP(t, b)
+	got, err := resolver(a2).LookupNetIP(ctx, "ip4", "laptop.alice.e2e.internal")
+	if err != nil || len(got) != 1 || got[0] != ipA {
+		t.Fatalf("alice's laptop: %v %v", got, err)
+	}
+	var dnsErr *net.DNSError
+	if _, err := resolver(a2).LookupNetIP(ctx, "ip4", "laptop.bob.e2e.internal"); !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
+		t.Fatalf("bob's laptop should not resolve for alice: %v", err)
+	}
+	if _, err := resolver(a2).LookupAddr(ctx, ipB.String()); err == nil {
+		t.Fatal("reverse lookup of bob's address should fail for alice")
+	}
+
+	// Traffic: alice can't reach bob's address at all (no WireGuard peer).
+	echo(t, b, ipB)
+	dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if c, err := a.tnet().DialContextTCPAddrPort(dctx, netip.AddrPortFrom(ipB, 7000)); err == nil {
+		c.Close()
+		t.Fatal("alice reached bob's machine")
+	}
+}
+
+func TestSharingIsOneWay(t *testing.T) {
+	cdb, url, aliceKey := newControl(t)
+	bob, _ := cdb.CreateUser(context.Background(), "bob")
+	bobKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: bob.ID, TTL: time.Hour})
+	nas, laptop := newTestNode(t, "alice-nas"), newTestNode(t, "bob-laptop")
+	if err := nas.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: aliceKey, Hostname: "nas"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := laptop.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: bobKey, Hostname: "laptop"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both running", func() bool { return running(nas, 0)() && running(laptop, 0)() })
+	ipNas, ipLaptop := selfIP(t, nas), selfIP(t, laptop)
+	echo(t, nas, ipNas)
+	echo(t, laptop, ipLaptop)
+
+	// Alice shares her nas with bob; it takes effect once bob accepts.
+	nasID := nodeID(t, cdb, "nas", "alice")
+	sh, err := cdb.ShareWith(context.Background(), nasID, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if len(laptop.d.Status().Peers) != 0 {
+		t.Fatal("pending share already visible")
+	}
+	if err := cdb.AcceptShare(context.Background(), sh.ID, bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "share in both maps", func() bool { return running(nas, 1)() && running(laptop, 1)() })
+	lp := laptop.d.Status().Peers[0]
+	if lp.Name != "nas.alice.e2e.internal" || !lp.Shared || !lp.NoInitiate {
+		t.Fatalf("bob's view of the nas: %+v", lp)
+	}
+	if np := nas.d.Status().Peers[0]; np.Name != "laptop.bob.e2e.internal" || !np.Shared || np.NoInitiate {
+		t.Fatalf("nas's view of bob's laptop: %+v", np)
+	}
+
+	// Bob's laptop can use the nas...
+	if got, err := ping(laptop, ipNas, "hello-nas"); err != nil || got != "pong:hello-nas" {
+		t.Fatalf("bob → nas: %q %v", got, err)
+	}
+	// ...and resolve it by name.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if a, err := resolver(laptop).LookupNetIP(ctx, "ip4", "nas.alice.e2e.internal"); err != nil || len(a) != 1 || a[0] != ipNas {
+		t.Fatalf("bob resolving the nas: %v %v", a, err)
+	}
+	// ...but the nas can't open connections to bob's laptop.
+	dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if c, err := nas.tnet().DialContextTCPAddrPort(dctx, netip.AddrPortFrom(ipLaptop, 7000)); err == nil {
+		c.Close()
+		t.Fatal("the shared nas opened a connection to bob's laptop")
+	}
+	if laptop.d.Status().FilterDropped == 0 {
+		t.Fatal("bob's filter didn't count the refused connection")
+	}
+	// Bob can still talk to the nas afterwards (the filter state is per flow).
+	if got, err := ping(laptop, ipNas, "again"); err != nil || got != "pong:again" {
+		t.Fatalf("bob → nas after the refused attempt: %q %v", got, err)
+	}
+
+	// Revoking ends access at once.
+	if err := cdb.DeleteShare(context.Background(), sh.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "share gone from both maps", func() bool { return running(nas, 0)() && running(laptop, 0)() })
+	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer rcancel()
+	if c, err := laptop.tnet().DialContextTCPAddrPort(rctx, netip.AddrPortFrom(ipNas, 7000)); err == nil {
+		c.Close()
+		t.Fatal("bob reached the nas after the share was revoked")
+	}
+}
+
+func nodeID(t *testing.T, cdb *db.DB, name, user string) int64 {
+	t.Helper()
+	nodes, _ := cdb.ListNodes(context.Background(), 0)
+	for _, n := range nodes {
+		if n.GivenName == name && n.UserName == user {
+			return n.ID
+		}
+	}
+	t.Fatalf("no node %s of %s", name, user)
+	return 0
 }

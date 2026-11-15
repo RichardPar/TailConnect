@@ -166,3 +166,37 @@ func TestQueuedWhileConnecting(t *testing.T) {
 		t.Fatalf("got %+v", p)
 	}
 }
+
+func TestAllowPolicy(t *testing.T) {
+	s, url := newServer(t, nil)
+	ka, kb, kc := key.NewPrivate[key.NodeKind](), key.NewPrivate[key.NodeKind](), key.NewPrivate[key.NodeKind]()
+	// a and b are one tenant; c is another.
+	tenant := map[key.NodePublic]int{ka.Public(): 1, kb.Public(): 1, kc.Public(): 2}
+	s.SetAllow(func(src, dst key.NodePublic) bool { return tenant[src] == tenant[dst] })
+	a, ach := newClient(t, url, ka)
+	b, bch := newClient(t, url, kb)
+	c, cch := newClient(t, url, kc)
+	waitConnected(t, a, b, c)
+
+	c.Send(ka.Public(), []byte("from c")) // denied
+	a.Send(kc.Public(), []byte("from a")) // denied
+	a.Send(kb.Public(), []byte("a to b")) // allowed
+	if p := recv(t, bch); p.data != "a to b" {
+		t.Fatalf("b got %+v", p)
+	}
+	select {
+	case p := <-ach:
+		t.Fatalf("a received a packet from another tenant: %+v", p)
+	case p := <-cch:
+		t.Fatalf("c received a packet from another tenant: %+v", p)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if s.Denied() != 2 {
+		t.Fatalf("denied = %d, want 2", s.Denied())
+	}
+	s.SetAllow(nil)
+	c.Send(ka.Public(), []byte("now allowed"))
+	if p := recv(t, ach); p.data != "now allowed" {
+		t.Fatalf("a got %+v", p)
+	}
+}

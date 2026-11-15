@@ -69,6 +69,16 @@ type Server struct {
 	genMu   sync.Mutex
 	lastGen int64
 
+	// tenantOf maps every active machine's node key to its tenant (user ID),
+	// for the relay's per-packet check. Rebuilt when the generation changes.
+	snapMu sync.Mutex
+	snap   *snapshot // see snapshot.go
+
+	policyMu sync.RWMutex
+	tenantOf map[key.NodePublic]int64
+	// sharedWith maps a machine's node key to the tenants it is shared with.
+	sharedWith map[key.NodePublic]map[int64]bool
+
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	online map[int64]int // node ID → number of open map streams
@@ -104,6 +114,7 @@ func New(ctx context.Context, d *db.DB, cfg Config, log *slog.Logger) (*Server, 
 	s.bus.init()
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.lastGen, _ = d.Generation(ctx)
+	s.refreshPolicy()
 	go s.watchGeneration()
 	return s, nil
 }
@@ -255,6 +266,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, db.ErrExists):
 		writeError(w, http.StatusConflict, "node key already registered to another machine")
 		return
+	case errors.Is(err, db.ErrAccountInactive):
+		writeError(w, http.StatusForbidden, err.Error())
+		return
 	case errors.Is(err, ipam.ErrExhausted):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -322,12 +336,14 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !req.Stream {
-		resp, err := s.BuildMap(r.Context(), self.ID)
+		b, err := s.BuildMapJSON(r.Context(), self.ID)
 		if err != nil {
 			s.internalError(w, "map", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(append(b, '\n'))
 		return
 	}
 	s.streamMap(w, r, self, changed)
@@ -362,7 +378,7 @@ func (s *Server) streamMap(w http.ResponseWriter, r *http.Request, self db.Node,
 
 	var last []byte
 	send := func() (alive bool) {
-		resp, err := s.BuildMap(ctx, self.ID)
+		b, err := s.BuildMapJSON(ctx, self.ID)
 		if errors.Is(err, db.ErrNotFound) {
 			log.Info("node removed; closing stream")
 			return false
@@ -371,7 +387,6 @@ func (s *Server) streamMap(w http.ResponseWriter, r *http.Request, self db.Node,
 			log.Error("build map", "err", err)
 			return false
 		}
-		b, _ := json.Marshal(resp)
 		if bytes.Equal(b, last) {
 			return true
 		}
@@ -430,45 +445,6 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// BuildMap computes the network map for node id. Until ACLs land (milestone
-// 8) every node can see every other node.
-func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, error) {
-	nodes, err := s.db.ListNodes(ctx, 0)
-	if err != nil {
-		return protocol.MapResponse{}, err
-	}
-	resp := protocol.MapResponse{
-		Peers: []protocol.Node{},
-		DNS: protocol.DNSConfig{
-			MagicDNS:    !s.cfg.DisableMagicDNS,
-			Domain:      s.cfg.BaseDomain,
-			Resolver:    protocol.MagicDNSAddr,
-			Nameservers: s.cfg.Nameservers,
-		},
-		Relays: s.cfg.Relays,
-	}
-	found := false
-	for _, n := range nodes {
-		pn, err := s.toProtocol(n)
-		if err != nil {
-			return protocol.MapResponse{}, err
-		}
-		if n.ID == id {
-			resp.Self, found = pn, true
-		} else {
-			// LastSeen changes on every keep-alive; leaving it out of peers
-			// keeps maps stable so unchanged maps aren't re-sent.
-			pn.LastSeen = nil
-			resp.Peers = append(resp.Peers, pn)
-		}
-	}
-	if !found {
-		return protocol.MapResponse{}, fmt.Errorf("node %d: %w", id, db.ErrNotFound)
-	}
-	resp.Self.LastSeen = nil
-	return resp, nil
-}
-
 func (s *Server) toProtocol(n db.Node) (protocol.Node, error) {
 	nk, err := key.ParsePublic[key.NodeKind](n.NodeKey)
 	if err != nil {
@@ -482,7 +458,7 @@ func (s *Server) toProtocol(n db.Node) (protocol.Node, error) {
 	_ = json.Unmarshal([]byte(n.Hostinfo), &hi)
 	out := protocol.Node{
 		ID:        protocol.NodeID(n.ID),
-		Name:      n.GivenName + "." + s.cfg.BaseDomain,
+		Name:      n.GivenName + "." + s.tenantDomain(n.UserName),
 		User:      n.UserName,
 		NodeKey:   nk,
 		DiscoKey:  dk,
@@ -540,8 +516,54 @@ func (s *Server) checkGeneration() {
 	s.lastGen = g
 	s.genMu.Unlock()
 	if changed {
+		s.refreshPolicy()
 		s.bus.notify()
 	}
+}
+
+// refreshPolicy rebuilds the node-key → tenant table used by RelayAllowed,
+// from the current snapshot. On error the previous table stays in force.
+func (s *Server) refreshPolicy() {
+	snap, err := s.currentSnapshot(s.ctx)
+	if err != nil {
+		if s.ctx.Err() == nil {
+			s.log.Warn("refresh relay policy", "err", err)
+		}
+		return
+	}
+	m := make(map[key.NodePublic]int64, len(snap.keys))
+	for nk, id := range snap.keys {
+		m[nk] = snap.nodes[id].db.UserID
+	}
+	sw := map[key.NodePublic]map[int64]bool{}
+	for id, tenants := range snap.sharedTo {
+		nk := snap.nodes[id].proto.NodeKey
+		if _, active := snap.keys[nk]; !active {
+			continue
+		}
+		sw[nk] = map[int64]bool{}
+		for _, t := range tenants {
+			sw[nk][t] = true
+		}
+	}
+	s.policyMu.Lock()
+	s.tenantOf, s.sharedWith = m, sw
+	s.policyMu.Unlock()
+}
+
+// RelayAllowed reports whether the relay may carry packets between a and b
+// (either direction): both must be active machines, of the same tenant or
+// with one shared with the other's tenant. Install it with
+// relay.Server.SetAllow.
+func (s *Server) RelayAllowed(a, b key.NodePublic) bool {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	ta, ok1 := s.tenantOf[a]
+	tb, ok2 := s.tenantOf[b]
+	if !ok1 || !ok2 {
+		return false
+	}
+	return ta == tb || s.sharedWith[a][tb] || s.sharedWith[b][ta]
 }
 
 // watchGeneration notices changes made outside this process (admin CLI) or
@@ -612,4 +634,9 @@ func ValidDomain(d string) error {
 		}
 	}
 	return nil
+}
+
+// tenantDomain is the DNS domain of a tenant's machines: <tenant>.<base>.
+func (s *Server) tenantDomain(user string) string {
+	return db.TenantLabel(user) + "." + s.cfg.BaseDomain
 }

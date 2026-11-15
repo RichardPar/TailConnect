@@ -24,6 +24,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"tailconnect/internal/dns"
+	"tailconnect/internal/filter"
 	"tailconnect/internal/ipam"
 	"tailconnect/internal/key"
 	"tailconnect/internal/magicsock"
@@ -96,14 +97,17 @@ type Engine struct {
 
 	resolver *dns.Resolver
 	dnsTUN   *dns.TUN
+	filter   *filter.TUN
 	osDNS    dns.OSConfigurator
 
 	mu         sync.Mutex
 	peers      map[key.NodePublic]peerState
 	lastRouter RouterConfig
 	lastOSDNS  dns.OSConfig
+	restricted []netip.Addr // peers that may only reply (one-way shares)
 	dnsErr     string
-	dnsDomain  string
+	dnsDomain  string // this machine's own domain (tenant), for status
+	dnsBase    string // the domain routed to MagicDNS
 	sawMap     bool
 	closed     bool
 }
@@ -126,7 +130,9 @@ func New(cfg Config, priv key.NodePrivate) (*Engine, error) {
 	if cfg.Verbose {
 		wgLog.Verbosef = prefixed(cfg.Logf, "wg: ")
 	}
-	dev := device.NewDevice(dnsTUN, magic, wgLog)
+	// WireGuard ↔ packet filter (one-way sharing) ↔ MagicDNS interception ↔ TUN.
+	filt := filter.Wrap(dnsTUN)
+	dev := device.NewDevice(filt, magic, wgLog)
 	// Peers' endpoints are node keys interpreted by magicsock; WireGuard must
 	// not replace them with the source address of received packets.
 	dev.DisableSomeRoamingForBrokenMobileSemantics()
@@ -144,7 +150,7 @@ func New(cfg Config, priv key.NodePrivate) (*Engine, error) {
 	}
 	return &Engine{
 		dev: dev, magic: magic, router: cfg.Router, logf: cfg.Logf, pub: priv.Public(),
-		resolver: resolver, dnsTUN: dnsTUN, osDNS: cfg.DNS,
+		resolver: resolver, dnsTUN: dnsTUN, filter: filt, osDNS: cfg.DNS,
 		peers: map[key.NodePublic]peerState{},
 	}, nil
 }
@@ -206,11 +212,17 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 	e.sawMap = true
 	want := map[key.NodePublic]bool{}
 	var routes []netip.Prefix
+	var restricted []netip.Addr
 	for _, p := range nm.Peers {
 		if p.NodeKey.IsZero() || p.NodeKey.Equal(e.pub) {
 			continue
 		}
 		want[p.NodeKey] = true
+		if p.NoInitiate {
+			for _, a := range p.Addresses {
+				restricted = append(restricted, a.Addr())
+			}
+		}
 		allowed := slices.Clone(p.Addresses)
 		slices.SortFunc(allowed, comparePrefix)
 		routes = append(routes, allowed...)
@@ -244,11 +256,17 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 			e.logf("peer %s removed", k.ShortString())
 		}
 	}
+	// Change the filter around the peer update so no packet slips through:
+	// restrictions for new shared machines apply before they are added, and
+	// restrictions for removed ones are lifted only after they are gone.
+	e.filter.SetRestricted(append(slices.Clone(restricted), e.restricted...))
 	if b.Len() > 0 {
 		if err := e.dev.IpcSet(b.String()); err != nil {
 			return fmt.Errorf("engine: apply peers: %w", err)
 		}
 	}
+	e.filter.SetRestricted(restricted)
+	e.restricted = restricted
 	for _, k := range kick {
 		time.AfterFunc(rand.N(maxKickJitter), func() { e.kickHandshake(k) })
 	}
@@ -283,7 +301,18 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 		if !resolver.IsValid() {
 			resolver = protocol.MagicDNSAddr
 		}
-		osc = dns.OSConfig{Nameservers: []netip.Addr{resolver}, SearchDomains: []string{domain}}
+		// Search the tenant domain first so "laptop" finds this tenant's
+		// laptop; route the whole base domain so every name resolves.
+		search := []string{}
+		for _, d := range nm.DNS.Search {
+			if d = strings.TrimSuffix(strings.ToLower(d), "."); d != "" {
+				search = append(search, d)
+			}
+		}
+		if len(search) == 0 {
+			search = []string{domain}
+		}
+		osc = dns.OSConfig{Nameservers: []netip.Addr{resolver}, SearchDomains: search}
 		if len(nm.DNS.Nameservers) == 0 && e.osDNS.SupportsSplitDNS() {
 			// Split DNS: only MagicDNS names and reverse lookups of tunnel
 			// addresses; the host keeps its resolvers for everything else.
@@ -332,9 +361,13 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 			}
 			cfg.Upstream = append(cfg.Upstream, netip.AddrPortFrom(a, 53))
 		}
-		e.dnsDomain = cfg.Domain
+		e.dnsBase = strings.TrimSuffix(strings.ToLower(cfg.Domain), ".")
+		e.dnsDomain = e.dnsBase
+		if len(osc.SearchDomains) > 0 {
+			e.dnsDomain = osc.SearchDomains[0]
+		}
 	} else {
-		e.dnsDomain = ""
+		e.dnsDomain, e.dnsBase = "", ""
 	}
 	e.resolver.SetConfig(cfg)
 	e.dnsTUN.SetEnabled(on)
@@ -357,7 +390,8 @@ func reverseZones() []string {
 
 // DNSStatus describes MagicDNS on this node.
 type DNSStatus struct {
-	Domain string // "" when MagicDNS is off
+	Domain string // this machine's domain, e.g. "acme.home.internal" ("" when MagicDNS is off)
+	Base   string // the domain sent to MagicDNS, e.g. "home.internal"
 	Mode   string // how the host is configured ("systemd-resolved", "file", "off")
 	Split  bool   // only MagicDNS names are sent to the resolver
 	Error  string // last host configuration error
@@ -366,7 +400,7 @@ type DNSStatus struct {
 func (e *Engine) DNSStatus() DNSStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return DNSStatus{Domain: e.dnsDomain, Mode: e.osDNS.Mode(), Split: len(e.lastOSDNS.MatchDomains) > 0, Error: e.dnsErr}
+	return DNSStatus{Domain: e.dnsDomain, Base: e.dnsBase, Mode: e.osDNS.Mode(), Split: len(e.lastOSDNS.MatchDomains) > 0, Error: e.dnsErr}
 }
 
 // kickHandshake makes WireGuard send a keepalive to k, which starts a
@@ -473,3 +507,6 @@ func (e *Engine) Stats() map[key.NodePublic]PeerStats {
 	flush()
 	return out
 }
+
+// FilterDropped counts packets the one-way sharing filter refused.
+func (e *Engine) FilterDropped() int64 { return e.filter.Dropped() }

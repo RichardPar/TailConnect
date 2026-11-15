@@ -19,6 +19,10 @@ var (
 	ErrExists         = errors.New("already exists")
 	ErrInvalidAuthKey = errors.New("invalid, expired or already-used auth key")
 	ErrInvalid        = errors.New("invalid argument")
+	ErrInvalidInvite  = errors.New("invalid, expired or already-used invite code")
+	// ErrAccountInactive: the account is pending approval or suspended, so
+	// its machines may not join or stay in the network.
+	ErrAccountInactive = errors.New("account is not active (pending approval or suspended)")
 )
 
 type DB struct {
@@ -121,6 +125,97 @@ ALTER TABLE nodes ADD COLUMN home_relay INTEGER NOT NULL DEFAULT 0;
 CREATE TRIGGER nodes_gen_relay AFTER UPDATE OF home_relay ON nodes
 	WHEN OLD.home_relay IS NOT NEW.home_relay
 	BEGIN UPDATE generation SET value = value + 1; END;
+`,
+	// 4: accounts. Each user is a tenant login with an optional password, a
+	// status (pending approval, active, suspended) and a role. session_epoch
+	// is bumped to invalidate web sessions (password change, suspension).
+	// Invites are operator-issued codes for invite-only sign-up.
+	`
+ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'tenant';
+ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0;
+CREATE TRIGGER users_gen_status AFTER UPDATE OF status ON users
+	WHEN OLD.status IS NOT NEW.status
+	BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TABLE invites (
+	id         INTEGER PRIMARY KEY,
+	hash       BLOB NOT NULL UNIQUE,
+	prefix     TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	used_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	used_at    INTEGER,
+	revoked    INTEGER NOT NULL DEFAULT 0
+);
+`,
+	// 5: machine names are unique per tenant (they live under
+	// <tenant>.<domain>), not server-wide. SQLite can't drop a column's
+	// UNIQUE constraint, so the table is rebuilt (with its triggers).
+	`
+CREATE TABLE nodes_new (
+	id             INTEGER PRIMARY KEY,
+	user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	machine_key    TEXT NOT NULL UNIQUE,
+	node_key       TEXT NOT NULL UNIQUE,
+	disco_key      TEXT NOT NULL DEFAULT '',
+	hostname       TEXT NOT NULL,
+	given_name     TEXT NOT NULL,
+	hostinfo       TEXT NOT NULL DEFAULT '{}',
+	ipv4           TEXT NOT NULL UNIQUE,
+	ipv6           TEXT NOT NULL UNIQUE,
+	endpoints      TEXT NOT NULL DEFAULT '[]',
+	ephemeral      INTEGER NOT NULL DEFAULT 0,
+	preauth_key_id INTEGER REFERENCES preauth_keys(id) ON DELETE SET NULL,
+	created_at     INTEGER NOT NULL,
+	last_seen      INTEGER,
+	expires_at     INTEGER,
+	home_relay     INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO nodes_new(id, user_id, machine_key, node_key, disco_key, hostname, given_name, hostinfo, ipv4, ipv6,
+                      endpoints, ephemeral, preauth_key_id, created_at, last_seen, expires_at, home_relay)
+	SELECT id, user_id, machine_key, node_key, disco_key, hostname, given_name, hostinfo, ipv4, ipv6,
+	       endpoints, ephemeral, preauth_key_id, created_at, last_seen, expires_at, home_relay FROM nodes;
+DROP TABLE nodes;
+ALTER TABLE nodes_new RENAME TO nodes;
+CREATE INDEX nodes_user ON nodes(user_id);
+CREATE UNIQUE INDEX nodes_user_name ON nodes(user_id, given_name);
+CREATE TRIGGER nodes_gen_ins AFTER INSERT ON nodes BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_gen_del AFTER DELETE ON nodes BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_gen_upd AFTER UPDATE ON nodes
+	WHEN OLD.node_key IS NOT NEW.node_key OR OLD.disco_key IS NOT NEW.disco_key
+	  OR OLD.given_name IS NOT NEW.given_name OR OLD.endpoints IS NOT NEW.endpoints
+	  OR OLD.hostinfo IS NOT NEW.hostinfo OR OLD.user_id IS NOT NEW.user_id
+	  OR OLD.ipv4 IS NOT NEW.ipv4 OR OLD.ipv6 IS NOT NEW.ipv6 OR OLD.expires_at IS NOT NEW.expires_at
+	BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_gen_relay AFTER UPDATE OF home_relay ON nodes
+	WHEN OLD.home_relay IS NOT NEW.home_relay
+	BEGIN UPDATE generation SET value = value + 1; END;
+`,
+	// 6: sharing a machine with another tenant. A share names its recipient
+	// (pending until accepted), or is an unclaimed link (recipient NULL,
+	// invite_hash set) that the first account to redeem it accepts. Shares
+	// end when the machine is deleted or moves to another tenant.
+	`
+CREATE TABLE shares (
+	id            INTEGER PRIMARY KEY,
+	node_id       INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+	recipient_id  INTEGER REFERENCES users(id) ON DELETE CASCADE,
+	status        TEXT NOT NULL,
+	invite_hash   BLOB UNIQUE,
+	invite_prefix TEXT NOT NULL DEFAULT '',
+	created_at    INTEGER NOT NULL,
+	accepted_at   INTEGER,
+	expires_at    INTEGER
+);
+CREATE UNIQUE INDEX shares_node_recipient ON shares(node_id, recipient_id) WHERE recipient_id IS NOT NULL;
+CREATE INDEX shares_recipient ON shares(recipient_id);
+CREATE TRIGGER shares_gen_ins AFTER INSERT ON shares BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER shares_gen_del AFTER DELETE ON shares BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER shares_gen_upd AFTER UPDATE ON shares BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_move_unshare AFTER UPDATE OF user_id ON nodes
+	WHEN OLD.user_id IS NOT NEW.user_id
+	BEGIN DELETE FROM shares WHERE node_id = NEW.id; END;
 `,
 }
 

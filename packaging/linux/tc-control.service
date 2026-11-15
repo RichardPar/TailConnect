@@ -13,6 +13,10 @@ RestartSec=2
 DynamicUser=yes
 StateDirectory=tc-control
 StateDirectoryMode=0700
+# Files copied in by root (a restored backup, a database moved from another
+# server) must belong to the service's dynamic user; systemd only fixes the
+# directory itself. "+" runs this one command as root.
+ExecStartPre=+/bin/chown -R --reference=/var/lib/private/tc-control /var/lib/private/tc-control
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

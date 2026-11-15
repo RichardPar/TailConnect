@@ -358,9 +358,10 @@ func (d *Daemon) Status() localapi.Status {
 	if d.eng != nil {
 		stats = d.eng.Stats()
 		s.HomeRelay, s.RelayConnected = d.eng.HomeRelay(), d.eng.RelayConnected()
+		s.FilterDropped = d.eng.FilterDropped()
 		if ds := d.eng.DNSStatus(); ds.Domain != "" {
 			s.DNS = &localapi.DNSStatus{
-				Domain: ds.Domain, Resolver: protocol.MagicDNSAddr, HostConfig: ds.Mode, SplitDNS: ds.Split, Error: ds.Error,
+				Domain: ds.Domain, Base: ds.Base, Resolver: protocol.MagicDNSAddr, HostConfig: ds.Mode, SplitDNS: ds.Split, Error: ds.Error,
 			}
 		}
 	}
@@ -368,6 +369,10 @@ func (d *Daemon) Status() localapi.Status {
 	if d.netmap != nil {
 		self = &d.netmap.Self
 		s.Domain = d.netmap.DNS.Domain
+		if len(d.netmap.DNS.Search) > 0 {
+			s.Domain = d.netmap.DNS.Search[0] // short names are relative to the tenant domain
+		}
+		s.Notice = d.netmap.Notice
 		for _, p := range d.netmap.Peers {
 			ps := peerStatus(p)
 			if st, ok := stats[p.NodeKey]; ok {
@@ -393,6 +398,7 @@ func peerStatus(n protocol.Node) localapi.PeerStatus {
 	return localapi.PeerStatus{
 		Name: n.Name, HostName: n.Hostinfo.Hostname, User: n.User, OS: n.Hostinfo.OS,
 		Addresses: n.Addresses, NodeKey: n.NodeKey, Endpoints: n.Endpoints,
+		Shared: n.Shared, NoInitiate: n.NoInitiate,
 	}
 }
 

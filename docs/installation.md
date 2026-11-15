@@ -6,6 +6,7 @@ This guide sets up a TailConnect network: one **control server** (`tc-control`) 
 - [Get the software](#get-the-software)
 - [Install the control server](#install-the-control-server)
 - [Enable HTTPS](#enable-https)
+- [Open the portal to other people](#open-the-portal-to-other-people)
 - [Install clients](#install-clients)
 - [Run without the installer](#run-without-the-installer)
 - [Upgrade](#upgrade)
@@ -65,7 +66,7 @@ Pick a machine every device can reach: a small VPS, a home server, or one of the
 sudo ./packaging/linux/install.sh server
 ```
 
-![Terminal: installing tc-control from a release tarball with install.sh server, creating a user, a reusable auth key and the admin token, and the server's startup log](images/term-server-setup.png)
+![Terminal: installing tc-control from a release tarball with install.sh server, creating an operator account and a reusable auth key, and the server's startup log](images/term-server-setup.png)
 
 The installer:
 
@@ -73,15 +74,14 @@ The installer:
 - installs and starts the `tc-control` systemd unit. It runs as an unprivileged dynamic user, with its database in `/var/lib/tc-control/control.db`;
 - creates `/etc/default/tc-control` for your options (the file is kept on upgrades).
 
-Then, once:
+Then, once, create your own account and a key for joining your devices:
 
 ```sh
-sudo tc-control users create alice                                 # every device belongs to a user
+sudo tc-control users create alice -operator -password             # prompts for a password (10+ characters)
 sudo tc-control keys create -user alice -reusable -expiration 24h  # auth key for joining devices
-sudo tc-control admin-token                                        # sign-in token for the admin UI
 ```
 
-The auth key and the admin token are printed **once** and stored only as hashes. `tc-control` on the server finds the installed database automatically, so no `-db` flag is needed. You can run these commands whether or not the service is running.
+The account name becomes part of your machines' names (`laptop.alice.tc.internal`), so it's lowercase letters, digits and `-`. `-operator` lets the account run the server in the web portal; other people's accounts are ordinary **tenants**, each with its own private network ([accounts and sign-up](usage.md#accounts-and-sign-up)). The auth key is printed **once** and stored only as a hash. `tc-control` on the server finds the installed database automatically, so no `-db` flag is needed, and you can run these commands whether or not the service is running.
 
 ### Choose your options
 
@@ -100,8 +100,9 @@ The options you're most likely to want:
 
 | Option | Why |
 |---|---|
-| `-domain home.internal` | MagicDNS names become `laptop.home.internal` (default `tc.internal`). Changing it later renames everything. |
-| `-public-url URL` | The URL shown in the admin UI for clients to use |
+| `-domain home.internal` | MagicDNS names become `laptop.alice.home.internal` (default `tc.internal`). Changing it later renames everything. |
+| `-signup MODE` | Who may create accounts in the portal: `off`, `approval` (default), `invite` or `open`. See [accounts and sign-up](usage.md#accounts-and-sign-up). |
+| `-public-url URL` | The URL shown in the portal for clients to use |
 | `-tls-cert`, `-tls-key` | HTTPS; see [Enable HTTPS](#enable-https) |
 | `-listen :PORT` | A different control port (default `:7740`) |
 
@@ -113,7 +114,7 @@ All options are listed in the [configuration reference](configuration.md#tc-cont
 |---|---|---|
 | 7740 | TCP | Control API and built-in relay (clients connect here) |
 | 3478 | UDP | STUN: clients learn their public address, needed for NAT traversal |
-| 7741 | TCP | Admin UI. **Don't open it**: it listens on 127.0.0.1 only. |
+| 7741 | TCP | Web portal. It listens on 127.0.0.1 only by default; open it only if [other people use it](#open-the-portal-to-other-people). |
 
 ```sh
 sudo ufw allow 7740/tcp && sudo ufw allow 3478/udp                     # Ubuntu/Debian with ufw
@@ -130,13 +131,13 @@ curl http://localhost:7740/key        # {"Version":1,"MachineKey":"mkey:…"}
 journalctl -u tc-control -f           # logs
 ```
 
-The **admin UI** is at `http://127.0.0.1:7741` on the server. From your workstation, run `ssh -L 7741:127.0.0.1:7741 server`, open `http://localhost:7741`, and sign in with the admin token. See [Usage](usage.md#admin-web-ui).
+The **web portal** is at `http://127.0.0.1:7741` on the server. From your workstation, run `ssh -L 7741:127.0.0.1:7741 server`, open `http://localhost:7741`, and sign in with your account. See [the web portal](usage.md#the-web-portal).
 
 ---
 
 ## Enable HTTPS
 
-Over plain HTTP, the control channel is still encrypted and authenticated with Noise. However, the first time a client connects, it trusts whatever server key it is given ("trust on first use"). HTTPS removes that gap and lets you serve on port 443. HTTPS covers both the control API and the admin UI.
+Over plain HTTP, the control channel is still encrypted and authenticated with Noise. However, the first time a client connects, it trusts whatever server key it is given ("trust on first use"). HTTPS removes that gap and lets you serve on port 443. HTTPS covers both the control API and the web portal.
 
 The packaged unit runs as a dynamic user that can't read files under `/etc/letsencrypt`. Instead, hand the certificate to the service with systemd **credentials**, using a drop-in:
 
@@ -178,6 +179,22 @@ Clients then join with `--server https://vpn.example.com`. Open TCP 443 instead 
 
 ---
 
+## Open the portal to other people
+
+If only you manage the server, keep the portal on 127.0.0.1 and reach it through SSH. If other people should sign up, add their own devices and share machines, they need to reach it, and since they type passwords into it, **over HTTPS only**:
+
+1. Set up the certificate as in [Enable HTTPS](#enable-https); it covers the portal too.
+2. Listen on a reachable address and choose who may sign up:
+   ```sh
+   # /etc/default/tc-control
+   TC_CONTROL_ARGS="-listen :443 -admin-listen :7741 -signup approval -public-url https://vpn.example.com -tls-cert /run/credentials/tc-control.service/cert.pem -tls-key /run/credentials/tc-control.service/key.pem"
+   ```
+3. Open TCP 7741, restart (`sudo systemctl restart tc-control`), and send people `https://vpn.example.com:7741`.
+
+With `-signup approval` (the default), new accounts wait in the Accounts tab until an operator approves them; `invite` needs a code you hand out; `off` hides sign-up. `tc-control` logs a warning if the portal listens on a non-loopback address without TLS. There's no e-mail on the server, so forgotten passwords are reset by an operator (Accounts → Reset password, or `tc-control users passwd NAME`).
+
+---
+
 ## Install clients
 
 On every device, from the tarball or source directory:
@@ -187,12 +204,12 @@ sudo ./packaging/linux/install.sh client
 sudo tc up --server http://SERVER:7740 --authkey tc-auth-…
 ```
 
-![Terminal: install.sh client starting tcd, tc up joining as laptop.home.internal, and systemctl status showing tcd active](images/term-client-install.png)
+![Terminal: install.sh client starting tcd, tc up joining as laptop.richard.home.internal, and systemctl status showing tcd active](images/term-client-install.png)
 
 The installer copies `tcd` and `tc` to `/usr/local/bin`, then installs and starts the `tcd` unit. That unit runs as root with only `CAP_NET_ADMIN` and `CAP_NET_RAW`, and keeps its keys in `/var/lib/tailconnect`. It also creates `/etc/default/tcd` for options.
 
 `tc up`:
-- registers the device under the auth key's user;
+- registers the device in the auth key's account;
 - gives it a `100.64.x.y` address and a matching IPv6 address;
 - configures the `tc0` interface, routes and DNS.
 
@@ -246,7 +263,7 @@ On systems without systemd, or to try TailConnect out in a terminal, run the bin
 
 ```sh
 # Server (any user; creates ./control.db)
-tc-control users create alice
+tc-control users create alice -operator -password
 tc-control keys create -user alice -reusable
 tc-control serve -domain home.internal
 
@@ -271,6 +288,13 @@ sudo ./packaging/linux/install.sh client      # on each device
 - **Server restarts** don't drop tunnels. Devices keep talking to each other with the network map they have, and reconnect to the control server within seconds.
 - **Client restarts** interrupt that device's traffic for a second or two. It keeps its address, name and keys.
 
+**From 0.5 to 0.6** (multi-tenant):
+
+- Upgrade the server first, then the clients. The database is migrated automatically on start; back it up first.
+- Existing users become active tenant accounts without passwords. Give yourself an account to sign in to the portal: `sudo tc-control users passwd NAME` and `sudo tc-control users role NAME operator`. The admin token keeps working.
+- Machine names gain the account: `laptop.home.internal` becomes `laptop.richard.home.internal`. Short names (`ping laptop`) keep working once clients run 0.6.
+- Users' machines no longer see each other's: each user is now a separate network. Share machines between them where needed ([sharing](usage.md#sharing-a-machine)).
+
 ## Move the server
 
 To give the server a new address, port or HTTPS while keeping its database, run on each device:
@@ -281,9 +305,21 @@ sudo tc up --server https://new-address
 
 The device fetches the server key from the new URL. If it's the same server (same key), the device keeps its registration, address and name, and no auth key is needed. If the key is different, it's a different server: the device starts with a fresh identity and needs an auth key for that server.
 
+**To new hardware** (say, from a VM to a Raspberry Pi): install the server on the new machine, stop both servers, copy the database across, start the new one, then run `tc up --server` on each device as above:
+
+```sh
+# on the new server, after install.sh server
+sudo systemctl stop tc-control
+sudo cp control.db /var/lib/private/tc-control/control.db      # copied from the old server's /var/lib/tc-control/
+sudo cp /etc/default/tc-control.old /etc/default/tc-control    # or set the options again (-domain, -public-url, ...)
+sudo systemctl start tc-control
+```
+
+Because the database holds the server's key, the devices keep their accounts, addresses and names. (The unit hands files copied in as root to the service's user when it starts.)
+
 ## Back up and restore
 
-Everything the server knows is in `/var/lib/tc-control/control.db`: users, devices, key hashes, and the server's own private keys. **Keep backups private.** A consistent copy:
+Everything the server knows is in `/var/lib/tc-control/control.db`: accounts, machines, shares, password and key hashes, and the server's own private keys. **Keep backups private.** A consistent copy:
 
 ```sh
 sudo systemctl stop tc-control
@@ -291,7 +327,7 @@ sudo cp /var/lib/tc-control/control.db /root/tc-control-$(date +%F).db
 sudo systemctl start tc-control
 ```
 
-To restore, stop the service, copy the file back to the same path, and start it. If the database is lost, the replacement server has a new key, and every device must join again with `tc up --server URL --authkey …`.
+To restore, stop the service, copy the file back to the same path, and start it; the service takes ownership of the file when it starts. If the database is lost, the replacement server has a new key: on every device run `sudo tc logout` (which forgets the old key), then join again with `sudo tc up --server URL --authkey …`.
 
 On a device, `/var/lib/tailconnect/state.json` holds its keys. If it's lost, the device simply joins again.
 
