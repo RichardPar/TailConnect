@@ -181,23 +181,44 @@ echo "== MagicDNS"
 for n in a b; do
 	wait_for 5 "$n's resolv.conf points at MagicDNS" grep -q '^nameserver 100.100.100.100$' "$WORK/resolv-$n.conf"
 done
-grep -q '^search nat.internal corp.example$' "$WORK/resolv-a.conf" || { cat "$WORK/resolv-a.conf"; fail "search domains"; }
+grep -q '^search alice.nat.internal corp.example$' "$WORK/resolv-a.conf" || { cat "$WORK/resolv-a.conf"; fail "search domains"; }
 ok "resolv.conf rewritten (original search domain kept)"
-tca status | grep -q '^MagicDNS: nat.internal (file, all names)' || { tca status; fail "tc status MagicDNS line"; }
+tca status | grep -q '^MagicDNS: alice.nat.internal (file, all names)' || { tca status; fail "tc status MagicDNS line"; }
 got=$(lookup a getent ahostsv4 beta | awk 'NR==1{print $1}')
 [[ $got == "$IPB" ]] || fail "short name beta resolved to '$got', want $IPB"
-got=$(lookup b getent ahostsv4 alpha.nat.internal | awk 'NR==1{print $1}')
-[[ $got == "$IPA" ]] || fail "alpha.nat.internal resolved to '$got', want $IPA"
-ok "peer names resolve through glibc (beta → $IPB, alpha.nat.internal → $IPA)"
-lookup a getent hosts "$IPB" | grep -q 'beta.nat.internal' || fail "reverse lookup of $IPB"
-ok "reverse lookup: $IPB → beta.nat.internal"
-lookup a getent ahostsv4 gamma.nat.internal >/dev/null && fail "unknown MagicDNS name should not resolve"
+got=$(lookup b getent ahostsv4 alpha.alice.nat.internal | awk 'NR==1{print $1}')
+[[ $got == "$IPA" ]] || fail "alpha.alice.nat.internal resolved to '$got', want $IPA"
+ok "peer names resolve through glibc (beta → $IPB, alpha.alice.nat.internal → $IPA)"
+lookup a getent hosts "$IPB" | grep -q 'beta.alice.nat.internal' || fail "reverse lookup of $IPB"
+ok "reverse lookup: $IPB → beta.alice.nat.internal"
+lookup a getent ahostsv4 gamma.alice.nat.internal >/dev/null && fail "unknown MagicDNS name should not resolve"
 ok "unknown names under nat.internal: not found (not forwarded)"
 got=$(lookup a getent ahostsv4 www.example.com | awk 'NR==1{print $1}')
 [[ $got == 192.0.2.53 ]] || fail "www.example.com resolved to '$got', want 192.0.2.53 from the upstream"
 ok "other names forwarded to the original resolver"
 lookup a ping -c1 -W2 beta >/dev/null || fail "ping beta by name"
 ok "ping beta (by name) works"
+
+echo "== tenants are isolated"
+# A machine of another tenant (bob), sharing site b's namespace on its own
+# interface and port: alice's machines must not see, resolve or reach it.
+tc-control users create bob >/dev/null
+BOBKEY=$(tc-control keys create -user bob 2>/dev/null)
+ip netns exec b tcd -state "$WORK/state-c" -socket /run/tc-c.sock -tun tc1 -port 41642 -dns off >"$LOG/tcd-c.log" 2>&1 &
+pids+=($!)
+wait_for 5 "tcd-c socket" test -S /run/tc-c.sock
+tcc() { ip netns exec b tc --socket /run/tc-c.sock "$@"; }
+tcc up --server http://198.51.100.1:7740 --authkey "$BOBKEY" --hostname gamma
+IPC=$(tcc ip -4)
+sleep 1
+[[ $(tcc status --json | grep -c '"NodeKey"') -eq 1 ]] || { tcc status; fail "bob's machine sees other tenants' machines"; }
+tca status | grep -q gamma && { tca status; fail "alice's machine sees bob's machine"; }
+ok "bob's gamma ($IPC) and alice's machines don't appear in each other's maps"
+tcc status | grep -q "^$IPC *gamma *bob" || { tcc status; fail "gamma status"; }
+lookup a getent ahostsv4 gamma.bob.nat.internal >/dev/null && fail "alice resolved bob's machine"
+ok "gamma.bob.nat.internal doesn't resolve for alice"
+ip netns exec a ping -c2 -W1 "$IPC" >/dev/null 2>&1 && fail "alice reached bob's machine"
+ok "alice can't reach bob's machine"
 
 echo "== direct path dies: fall back to relay, then recover"
 # Drop all UDP between the two NATs (both still reach control and the relay).

@@ -23,9 +23,14 @@ import (
 // proven) may use the relay. nil allows every node.
 type AuthorizeFunc func(ctx context.Context, node key.NodePublic) error
 
+// AllowFunc decides, per packet, whether src may send to dst through the
+// relay (e.g. only machines of the same tenant). It must be fast.
+type AllowFunc func(src, dst key.NodePublic) bool
+
 type Server struct {
 	priv      key.RelayPrivate
 	authorize AuthorizeFunc
+	allow     atomic.Pointer[AllowFunc]
 	log       *slog.Logger
 	keepAlive time.Duration
 
@@ -35,6 +40,7 @@ type Server struct {
 
 	packetsForwarded atomic.Int64
 	packetsDropped   atomic.Int64
+	packetsDenied    atomic.Int64 // refused by the AllowFunc
 }
 
 type sclient struct {
@@ -56,6 +62,15 @@ func NewServer(priv key.RelayPrivate, authorize AuthorizeFunc, log *slog.Logger)
 	return &Server{priv: priv, authorize: authorize, log: log, keepAlive: 60 * time.Second, clients: map[key.NodePublic]*sclient{}}
 }
 
+// SetAllow installs a per-packet policy (nil = forward between any clients).
+func (s *Server) SetAllow(f AllowFunc) {
+	if f == nil {
+		s.allow.Store(nil)
+		return
+	}
+	s.allow.Store(&f)
+}
+
 // PublicKey is the relay server's key, sent to clients in the handshake.
 func (s *Server) PublicKey() key.RelayPublic { return s.priv.Public() }
 
@@ -66,6 +81,9 @@ func (s *Server) Stats() (clients int, forwarded, dropped int64) {
 	s.mu.Unlock()
 	return clients, s.packetsForwarded.Load(), s.packetsDropped.Load()
 }
+
+// Denied counts packets refused by the AllowFunc.
+func (s *Server) Denied() int64 { return s.packetsDenied.Load() }
 
 // Close disconnects all clients. (Hijacked connections are not tracked by
 // http.Server.Shutdown.)
@@ -172,7 +190,6 @@ func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader) {
 
 	go s.writer(c)
 
-	src := nk.Raw()
 	var buf []byte
 	for {
 		t, b, err := readFrame(br, buf)
@@ -185,11 +202,16 @@ func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader) {
 		}
 		var dk [32]byte
 		copy(dk[:], b[:keyLen])
-		s.forward(key.PublicFromRaw[key.NodeKind](dk), src[:], b[keyLen:])
+		s.forward(nk, key.PublicFromRaw[key.NodeKind](dk), b[keyLen:])
 	}
 }
 
-func (s *Server) forward(dst key.NodePublic, src, pkt []byte) {
+func (s *Server) forward(srcKey, dst key.NodePublic, pkt []byte) {
+	if f := s.allow.Load(); f != nil && !(*f)(srcKey, dst) {
+		s.packetsDenied.Add(1)
+		return
+	}
+	src := srcKey.Raw()
 	s.mu.Lock()
 	dc := s.clients[dst]
 	s.mu.Unlock()
@@ -200,7 +222,7 @@ func (s *Server) forward(dst key.NodePublic, src, pkt []byte) {
 	frame := make([]byte, 5+keyLen+len(pkt))
 	frame[0] = byte(frameRecvPacket)
 	putLen(frame[1:5], keyLen+len(pkt))
-	copy(frame[5:], src)
+	copy(frame[5:], src[:])
 	copy(frame[5+keyLen:], pkt)
 	select {
 	case dc.sendq <- frame:

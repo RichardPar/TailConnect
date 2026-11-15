@@ -250,6 +250,9 @@ func cmdServe(args []string) error {
 		return err
 	}
 	defer ctl.Close()
+	if relaySrv != nil {
+		relaySrv.SetAllow(ctl.RelayAllowed) // tenants' packets never cross
+	}
 	if *tlsCert == "" && !isLoopback(*listen) {
 		log.Warn("control API is plain HTTP: traffic is protected by Noise, but clients fetch the server key "+
 			"trust-on-first-use. Use TLS, or have clients pin it with `tc up --server-key`.",

@@ -52,7 +52,8 @@ type Status struct {
 
 // DNSStatus describes MagicDNS on this node.
 type DNSStatus struct {
-	Domain   string     // names are <host>.Domain
+	Domain   string     // this machine's domain: short names are <host>.Domain
+	Base     string     // all MagicDNS names end in Base (e.g. other tenants' shared machines)
 	Resolver netip.Addr // in-tunnel resolver
 	// HostConfig is how the OS is pointed at the resolver: "systemd-resolved",
 	// "file" (resolv.conf) or "off" (query the resolver directly).

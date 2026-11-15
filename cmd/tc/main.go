@@ -196,7 +196,11 @@ func cmdStatus(c *localapi.Client, args []string) error {
 		case d.HostConfig == "off":
 			how = "host DNS not configured; query " + d.Resolver.String()
 		case d.SplitDNS:
-			how += ", only ." + d.Domain + " names"
+			base := d.Base
+			if base == "" {
+				base = d.Domain
+			}
+			how += ", only ." + base + " names"
 		default:
 			how += ", all names"
 		}

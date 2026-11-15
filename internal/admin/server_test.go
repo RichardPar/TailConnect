@@ -182,7 +182,7 @@ func TestCRUD(t *testing.T) {
 	if err := json.Unmarshal(raw, &nodes); err != nil || len(nodes) != 1 {
 		t.Fatalf("nodes: %s", raw)
 	}
-	if nodes[0].FQDN != "laptop.home.internal" || !nodes[0].Online {
+	if nodes[0].FQDN != "laptop.alice.home.internal" || !nodes[0].Online {
 		t.Fatalf("node: %+v", nodes[0])
 	}
 	id := nodes[0].ID

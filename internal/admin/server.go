@@ -217,7 +217,7 @@ func (s *Server) toAPINode(n db.Node) apiNode {
 	var hi protocol.Hostinfo
 	_ = json.Unmarshal([]byte(n.Hostinfo), &hi)
 	out := apiNode{
-		ID: n.ID, Name: n.GivenName, FQDN: n.GivenName + "." + s.info.BaseDomain, User: n.UserName,
+		ID: n.ID, Name: n.GivenName, FQDN: n.GivenName + "." + db.TenantLabel(n.UserName) + "." + s.info.BaseDomain, User: n.UserName,
 		Hostname: n.Hostname, OS: hi.OS, IPv4: n.IPv4, IPv6: n.IPv6, Endpoints: n.Endpoints,
 		NodeKey: n.NodeKey, Ephemeral: n.Ephemeral, Created: n.CreatedAt,
 	}

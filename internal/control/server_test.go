@@ -162,7 +162,7 @@ func TestRegisterAndMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ra.Node.Name != "laptop.home.internal" || ra.Node.Addresses[0] != netip.MustParsePrefix("100.64.0.1/32") {
+	if ra.Node.Name != "laptop.alice.home.internal" || ra.Node.Addresses[0] != netip.MustParsePrefix("100.64.0.1/32") {
 		t.Fatalf("unexpected node a: %+v", ra.Node)
 	}
 	// Re-registering the same node key needs no auth key.
@@ -181,7 +181,7 @@ func TestRegisterAndMap(t *testing.T) {
 	if !m.Self.NodeKey.Equal(a.nk) || len(m.Peers) != 1 || !m.Peers[0].NodeKey.Equal(b.nk) {
 		t.Fatalf("unexpected map: %+v", m)
 	}
-	if !m.DNS.MagicDNS || m.DNS.Domain != "home.internal" {
+	if !m.DNS.MagicDNS || m.DNS.Domain != "home.internal" || len(m.DNS.Search) != 1 || m.DNS.Search[0] != "alice.home.internal" {
 		t.Fatalf("dns: %+v", m.DNS)
 	}
 	m, err = b.c.Map(context.Background(), protocol.MapRequest{NodeKey: b.nk, DiscoKey: b.disco})
@@ -330,5 +330,68 @@ func TestKeepAliveFiltered(t *testing.T) {
 	n, _ := d.GetNode(context.Background(), 1)
 	if time.Since(n.LastSeen) > 2*time.Second {
 		t.Fatal("keep-alives did not refresh last_seen")
+	}
+}
+
+func TestTenantIsolationInMapsAndRelay(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	reg := func(user, host string) (int64, key.NodePublic) {
+		u, err := f.db.GetUser(ctx, user)
+		if err != nil {
+			u, _ = f.db.CreateUser(ctx, user)
+		}
+		k, _, _ := f.db.CreatePreAuthKey(ctx, db.CreatePreAuthKeyParams{UserID: u.ID, TTL: time.Hour})
+		nk := key.NewPrivate[key.NodeKind]().Public()
+		res, err := f.db.RegisterNode(ctx, db.RegisterParams{
+			MachineKey: key.NewPrivate[key.MachineKind]().Public().String(), NodeKey: nk.String(),
+			DiscoKey: key.NewPrivate[key.DiscoKind]().Public().String(), Hostname: host, AuthKey: k, Alloc: f.srv.ipam.Next,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Node.ID, nk
+	}
+	a1, ka1 := reg("acme", "laptop")
+	_, ka2 := reg("acme", "desk")
+	g1, kg1 := reg("globex", "laptop")
+	f.srv.checkGeneration()
+
+	m, err := f.srv.BuildMap(ctx, a1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Peers) != 1 || m.Peers[0].Name != "desk.acme.home.internal" || m.Self.Name != "laptop.acme.home.internal" {
+		t.Fatalf("acme map: self=%s peers=%v", m.Self.Name, m.Peers)
+	}
+	if len(m.DNS.Search) != 1 || m.DNS.Search[0] != "acme.home.internal" {
+		t.Fatalf("acme search domains: %v", m.DNS.Search)
+	}
+	if g, _ := f.srv.BuildMap(ctx, g1); len(g.Peers) != 0 || g.Self.Name != "laptop.globex.home.internal" {
+		t.Fatalf("globex map: self=%s peers=%d", g.Self.Name, len(g.Peers))
+	}
+
+	if !f.srv.RelayAllowed(ka1, ka2) || !f.srv.RelayAllowed(ka2, ka1) {
+		t.Fatal("same-tenant relaying refused")
+	}
+	if f.srv.RelayAllowed(ka1, kg1) || f.srv.RelayAllowed(kg1, ka1) {
+		t.Fatal("cross-tenant relaying allowed")
+	}
+	if f.srv.RelayAllowed(ka1, key.NewPrivate[key.NodeKind]().Public()) {
+		t.Fatal("relaying to an unknown key allowed")
+	}
+	// Suspension takes effect in the relay as soon as the generation is seen.
+	f.db.SetUserStatus(ctx, "acme", db.StatusSuspended)
+	f.srv.checkGeneration()
+	if f.srv.RelayAllowed(ka1, ka2) {
+		t.Fatal("suspended tenant still relayed")
+	}
+}
+
+func TestTenantLabel(t *testing.T) {
+	for in, want := range map[string]string{"acme": "acme", "a.b_c": "a-b-c", "Mixed": "mixed", "...": "tenant"} {
+		if got := db.TenantLabel(in); got != want {
+			t.Errorf("db.TenantLabel(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

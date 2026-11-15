@@ -69,6 +69,11 @@ type Server struct {
 	genMu   sync.Mutex
 	lastGen int64
 
+	// tenantOf maps every active machine's node key to its tenant (user ID),
+	// for the relay's per-packet check. Rebuilt when the generation changes.
+	policyMu sync.RWMutex
+	tenantOf map[key.NodePublic]int64
+
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	online map[int64]int // node ID → number of open map streams
@@ -104,6 +109,7 @@ func New(ctx context.Context, d *db.DB, cfg Config, log *slog.Logger) (*Server, 
 	s.bus.init()
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.lastGen, _ = d.Generation(ctx)
+	s.refreshPolicy()
 	go s.watchGeneration()
 	return s, nil
 }
@@ -433,10 +439,15 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// BuildMap computes the network map for node id. Until ACLs land (milestone
-// 8) every node can see every other node.
+// BuildMap computes the network map for node id: its tenant's other
+// machines. Tenants are isolated: a machine never learns that another
+// tenant's machines exist.
 func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, error) {
-	nodes, err := s.db.ListNodes(ctx, 0)
+	self, err := s.db.GetNode(ctx, id)
+	if err != nil {
+		return protocol.MapResponse{}, err
+	}
+	nodes, err := s.db.ListNodes(ctx, self.UserID)
 	if err != nil {
 		return protocol.MapResponse{}, err
 	}
@@ -445,6 +456,7 @@ func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, 
 		DNS: protocol.DNSConfig{
 			MagicDNS:    !s.cfg.DisableMagicDNS,
 			Domain:      s.cfg.BaseDomain,
+			Search:      []string{s.tenantDomain(self.UserName)},
 			Resolver:    protocol.MagicDNSAddr,
 			Nameservers: s.cfg.Nameservers,
 		},
@@ -499,7 +511,7 @@ func (s *Server) toProtocol(n db.Node) (protocol.Node, error) {
 	_ = json.Unmarshal([]byte(n.Hostinfo), &hi)
 	out := protocol.Node{
 		ID:        protocol.NodeID(n.ID),
-		Name:      n.GivenName + "." + s.cfg.BaseDomain,
+		Name:      n.GivenName + "." + s.tenantDomain(n.UserName),
 		User:      n.UserName,
 		NodeKey:   nk,
 		DiscoKey:  dk,
@@ -557,8 +569,44 @@ func (s *Server) checkGeneration() {
 	s.lastGen = g
 	s.genMu.Unlock()
 	if changed {
+		s.refreshPolicy()
 		s.bus.notify()
 	}
+}
+
+// refreshPolicy rebuilds the node-key → tenant table used by RelayAllowed.
+// On error the previous table stays in force.
+func (s *Server) refreshPolicy() {
+	nodes, err := s.db.ListNodes(s.ctx, 0)
+	if err != nil {
+		if s.ctx.Err() == nil {
+			s.log.Warn("refresh relay policy", "err", err)
+		}
+		return
+	}
+	m := make(map[key.NodePublic]int64, len(nodes))
+	for _, n := range nodes {
+		if n.UserStatus != db.StatusActive {
+			continue
+		}
+		if nk, err := key.ParsePublic[key.NodeKind](n.NodeKey); err == nil {
+			m[nk] = n.UserID
+		}
+	}
+	s.policyMu.Lock()
+	s.tenantOf = m
+	s.policyMu.Unlock()
+}
+
+// RelayAllowed reports whether the relay may carry packets from a to b:
+// both must be active machines of the same tenant. Install it with
+// relay.Server.SetAllow.
+func (s *Server) RelayAllowed(a, b key.NodePublic) bool {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	ta, ok1 := s.tenantOf[a]
+	tb, ok2 := s.tenantOf[b]
+	return ok1 && ok2 && ta == tb
 }
 
 // watchGeneration notices changes made outside this process (admin CLI) or
@@ -629,4 +677,9 @@ func ValidDomain(d string) error {
 		}
 	}
 	return nil
+}
+
+// tenantDomain is the DNS domain of a tenant's machines: <tenant>.<base>.
+func (s *Server) tenantDomain(user string) string {
+	return db.TenantLabel(user) + "." + s.cfg.BaseDomain
 }

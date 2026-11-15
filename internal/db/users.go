@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -198,4 +199,23 @@ func (d *DB) DeleteUser(ctx context.Context, name string) error {
 		return fmt.Errorf("user %q: %w", name, ErrNotFound)
 	}
 	return nil
+}
+
+// TenantLabel turns an account name into a DNS label. Accounts created since
+// milestone 6 already are labels; older ones may contain '.' or '_'.
+func TenantLabel(user string) string {
+	b := []byte(strings.ToLower(user))
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			b[i] = '-'
+		}
+	}
+	l := strings.Trim(string(b), "-")
+	if l == "" {
+		l = "tenant"
+	}
+	if len(l) > 63 {
+		l = strings.TrimRight(l[:63], "-")
+	}
+	return l
 }

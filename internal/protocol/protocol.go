@@ -97,7 +97,7 @@ type MapResponse struct {
 // Node describes one device in the network as seen by a client.
 type Node struct {
 	ID        NodeID
-	Name      string // fully-qualified MagicDNS name, e.g. "laptop.home.internal"
+	Name      string // fully-qualified MagicDNS name, e.g. "laptop.acme.home.internal"
 	User      string
 	NodeKey   key.NodePublic
 	DiscoKey  key.DiscoPublic
@@ -116,8 +116,11 @@ type Node struct {
 // there. If Nameservers is set, all other queries go there too (through the
 // in-tunnel resolver); otherwise the OS keeps its own resolvers for them.
 type DNSConfig struct {
-	MagicDNS    bool
-	Domain      string       // base domain, e.g. "home.internal"
+	MagicDNS bool
+	Domain   string // base domain, e.g. "home.internal"; every machine is <name>.<tenant>.<Domain>
+	// Search domains for short names; the first is this machine's tenant
+	// domain (e.g. "acme.home.internal"), so "laptop" finds its own laptop.
+	Search      []string     `json:",omitempty"`
 	Resolver    netip.Addr   // in-tunnel resolver (MagicDNSAddr)
 	Nameservers []netip.Addr `json:",omitempty"` // upstream resolvers; empty = keep OS defaults
 }

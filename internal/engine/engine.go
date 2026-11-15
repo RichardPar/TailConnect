@@ -103,7 +103,8 @@ type Engine struct {
 	lastRouter RouterConfig
 	lastOSDNS  dns.OSConfig
 	dnsErr     string
-	dnsDomain  string
+	dnsDomain  string // this machine's own domain (tenant), for status
+	dnsBase    string // the domain routed to MagicDNS
 	sawMap     bool
 	closed     bool
 }
@@ -283,7 +284,18 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 		if !resolver.IsValid() {
 			resolver = protocol.MagicDNSAddr
 		}
-		osc = dns.OSConfig{Nameservers: []netip.Addr{resolver}, SearchDomains: []string{domain}}
+		// Search the tenant domain first so "laptop" finds this tenant's
+		// laptop; route the whole base domain so every name resolves.
+		search := []string{}
+		for _, d := range nm.DNS.Search {
+			if d = strings.TrimSuffix(strings.ToLower(d), "."); d != "" {
+				search = append(search, d)
+			}
+		}
+		if len(search) == 0 {
+			search = []string{domain}
+		}
+		osc = dns.OSConfig{Nameservers: []netip.Addr{resolver}, SearchDomains: search}
 		if len(nm.DNS.Nameservers) == 0 && e.osDNS.SupportsSplitDNS() {
 			// Split DNS: only MagicDNS names and reverse lookups of tunnel
 			// addresses; the host keeps its resolvers for everything else.
@@ -332,9 +344,13 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 			}
 			cfg.Upstream = append(cfg.Upstream, netip.AddrPortFrom(a, 53))
 		}
-		e.dnsDomain = cfg.Domain
+		e.dnsBase = strings.TrimSuffix(strings.ToLower(cfg.Domain), ".")
+		e.dnsDomain = e.dnsBase
+		if len(osc.SearchDomains) > 0 {
+			e.dnsDomain = osc.SearchDomains[0]
+		}
 	} else {
-		e.dnsDomain = ""
+		e.dnsDomain, e.dnsBase = "", ""
 	}
 	e.resolver.SetConfig(cfg)
 	e.dnsTUN.SetEnabled(on)
@@ -357,7 +373,8 @@ func reverseZones() []string {
 
 // DNSStatus describes MagicDNS on this node.
 type DNSStatus struct {
-	Domain string // "" when MagicDNS is off
+	Domain string // this machine's domain, e.g. "acme.home.internal" ("" when MagicDNS is off)
+	Base   string // the domain sent to MagicDNS, e.g. "home.internal"
 	Mode   string // how the host is configured ("systemd-resolved", "file", "off")
 	Split  bool   // only MagicDNS names are sent to the resolver
 	Error  string // last host configuration error
@@ -366,7 +383,7 @@ type DNSStatus struct {
 func (e *Engine) DNSStatus() DNSStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return DNSStatus{Domain: e.dnsDomain, Mode: e.osDNS.Mode(), Split: len(e.lastOSDNS.MatchDomains) > 0, Error: e.dnsErr}
+	return DNSStatus{Domain: e.dnsDomain, Base: e.dnsBase, Mode: e.osDNS.Mode(), Split: len(e.lastOSDNS.MatchDomains) > 0, Error: e.dnsErr}
 }
 
 // kickHandshake makes WireGuard send a keepalive to k, which starts a

@@ -63,8 +63,17 @@ func applyAuthKey(ctx context.Context, tx *sql.Tx, id int64, key string, now tim
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, ephemeral = ?, preauth_key_id = ? WHERE id = ?`,
-		k.UserID, k.Ephemeral, k.ID, id)
+	// Moving to another tenant keeps the name unless it is taken there.
+	var cur string
+	if err := tx.QueryRowContext(ctx, `SELECT given_name FROM nodes WHERE id = ?`, id).Scan(&cur); err != nil {
+		return err
+	}
+	name, err := uniqueGivenName(ctx, tx, k.UserID, cur, id)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, given_name = ?, ephemeral = ?, preauth_key_id = ? WHERE id = ?`,
+		k.UserID, name, k.Ephemeral, k.ID, id)
 	return err
 }
 
@@ -150,7 +159,7 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 	if err != nil {
 		return RegisterResult{}, err
 	}
-	name, err := uniqueGivenName(ctx, tx, SanitizeName(p.Hostname), 0)
+	name, err := uniqueGivenName(ctx, tx, k.UserID, SanitizeName(p.Hostname), 0)
 	if err != nil {
 		return RegisterResult{}, err
 	}
@@ -326,8 +335,9 @@ func usedIPv4s(ctx context.Context, q querier) (map[netip.Addr]bool, error) {
 }
 
 // uniqueGivenName returns base, or base-2, base-3, ... whichever is free
-// (ignoring node selfID).
-func uniqueGivenName(ctx context.Context, q querier, base string, selfID int64) (string, error) {
+// among userID's nodes (ignoring node selfID). Names are unique per tenant:
+// two tenants can both have a "laptop".
+func uniqueGivenName(ctx context.Context, q querier, userID int64, base string, selfID int64) (string, error) {
 	for i := 1; ; i++ {
 		cand := base
 		if i > 1 {
@@ -335,7 +345,7 @@ func uniqueGivenName(ctx context.Context, q querier, base string, selfID int64) 
 			cand = strings.TrimRight(truncate(base, 63-len(suffix)), "-") + suffix
 		}
 		var id int64
-		err := q.QueryRowContext(ctx, `SELECT id FROM nodes WHERE given_name = ?`, cand).Scan(&id)
+		err := q.QueryRowContext(ctx, `SELECT id FROM nodes WHERE user_id = ? AND given_name = ?`, userID, cand).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) || (err == nil && id == selfID) {
 			return cand, nil
 		}

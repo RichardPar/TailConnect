@@ -133,3 +133,41 @@ func TestRevokeOwnKeyOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNamesPerTenant(t *testing.T) {
+	d := open(t)
+	acme, globex := mustUser(t, d, "acme"), mustUser(t, d, "globex")
+	a1, err := reg(d, "m1", "n1", "laptop", mustKey(t, d, acme.ID, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g1, err := reg(d, "m2", "n2", "laptop", mustKey(t, d, globex.ID, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a1.Node.GivenName != "laptop" || g1.Node.GivenName != "laptop" {
+		t.Fatalf("both tenants should get plain 'laptop': %s, %s", a1.Node.GivenName, g1.Node.GivenName)
+	}
+	a2, _ := reg(d, "m3", "n3", "laptop", mustKey(t, d, acme.ID, false))
+	if a2.Node.GivenName != "laptop-2" {
+		t.Fatalf("second acme laptop: %s", a2.Node.GivenName)
+	}
+	// Renames clash only within the tenant.
+	if err := d.RenameNode(ctx, a2.Node.ID, "laptop"); !errors.Is(err, ErrExists) {
+		t.Fatalf("rename onto own name: %v", err)
+	}
+	if err := d.RenameNode(ctx, g1.Node.ID, "desk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RenameNode(ctx, a2.Node.ID, "desk"); err != nil {
+		t.Fatalf("rename onto another tenant's name: %v", err)
+	}
+	// Moving a machine to another tenant renames it only on a clash.
+	moved, err := reg(d, "m3", "n3", "laptop", mustKey(t, d, globex.ID, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.Node.UserName != "globex" || moved.Node.GivenName != "desk-2" {
+		t.Fatalf("moved node: user=%s name=%s, want globex desk-2", moved.Node.UserName, moved.Node.GivenName)
+	}
+}

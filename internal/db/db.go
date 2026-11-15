@@ -149,6 +149,49 @@ CREATE TABLE invites (
 	revoked    INTEGER NOT NULL DEFAULT 0
 );
 `,
+	// 5: machine names are unique per tenant (they live under
+	// <tenant>.<domain>), not server-wide. SQLite can't drop a column's
+	// UNIQUE constraint, so the table is rebuilt (with its triggers).
+	`
+CREATE TABLE nodes_new (
+	id             INTEGER PRIMARY KEY,
+	user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	machine_key    TEXT NOT NULL UNIQUE,
+	node_key       TEXT NOT NULL UNIQUE,
+	disco_key      TEXT NOT NULL DEFAULT '',
+	hostname       TEXT NOT NULL,
+	given_name     TEXT NOT NULL,
+	hostinfo       TEXT NOT NULL DEFAULT '{}',
+	ipv4           TEXT NOT NULL UNIQUE,
+	ipv6           TEXT NOT NULL UNIQUE,
+	endpoints      TEXT NOT NULL DEFAULT '[]',
+	ephemeral      INTEGER NOT NULL DEFAULT 0,
+	preauth_key_id INTEGER REFERENCES preauth_keys(id) ON DELETE SET NULL,
+	created_at     INTEGER NOT NULL,
+	last_seen      INTEGER,
+	expires_at     INTEGER,
+	home_relay     INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO nodes_new(id, user_id, machine_key, node_key, disco_key, hostname, given_name, hostinfo, ipv4, ipv6,
+                      endpoints, ephemeral, preauth_key_id, created_at, last_seen, expires_at, home_relay)
+	SELECT id, user_id, machine_key, node_key, disco_key, hostname, given_name, hostinfo, ipv4, ipv6,
+	       endpoints, ephemeral, preauth_key_id, created_at, last_seen, expires_at, home_relay FROM nodes;
+DROP TABLE nodes;
+ALTER TABLE nodes_new RENAME TO nodes;
+CREATE INDEX nodes_user ON nodes(user_id);
+CREATE UNIQUE INDEX nodes_user_name ON nodes(user_id, given_name);
+CREATE TRIGGER nodes_gen_ins AFTER INSERT ON nodes BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_gen_del AFTER DELETE ON nodes BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_gen_upd AFTER UPDATE ON nodes
+	WHEN OLD.node_key IS NOT NEW.node_key OR OLD.disco_key IS NOT NEW.disco_key
+	  OR OLD.given_name IS NOT NEW.given_name OR OLD.endpoints IS NOT NEW.endpoints
+	  OR OLD.hostinfo IS NOT NEW.hostinfo OR OLD.user_id IS NOT NEW.user_id
+	  OR OLD.ipv4 IS NOT NEW.ipv4 OR OLD.ipv6 IS NOT NEW.ipv6 OR OLD.expires_at IS NOT NEW.expires_at
+	BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_gen_relay AFTER UPDATE OF home_relay ON nodes
+	WHEN OLD.home_relay IS NOT NEW.home_relay
+	BEGIN UPDATE generation SET value = value + 1; END;
+`,
 }
 
 // Generation returns a counter that increases whenever nodes or users change
