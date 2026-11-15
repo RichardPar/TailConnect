@@ -33,13 +33,15 @@ To build from source you also need **Go 1.26** (an older Go with the default `GO
 
 ## Get the software
 
-**Release tarball.** Each tarball contains the four binaries, the systemd units, the installer and these docs:
+**Release tarball.** Each tarball contains the four binaries, the systemd units, the installer, two helper scripts and these docs:
 
 ```
 tailconnect-v0.5.1-linux-amd64/
 ├── bin/          tc-control  tcd  tc  tc-relay
 ├── packaging/linux/
 │   ├── install.sh
+│   ├── letsencrypt.sh       switch the server to a Let's Encrypt certificate
+│   ├── duckdns.sh           keep a DuckDNS name pointing at your home address
 │   ├── tc-control.service   tc-control.default
 │   └── tcd.service          tcd.default
 ├── README.md
@@ -191,6 +193,16 @@ Over plain HTTP, the control channel is still encrypted and authenticated with N
 - a DNS name pointing at the server, such as `vpn.example.com`;
 - TCP port 443 reachable from the internet, so Let's Encrypt can check that the name is yours.
 
+The quickest way is the script, which sets the options, keeps your others, backs up the settings and checks that the certificate arrives:
+
+```sh
+sudo ./packaging/linux/letsencrypt.sh vpn.example.com --staging   # Let's Encrypt's test service first
+sudo ./packaging/linux/letsencrypt.sh vpn.example.com             # then the real certificate
+sudo ./packaging/linux/letsencrypt.sh --restore                   # undo: the previous settings back
+```
+
+Or by hand:
+
 ```sh
 # /etc/default/tc-control
 TC_CONTROL_ARGS="-listen :443 -acme-domain vpn.example.com"
@@ -202,6 +214,8 @@ curl https://vpn.example.com/key       # the first request fetches the certifica
 ```
 
 Clients then join with `--server https://vpn.example.com`. Open TCP 443 instead of 7740.
+
+**A home server with a changing address?** A free DuckDNS name works: `sudo ./packaging/linux/duckdns.sh install NAME` keeps it pointing at your home. [HOWTO: DuckDNS and Let's Encrypt](duckdns.md) goes through it step by step, router included.
 
 **[HTTPS with Let's Encrypt](lets-encrypt.md)** is the full guide:
 - the DNS and port checklist;

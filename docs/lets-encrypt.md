@@ -44,6 +44,8 @@ Let's Encrypt issues certificates for names, not for addresses, so devices must 
 
 ## Set it up
 
+**The quick way:** `sudo ./packaging/linux/letsencrypt.sh vpn.example.com --staging`, then the same without `--staging`. The script sets the options below, keeps your others, backs up the settings (`--restore` undoes it), and checks that the certificate arrives. [HOWTO: DuckDNS and Let's Encrypt](duckdns.md#4-turn-on-https) has the details. By hand:
+
 ### On port 443 (recommended)
 
 Set the options and restart:

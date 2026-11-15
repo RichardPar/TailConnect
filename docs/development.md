@@ -78,7 +78,7 @@ What each measures, current figures with charts and the known limits are in [Per
 | `internal/androidbridge` | How `tcd-android` gets its VPN interface (and the network's DNS servers and addresses) from the Android app |
 | `cmd/tcd-android`, `android/` | The Android client daemon, and the app around it (Java, built by `android/build.sh`; see [Android](android.md)) |
 | `internal/ipam`, `internal/key` | Address allocation, typed keys |
-| `packaging/linux` | systemd units, settings files, `install.sh` |
+| `packaging/linux` | systemd units, settings files, `install.sh`; `letsencrypt.sh` (switch the server to Let's Encrypt) and `duckdns.sh` (DuckDNS updater) |
 | `tests/e2e` | Network-namespace test scripts and helpers |
 | `tests/perf` | Throughput script and its measuring tool (`tput`) |
 

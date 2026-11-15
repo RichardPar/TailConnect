@@ -119,7 +119,7 @@ A server with a public address, for devices anywhere: at home, at work, on mobil
    sudo systemctl restart tc-control
    curl https://vpn.example.com/key            # the first request fetches the certificate (a few seconds)
    ```
-   `tc-control` gets a certificate from Let's Encrypt and renews it by itself. [The full guide](lets-encrypt.md) has the checklist, options and fixes.
+   `tc-control` gets a certificate from Let's Encrypt and renews it by itself. Or let the script set it up and check it: `sudo ./packaging/linux/letsencrypt.sh vpn.example.com --staging`, then without `--staging`. [The full guide](lets-encrypt.md) has the checklist, options and fixes.
 
 ### Firewall
 
@@ -189,6 +189,8 @@ TC_CONTROL_ARGS="-listen :8443 -acme-http-listen :80 -acme-domain home.example.c
 ```
 
 Devices then join with `--server https://home.example.com:8443`.
+
+The scripts do both jobs for you: `sudo ./packaging/linux/duckdns.sh install NAME` keeps a free DuckDNS name pointing at your home, and `sudo ./packaging/linux/letsencrypt.sh NAME.duckdns.org` turns on HTTPS (add `--port 8443` for another port). [HOWTO: DuckDNS and Let's Encrypt](duckdns.md) has every step.
 
 ### The one catch: reaching the public name from inside
 

@@ -64,7 +64,7 @@ There are no settings files to edit. **[QUICKSTART.md](QUICKSTART.md)** walks th
 | [The web portal](docs/portal.md) | Every tab, column, button and setting of the portal, with screenshots |
 | [Usage](docs/usage.md) | Accounts and sign-up, joining devices, sharing machines, the web portal, admin CLI and API, the `tc` client, MagicDNS, relays |
 | [HTTPS with Let's Encrypt](docs/lets-encrypt.md) | Free certificates, obtained and renewed by the server itself: setup, testing, renewals, troubleshooting |
-| [HOWTO: DuckDNS and Let's Encrypt](docs/duckdns.md) | A home server reachable from anywhere with a free DuckDNS name and a trusted certificate, step by step |
+| [HOWTO: DuckDNS and Let's Encrypt](docs/duckdns.md) | A home server reachable from anywhere with a free DuckDNS name and a trusted certificate, step by step, with two scripts that do the work |
 | [Android](docs/android.md) | The Android app: build, install over USB, join, use |
 | [LAN and internet setups](docs/network-setups.md) | Where to put the server: LAN only, on the internet, or at home reachable from outside; settings, ports and pitfalls |
 | [Configuration](docs/configuration.md) | Settings at a glance, then every flag, settings file, environment variable, port and file path |

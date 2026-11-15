@@ -8,6 +8,7 @@ Every option, file and port. For what to set and when, see [Installation](instal
 - [tcd](#tcd)
 - [tc](#tc)
 - [tc-relay](#tc-relay)
+- [Helper scripts](#helper-scripts)
 - [Settings files](#settings-files)
 - [Environment variables](#environment-variables)
 - [Relay map](#relay-map)
@@ -215,6 +216,17 @@ A standalone relay and STUN server ([when to use one](usage.md#relays)).
 
 ---
 
+## Helper scripts
+
+In `packaging/linux/`, next to `install.sh`, for HTTPS on a server reachable from the internet. Run them as root on the server; devices need nothing.
+
+| Script | What it does |
+|---|---|
+| `letsencrypt.sh NAME [--port N] [--email ADDR] [--staging] [--dry-run]` | Switches `tc-control` to a Let's Encrypt certificate for NAME: sets `-listen` and `-acme-domain` (and `-acme-http-listen :80` for a port other than 443), removes other HTTPS options and `-public-url`, keeps everything else. Backs up the settings first, clears a stored test certificate when leaving `--staging`, restarts and checks that the certificate arrives. `--restore` puts the previous settings back. |
+| `duckdns.sh install NAME` | Keeps the DuckDNS name NAME pointing at this network's public address: an update script and a systemd timer, every 5 minutes. Asks for the token (or reads `DUCKDNS_TOKEN`). Also `status`, `update`, `uninstall`. |
+
+Details and a walk-through: [HOWTO: DuckDNS and Let's Encrypt](duckdns.md).
+
 ## Settings files
 
 The packaged systemd units read extra options from these files. The installer creates them with commented examples and never overwrites them.
@@ -288,6 +300,11 @@ Restart the service after editing. Variables inside these files are **not** expa
 | `/var/lib/tailconnect/resolv.conf.backup` | Original `resolv.conf`, kept while `-dns file` is active |
 | `/run/tailconnect/tcd.sock` | `tc` ↔ `tcd` socket |
 | `/usr/local/share/doc/tailconnect/` | This documentation |
+| `/var/lib/tc-control/acme/` | Let's Encrypt account key and certificates (`-acme-domain`). Back it up with the database. |
+| `/var/lib/tc-control/tls/` | The self-signed certificate and its key (`-tls-self-signed`). Back it up: devices pinned this key. |
+| `/etc/default/tc-control.pre-letsencrypt-*` | Settings backups made by `letsencrypt.sh` (`--restore` puts the newest back) |
+| `/etc/duckdns/duckdns.conf` | DuckDNS name and token, root only (`duckdns.sh`) |
+| `/usr/local/sbin/duckdns-update`, `/etc/systemd/system/duckdns.{service,timer}` | The DuckDNS updater and its 5-minute timer (`duckdns.sh`) |
 
 ## Addresses
 

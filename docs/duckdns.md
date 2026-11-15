@@ -36,79 +36,29 @@ Pick one.
 
 Many routers have a DuckDNS client built in, under **Dynamic DNS** or **DDNS** (sometimes as a "custom" provider). Enter the name (`mytc`) and the token. Nothing to install on the server.
 
-### The server does it
+### The server does it (script)
 
-A small script and a systemd timer that update DuckDNS every 5 minutes. Put the name and token in a file only root can read:
-
-```sh
-sudo install -d -m 700 /etc/duckdns
-sudo tee /etc/duckdns/duckdns.conf >/dev/null <<'EOF'
-DOMAIN=mytc
-TOKEN=your-token-here
-EOF
-sudo chmod 600 /etc/duckdns/duckdns.conf
-```
-
-The update script. It passes the token to `curl` on standard input, so it never appears in the process list:
+`duckdns.sh` (in `packaging/linux/`, also in the release tarball) installs a small update script and a systemd timer that update DuckDNS every 5 minutes. It asks for the token without showing it, and keeps it in `/etc/duckdns/duckdns.conf`, readable only by root:
 
 ```sh
-sudo tee /usr/local/sbin/duckdns-update >/dev/null <<'EOF'
-#!/bin/sh
-set -eu
-. /etc/duckdns/duckdns.conf
-result=$(printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' "$DOMAIN" "$TOKEN" |
-	curl -fsS --max-time 20 -K -)
-if [ "$result" != OK ]; then
-	echo "DuckDNS refused the update (answer: $result): check DOMAIN and TOKEN" >&2
-	exit 1
-fi
-EOF
-sudo chmod 755 /usr/local/sbin/duckdns-update
+sudo ./packaging/linux/duckdns.sh install mytc
+# DuckDNS token (from duckdns.org, top of the page; not shown):
+# DuckDNS updater installed: mytc.duckdns.org is updated every 5 minutes.
 ```
 
-The service and the timer:
+It updates once straight away and stops with DuckDNS's answer if the name or token is wrong. Afterwards:
 
 ```sh
-sudo tee /etc/systemd/system/duckdns.service >/dev/null <<'EOF'
-[Unit]
-Description=Update the DuckDNS address
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/duckdns-update
-EOF
-
-sudo tee /etc/systemd/system/duckdns.timer >/dev/null <<'EOF'
-[Unit]
-Description=Update the DuckDNS address every 5 minutes
-
-[Timer]
-OnBootSec=1min
-OnUnitActiveSec=5min
-
-[Install]
-WantedBy=timers.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now duckdns.timer
+./packaging/linux/duckdns.sh status      # timer, last result, what the name resolves to
+sudo ./packaging/linux/duckdns.sh update # update now
+sudo ./packaging/linux/duckdns.sh uninstall
 ```
 
-Check it:
-
-```sh
-sudo systemctl start duckdns.service && echo updated
-journalctl -u duckdns.service -n 5        # errors, if any
-getent hosts mytc.duckdns.org             # should be your public address (curl -4 ifconfig.me)
-```
-
-`ip=` left empty tells DuckDNS to use the address the update comes from, which is your home's public address.
+Failures show up in `journalctl -u duckdns.service`. The update passes the token to `curl` on standard input, so it never appears in the process list. It leaves `ip=` empty, which tells DuckDNS to use the address the update comes from: your home's public address.
 
 ### DuckDNS's own script (cron)
 
-[DuckDNS's install page](https://www.duckdns.org/install.jsp) has the classic version: a script in your home directory run by cron. It does the same job as the timer above; use one or the other, not both.
+[DuckDNS's install page](https://www.duckdns.org/install.jsp) has the classic version: a script in your home directory run by cron. It does the same job as `duckdns.sh`; use one or the other, not both.
 
 ```sh
 mkdir -p ~/duckdns && cd ~/duckdns
@@ -127,7 +77,7 @@ Then run `crontab -e` and add this line at the bottom:
 
 - **Leave out `-k`.** DuckDNS's page has `curl -k`, which skips checking DuckDNS's certificate: anyone who can intercept your traffic could then pose as DuckDNS and collect your token. Without it, curl checks the certificate as usual.
 - On Raspberry Pi OS cron runs already; check with `systemctl status cron`.
-- `duck.log` holds only the last answer, and cron doesn't report failures. Look at it after your provider changes your address, or use the systemd timer above, whose failures show up in `journalctl -u duckdns.service`.
+- `duck.log` holds only the last answer, and cron doesn't report failures. Look at it after your provider changes your address, or use `duckdns.sh`, whose failures show up in `journalctl -u duckdns.service`.
 
 ## 3. Forward the ports
 
@@ -151,34 +101,33 @@ Port 443 already used on your router? Forward another outside port, such as 8443
 
 ## 4. Turn on HTTPS
 
-Tell `tc-control` its name. Run the installer again and choose **2) From anywhere, over HTTPS**, giving `mytc.duckdns.org` as the DNS name:
+`letsencrypt.sh` (next to `duckdns.sh`) switches `tc-control` to a Let's Encrypt certificate for your name. `tc-control` then gets and renews the certificate itself; the script only changes its settings, restarts it and checks the result.
+
+Try it first with Let's Encrypt's **test service**. Its limits are generous, so a mistake in the forwarding costs nothing, but devices won't trust its certificates:
 
 ```sh
-sudo ./packaging/linux/install.sh server --reconfigure
+sudo ./packaging/linux/letsencrypt.sh mytc.duckdns.org --staging
+# HTTPS works: https://mytc.duckdns.org (issuer=… (STAGING) …)
 ```
 
-Or edit the settings yourself:
+When that works, get the real certificate:
 
 ```sh
-# /etc/default/tc-control
-TC_CONTROL_ARGS="-domain home.internal -listen :443 -acme-domain mytc.duckdns.org -acme-email you@example.com"
+sudo ./packaging/linux/letsencrypt.sh mytc.duckdns.org --email you@example.com
+# HTTPS works: https://mytc.duckdns.org (issuer=C=US, O=Let's Encrypt, …)
 ```
 
-- Keep your own `-domain` (and any other options you had). The e-mail is optional: Let's Encrypt uses it only to warn about problems.
-- Remove `-tls-self-signed`, `-tls-cert`/`-tls-key` and `-public-url` if you had them. The public URL becomes `https://mytc.duckdns.org` by itself.
-- With another port (8443 outside and in, plus 80 forwarded): `-listen :8443 -acme-http-listen :80 -acme-domain mytc.duckdns.org`.
+What it does:
+- **Keeps your other settings** (`-domain`, `-signup` and so on) and replaces the HTTPS ones: it sets `-listen :443 -acme-domain mytc.duckdns.org`, and removes `-tls-self-signed`, `-tls-cert`/`-tls-key` and `-public-url` (the public URL becomes `https://mytc.duckdns.org` by itself). `--dry-run` shows the new settings without changing anything.
+- **Backs up** `/etc/default/tc-control` first. `sudo ./packaging/linux/letsencrypt.sh --restore` puts the previous settings back.
+- **Clears the stored test certificate** when you move from `--staging` to the real one. Otherwise `tc-control` would keep serving it.
+- **Fetches the certificate** by connecting to the server itself, so it works even if your router can't loop connections back in. If Let's Encrypt can't reach you, it shows why and what to check.
+- **Another port:** `--port 8443` (forwarded to the server's 8443, with TCP 80 forwarded too, for Let's Encrypt's check).
+- `--email` is optional: Let's Encrypt uses it only to warn about problems.
 
-Restart and fetch the certificate:
+`tc-control` renews the certificate by itself, well before it expires, and keeps it in `acme/` next to the database. Back that folder up with the database. Your DuckDNS name counts as its own domain for Let's Encrypt's limits, so other DuckDNS users don't use yours up.
 
-```sh
-sudo systemctl restart tc-control
-curl https://mytc.duckdns.org/key        # from outside, or from inside (see Problems); the first request takes a few seconds
-journalctl -u tc-control -n 20           # certificate errors show here
-```
-
-The answer is `{"Version":2,"MachineKey":"mkey:…"}` with no certificate warning. `tc-control` renews the certificate by itself, well before it expires, and keeps it in `acme/` next to the database. Back that folder up with the database.
-
-Trying it out several times? Add `-acme-staging` while you experiment: Let's Encrypt's test service has generous limits, but its certificates aren't trusted (`curl -k`). Remove it when everything works. Your DuckDNS name counts as its own domain for Let's Encrypt's limits, so other DuckDNS users don't use yours up.
+**By hand instead:** set `TC_CONTROL_ARGS="-domain home.internal -listen :443 -acme-domain mytc.duckdns.org"` in `/etc/default/tc-control` (keeping your other options), run `sudo systemctl restart tc-control`, then `curl https://mytc.duckdns.org/key`. Or run `sudo ./packaging/linux/install.sh server --reconfigure` and choose **2) From anywhere, over HTTPS**.
 
 ## 5. Move your devices
 
@@ -199,8 +148,8 @@ Away from home (on mobile data, say), `tc status` should show `control: https://
 | Symptom | Cause and fix |
 |---|---|
 | Works from outside, times out at home | Your router can't connect a LAN device to its own public address ("NAT loopback"). Make `mytc.duckdns.org` resolve to `192.168.1.10` at home, with a local DNS entry on the router ([details](network-setups.md#the-one-catch-reaching-the-public-name-from-inside)). The certificate is for the name, so HTTPS still works. |
-| `getent hosts mytc.duckdns.org` shows an old address | The update isn't running or is refused: `journalctl -u duckdns.service` (or `cat ~/duckdns/duck.log` with the cron script). `KO` from DuckDNS means a wrong name or token. |
-| `the certificate authority can't verify the domain` in the log | Let's Encrypt couldn't reach port 443 (or 80 with `-acme-http-listen`). Check the forwarding, the server's firewall, and that the name shows your current address. More in [HTTPS with Let's Encrypt](lets-encrypt.md#troubleshooting). |
+| `getent hosts mytc.duckdns.org` shows an old address | The update isn't running or is refused: `./packaging/linux/duckdns.sh status` and `journalctl -u duckdns.service` (or `cat ~/duckdns/duck.log` with the cron script). `KO` from DuckDNS means a wrong name or token. |
+| `letsencrypt.sh` says "No certificate yet", or `the certificate authority can't verify the domain` in the log | Let's Encrypt couldn't reach port 443 (or 80 with `-acme-http-listen`). Check the forwarding, the server's firewall, and that the name shows your current address. More in [HTTPS with Let's Encrypt](lets-encrypt.md#troubleshooting). |
 | Nothing works from outside at all | Check for carrier-grade NAT ([before you start](#before-you-start)). Some providers also block incoming port 443 on home lines: try 8443 (step 3). |
 | `400 Client sent an HTTP request to an HTTPS server` on a device | It still uses the old `http://` address: run step 5 on it. |
 
