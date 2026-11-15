@@ -56,6 +56,7 @@ type EngineParams struct {
 	DiscoKey key.DiscoPrivate
 	Addrs    []netip.Prefix // this node's tunnel addresses
 	Name     string         // this node's MagicDNS name, e.g. "tablet.alice.home.internal"
+	Search   []string       // DNS search domains from the last network map (nil before the first)
 	Port     uint16         // preferred WireGuard port (0 = random)
 	// OnEndpointsChanged must be passed to engine.Config so the daemon
 	// re-reports endpoints when STUN finds a new public address.
@@ -74,6 +75,9 @@ type persist struct {
 	WantRunning bool
 	Self        *protocol.Node `json:",omitempty"`
 	ExitNode    string         `json:",omitempty"` // chosen exit node ("" = none)
+	// DNSSearch is the last network map's search domains, for platforms
+	// that fix them when the tunnel starts (Android).
+	DNSSearch []string `json:",omitempty"`
 }
 
 type Daemon struct {
@@ -464,7 +468,7 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		default:
 		}
 	}
-	params := EngineParams{NodeKey: st.NodeKey, DiscoKey: st.DiscoKey, Addrs: st.Self.Addresses, Name: st.Self.Name, Port: d.opts.ListenPort, OnEndpointsChanged: kickNow}
+	params := EngineParams{NodeKey: st.NodeKey, DiscoKey: st.DiscoKey, Addrs: st.Self.Addresses, Name: st.Self.Name, Search: st.DNSSearch, Port: d.opts.ListenPort, OnEndpointsChanged: kickNow}
 	eng, err := d.opts.NewEngine(params)
 	if err != nil && d.opts.ListenPort != 0 {
 		logf("port %d unavailable (%v); using a random port", d.opts.ListenPort, err)
@@ -570,6 +574,10 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 				}
 				d.mu.Lock()
 				d.netmap, d.state = m, localapi.StateRunning
+				if len(m.DNS.Search) > 0 && !slices.Equal(m.DNS.Search, d.st.DNSSearch) {
+					d.st.DNSSearch = slices.Clone(m.DNS.Search)
+					_ = d.save()
+				}
 				if rerr != nil {
 					d.lastErr = rerr.Error()
 				} else {

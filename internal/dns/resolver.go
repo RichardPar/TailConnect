@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,8 +41,11 @@ const forwardTimeout = 2 * time.Second
 type Config struct {
 	// Domain is the MagicDNS suffix, e.g. "tc.internal" (no trailing dot).
 	Domain string
+	// Domains are further suffixes answered locally (tenants' own domains,
+	// e.g. "acme.internal").
+	Domains []string
 	// Hosts maps lowercase fully-qualified names (no trailing dot) under
-	// Domain to their addresses.
+	// Domain or Domains to their addresses.
 	Hosts map[string][]netip.Addr
 	// ReversePrefixes are the address ranges whose reverse (PTR) lookups are
 	// answered locally (the tunnel's address pools).
@@ -65,7 +69,7 @@ type Resolver struct {
 
 	mu     sync.RWMutex
 	cfg    Config
-	domain string                  // "tc.internal." lowercase
+	domains []string               // "tc.internal." etc., lowercase
 	hosts  map[string][]netip.Addr // keys with trailing dot
 	ptr    map[netip.Addr]string   // address → FQDN with trailing dot
 }
@@ -92,9 +96,11 @@ func (r *Resolver) SetConfig(c Config) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cfg, r.hosts, r.ptr = c, hosts, ptr
-	r.domain = ""
-	if c.Domain != "" {
-		r.domain = canonical(c.Domain)
+	r.domains = nil
+	for _, d := range append([]string{c.Domain}, c.Domains...) {
+		if d != "" && !slices.Contains(r.domains, canonical(d)) {
+			r.domains = append(r.domains, canonical(d))
+		}
 	}
 }
 
@@ -171,8 +177,10 @@ func (r *Resolver) query(ctx context.Context, q []byte, tcp bool) []byte {
 // isLocalLocked reports whether name (lowercase, with trailing dot) is ours:
 // under the MagicDNS domain, or a reverse lookup in a tunnel address pool.
 func (r *Resolver) isLocalLocked(name string) bool {
-	if r.domain != "" && (name == r.domain || strings.HasSuffix(name, "."+r.domain)) {
-		return true
+	for _, d := range r.domains {
+		if name == d || strings.HasSuffix(name, "."+d) {
+			return true
+		}
 	}
 	if a, ok := parseReverse(name); ok {
 		for _, p := range r.cfg.ReversePrefixes {
@@ -202,11 +210,11 @@ func (r *Resolver) answerLocked(q dnsmessage.Question, name string) ([]dnsmessag
 		}
 		return []dnsmessage.Resource{{Header: hdr(dnsmessage.TypePTR), Body: &dnsmessage.PTRResource{PTR: n}}}, dnsmessage.RCodeSuccess
 	}
-	if name == r.domain {
-		return nil, dnsmessage.RCodeSuccess // the apex exists but has no records we serve
-	}
 	addrs, found := r.hosts[name]
 	if !found {
+		if slices.Contains(r.domains, name) {
+			return nil, dnsmessage.RCodeSuccess // the apex exists but has no records we serve
+		}
 		return nil, dnsmessage.RCodeNameError
 	}
 	var out []dnsmessage.Resource

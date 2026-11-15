@@ -31,6 +31,7 @@ type Share struct {
 	OwnerID     int64
 	OwnerName   string
 	OwnerStatus string
+	OwnerDomain string // the owner account's own MagicDNS domain ("" = default)
 	// RecipientID is 0 for a link nobody has redeemed yet.
 	RecipientID     int64
 	RecipientName   string
@@ -50,7 +51,7 @@ func (s Share) InEffect() bool {
 }
 
 const shareSelect = `
-	SELECT s.id, s.node_id, n.given_name, n.user_id, o.name, o.status,
+	SELECT s.id, s.node_id, n.given_name, n.user_id, o.name, o.status, o.dns_domain,
 	       COALESCE(s.recipient_id, 0), COALESCE(r.name, ''), COALESCE(r.status, ''),
 	       s.status, s.invite_prefix, s.created_at, s.accepted_at, s.expires_at
 	FROM shares s
@@ -62,7 +63,7 @@ func scanShare(r rowScanner) (Share, error) {
 	var s Share
 	var created int64
 	var accepted, expires sql.NullInt64
-	err := r.Scan(&s.ID, &s.NodeID, &s.NodeName, &s.OwnerID, &s.OwnerName, &s.OwnerStatus,
+	err := r.Scan(&s.ID, &s.NodeID, &s.NodeName, &s.OwnerID, &s.OwnerName, &s.OwnerStatus, &s.OwnerDomain,
 		&s.RecipientID, &s.RecipientName, &s.RecipientStatus,
 		&s.Status, &s.LinkPrefix, &created, &accepted, &expires)
 	s.CreatedAt = fromUnix(created)

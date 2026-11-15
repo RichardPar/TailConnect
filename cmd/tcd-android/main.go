@@ -137,7 +137,7 @@ func newEngine(b *androidbridge.Bridge, ep daemon.EngineParams, logf func(string
 		Addresses: ep.Addrs,
 		Routes:    []netip.Prefix{ipam.DefaultV4, ipam.DefaultV6},
 		DNS:       []netip.Addr{protocol.MagicDNSAddr},
-		Search:    searchDomains(ep.Name),
+		Search:    searchDomains(ep),
 		MTU:       engine.DefaultMTU,
 	})
 	if err != nil {
@@ -161,9 +161,14 @@ func newEngine(b *androidbridge.Bridge, ep daemon.EngineParams, logf func(string
 	return e, err
 }
 
-// searchDomains turns "tablet.alice.home.internal" into the account's
-// domain and the base domain, so short names resolve.
-func searchDomains(name string) []string {
+// searchDomains are the last network map's, or else a guess from the name:
+// "tablet.alice.home.internal" gives the account's domain and the base
+// domain, so short names resolve. Android fixes them when the VPN starts.
+func searchDomains(ep daemon.EngineParams) []string {
+	if len(ep.Search) > 0 {
+		return ep.Search
+	}
+	name := ep.Name
 	parts := strings.Split(strings.TrimSuffix(name, "."), ".")
 	if len(parts) < 3 {
 		return nil

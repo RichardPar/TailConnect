@@ -58,6 +58,7 @@ Usage:
   tc-control users create NAME [-operator] [-password] | list | delete NAME
   tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
   tc-control users role NAME operator|tenant | machine-approval NAME on|off
+  tc-control users domain NAME [DOMAIN|default]
   tc-control invites create [-expiration 168h] | list | revoke ID
   tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
   tc-control shares accept ID | revoke ID
@@ -178,6 +179,7 @@ func cmdServe(args []string) error {
 	listen := fs.String("listen", ":7740", "client-facing control API address")
 	adminListen := fs.String("admin-listen", ":7741", `web portal and API address: ":7741" for every network, "127.0.0.1:7741" for this machine only (reach it with an SSH tunnel), "" to turn it off`)
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
+	tenantSuffixes := fs.String("tenant-domain-suffixes", "internal", `comma-separated suffixes accounts may choose their own MagicDNS domain under in the portal ("internal" allows acme.internal); "" lets only operators set account domains`)
 	keyExpiry := fs.String("key-expiry", "180d", `how long machines stay authorised before they must re-authenticate ("never", or e.g. 90d, 720h)`)
 	ephemeralTimeout := fs.Duration("ephemeral-timeout", 30*time.Minute, "remove ephemeral machines offline this long (0 = keep them)")
 	signup := fs.String("signup", admin.SignupApproval, "who may create accounts in the web portal: off, approval (operator approves), invite (needs an invite code) or open")
@@ -243,6 +245,18 @@ func cmdServe(args []string) error {
 	if err := control.ValidDomain(*domain); err != nil {
 		return usageError("-domain: " + err.Error())
 	}
+	var suffixes []string
+	for _, f := range strings.Split(*tenantSuffixes, ",") {
+		if f = strings.Trim(strings.ToLower(strings.TrimSpace(f)), "."); f == "" {
+			continue
+		}
+		for _, l := range strings.Split(f, ".") {
+			if l == "" || db.SanitizeName(l) != l {
+				return usageError("-tenant-domain-suffixes: " + strconv.Quote(f) + ": labels must be lowercase letters, digits and '-'")
+			}
+		}
+		suffixes = append(suffixes, f)
+	}
 	var upstream []netip.Addr
 	for _, f := range strings.Split(*nameservers, ",") {
 		if f = strings.TrimSpace(f); f == "" {
@@ -259,6 +273,10 @@ func cmdServe(args []string) error {
 		return err
 	}
 	defer d.Close()
+	// The admin CLI checks account domains against the base domain.
+	if err := d.SetSetting(context.Background(), baseDomainSetting, *domain); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -367,7 +385,7 @@ func cmdServe(args []string) error {
 				"signup", *signup)
 		}
 		adm := admin.New(d, admin.Info{
-			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, ControlURL: *publicURL, Version: version, Signup: *signup, KeyExpiry: keyLife,
+			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, TenantDomainSuffixes: suffixes, ControlURL: *publicURL, Version: version, Signup: *signup, KeyExpiry: keyLife,
 			Traffic: ctl.Traffic,
 		}, log)
 		servers = append(servers, &http.Server{
@@ -490,6 +508,9 @@ func cmdAdminToken(args []string) error {
 
 // ---- users ----
 
+// baseDomainSetting stores serve's -domain, for the admin CLI.
+const baseDomainSetting = "base_domain"
+
 func cmdUsers(args []string) error {
 	sub, rest, err := subcommand(args, "users")
 	if err != nil {
@@ -535,13 +556,17 @@ func cmdUsers(args []string) error {
 		if *asJSON {
 			return printJSON(users)
 		}
-		tw := table("ID", "NAME", "ROLE", "STATUS", "PASSWORD", "CREATED")
+		tw := table("ID", "NAME", "ROLE", "STATUS", "PASSWORD", "DOMAIN", "CREATED")
 		for _, u := range users {
 			pw := "no"
 			if u.HasPassword() {
 				pw = "yes"
 			}
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", u.ID, u.Name, u.Role, u.Status, pw, u.CreatedAt.Local().Format(time.DateTime))
+			dom := u.DNSDomain
+			if dom == "" {
+				dom = "(default)"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", u.ID, u.Name, u.Role, u.Status, pw, dom, u.CreatedAt.Local().Format(time.DateTime))
 		}
 		return tw.Flush()
 	case "delete":
@@ -594,6 +619,35 @@ func cmdUsers(args []string) error {
 			return err
 		}
 		fmt.Printf("new machines in %s %s\n", fs.Arg(0), map[string]string{"on": "need approval", "off": "are approved automatically"}[fs.Arg(1)])
+	case "domain":
+		if fs.NArg() < 1 || fs.NArg() > 2 {
+			return usageError("usage: tc-control users domain NAME [DOMAIN|default]")
+		}
+		base, err := d.GetSetting(ctx, baseDomainSetting)
+		if err != nil && !errors.Is(err, db.ErrNotFound) {
+			return err
+		}
+		if fs.NArg() == 2 {
+			dom := fs.Arg(1)
+			if dom == "default" || base != "" && dom == db.TenantDomain(fs.Arg(0), "", base) {
+				dom = ""
+			}
+			if err := d.SetUserDNSDomain(ctx, fs.Arg(0), dom, base); err != nil {
+				return err
+			}
+		}
+		u, err := d.GetUser(ctx, fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		switch {
+		case u.DNSDomain != "":
+			fmt.Printf("%s's machines are <machine>.%s\n", u.Name, u.DNSDomain)
+		case base != "":
+			fmt.Printf("%s's machines are <machine>.%s (the default)\n", u.Name, db.TenantDomain(u.Name, "", base))
+		default:
+			fmt.Printf("%s's machines are <machine>.%s.<base domain> (the default)\n", u.Name, db.TenantLabel(u.Name))
+		}
 	case "role":
 		if fs.NArg() != 2 || (fs.Arg(1) != db.RoleOperator && fs.Arg(1) != db.RoleTenant) {
 			return usageError("usage: tc-control users role NAME operator|tenant")

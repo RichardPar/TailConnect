@@ -452,7 +452,7 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 		if len(nm.DNS.Nameservers) == 0 && e.osDNS.SupportsSplitDNS() {
 			// Split DNS: only MagicDNS names and reverse lookups of tunnel
 			// addresses; the host keeps its resolvers for everything else.
-			osc.MatchDomains = append([]string{domain}, reverseZones()...)
+			osc.MatchDomains = append(magicDomains(nm.DNS), reverseZones()...)
 		}
 	}
 	var dnsErr string
@@ -474,6 +474,7 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 	cfg := dns.Config{ReversePrefixes: []netip.Prefix{ipam.DefaultV4, ipam.DefaultV6}, Hosts: map[string][]netip.Addr{}}
 	if on {
 		cfg.Domain = nm.DNS.Domain
+		cfg.Domains = magicDomains(nm.DNS)
 		add := func(n protocol.Node) {
 			if n.Name == "" {
 				return
@@ -504,6 +505,18 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 	}
 	e.resolver.SetConfig(cfg)
 	e.dnsTUN.SetEnabled(on)
+}
+
+// magicDomains lists the domains MagicDNS answers: the base domain, then
+// tenants' own domains.
+func magicDomains(c protocol.DNSConfig) []string {
+	var out []string
+	for _, d := range append([]string{c.Domain}, c.Domains...) {
+		if d = strings.TrimSuffix(strings.ToLower(d), "."); d != "" && !slices.Contains(out, d) {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // upstreams turns resolver addresses into port-53 upstreams, leaving out

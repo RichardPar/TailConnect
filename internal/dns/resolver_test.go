@@ -276,3 +276,35 @@ func TestResolvConf(t *testing.T) {
 		t.Fatalf("marshal: %q", out)
 	}
 }
+
+func TestTenantDomains(t *testing.T) {
+	r := NewResolver(nil)
+	r.SetConfig(Config{
+		Domain:  "home.internal",
+		Domains: []string{"acme.internal"},
+		Hosts:   map[string][]netip.Addr{"nas.acme.internal": alice, "laptop.globex.home.internal": {netip.MustParseAddr("100.64.0.9")}},
+	})
+	for _, c := range []struct {
+		name  string
+		rcode dnsmessage.RCode
+		addrs int
+	}{
+		{"nas.acme.internal.", dnsmessage.RCodeSuccess, 1},
+		{"laptop.globex.home.internal.", dnsmessage.RCodeSuccess, 1},
+		{"acme.internal.", dnsmessage.RCodeSuccess, 0}, // apex
+		{"home.internal.", dnsmessage.RCodeSuccess, 0}, // apex
+		{"gone.acme.internal.", dnsmessage.RCodeNameError, 0},
+		{"other.internal.", dnsmessage.RCodeRefused, 0}, // not ours, and no upstream
+	} {
+		m := parse(t, r.Query(context.Background(), mkQuery(t, c.name, dnsmessage.TypeA, false)))
+		if m.RCode != c.rcode || len(m.Answers) != c.addrs {
+			t.Errorf("%s: rcode=%v answers=%d, want %v %d", c.name, m.RCode, len(m.Answers), c.rcode, c.addrs)
+		}
+	}
+	// Reverse lookups name the machine in its tenant's domain.
+	r.SetConfig(Config{Domain: "home.internal", Domains: []string{"acme.internal"}, Hosts: map[string][]netip.Addr{"nas.acme.internal": alice}, ReversePrefixes: []netip.Prefix{pool4}})
+	m := parse(t, r.Query(context.Background(), mkQuery(t, "1.0.64.100.in-addr.arpa.", dnsmessage.TypePTR, false)))
+	if len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.PTRResource).PTR.String() != "nas.acme.internal." {
+		t.Fatalf("PTR: %+v", m.Answers)
+	}
+}

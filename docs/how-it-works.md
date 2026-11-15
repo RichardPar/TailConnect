@@ -125,9 +125,11 @@ The connection is an HTTP Upgrade (`tailconnect-relay-v1`) on the relay's URL. T
 
 Each device runs a small DNS resolver at `100.100.100.100`, answering from the network map it already has:
 
-- **A** and **AAAA** records for `<machine>.<account>.<domain>`, for every machine in its map;
+- **A** and **AAAA** records for `<machine>.<account>.<domain>` (or `<machine>.<account's own domain>`), for every machine in its map;
 - **PTR** records for tunnel addresses;
 - **NXDOMAIN** for unknown names under the domain.
+
+The map lists every domain the device must answer (`DNS.Domains`): the base domain, plus the own domains of accounts whose machines are in the map. A device only ever answers, and routes to the resolver, domains of accounts it can see.
 
 There's no socket: `tcd` catches UDP packets to `100.100.100.100:53` as they enter the TUN device, before WireGuard sees them, and writes the answer straight back. TCP queries (DNS clients retry over TCP when an answer is too big for UDP) go to a small TCP/IP stack inside `tcd` that owns only the resolver's addresses; it is started on the first TCP query. Two consequences:
 - it works the same on every platform;

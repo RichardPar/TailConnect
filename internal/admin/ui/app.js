@@ -162,6 +162,7 @@ async function enterApp() {
   document.querySelectorAll(".op-only").forEach((e) => (e.hidden = !me.operator));
   $("password-form").hidden = me.token;
   $("settings-form").hidden = me.token;
+  $("domain-form").hidden = me.token;
   $("token-account").hidden = !me.token;
   $("account-info").textContent = me.token
     ? "Signed in with the admin token."
@@ -575,12 +576,14 @@ async function loadUsers() {
         if (u.status === "active") actions.push(btn("Suspend", "ghost", () => setStatus(u, "suspended")));
         actions.push(btn(u.role === "operator" ? "Make tenant" : "Make operator", "ghost", () => setRole(u, u.role === "operator" ? "tenant" : "operator")));
       }
+      actions.push(btn("Domain", "ghost", () => setUserDomain(u)));
       actions.push(btn(u.hasPassword ? "Reset password" : "Set password", "ghost", () => setPassword(u)));
       if (!self) actions.push(btn("Delete", "danger", () => deleteUser(u)));
       return el("tr", {},
         el("td", {}, u.name, self && el("span", { class: "sub" }, " (you)"), !u.hasPassword && el("div", { class: "sub" }, "no password: can't sign in")),
         el("td", {}, u.role),
         el("td", {}, el("span", { class: "badge " + (statusBadge[u.status] || "") }, u.status)),
+        el("td", {}, el("code", {}, u.dnsDomain), !u.customDomain && el("div", { class: "sub" }, "default")),
         el("td", {}, u.nodes),
         el("td", {}, fmtDate(u.created)),
         el("td", { class: "actions" }, actions),
@@ -603,6 +606,16 @@ async function setRole(u, role) {
   try {
     await api("POST", `/api/v1/users/${encodeURIComponent(u.name)}/role`, { role });
     toast(`${u.name} is now ${role === "operator" ? "an operator" : "a tenant"}`);
+    refresh();
+  } catch (e) { handleErr(e); }
+}
+
+async function setUserDomain(u) {
+  const d = prompt(`MagicDNS domain for ${u.name}'s machines (empty for the default). This renames all ${u.nodes} of them.`, u.customDomain ? u.dnsDomain : "");
+  if (d === null) return;
+  try {
+    const r = await api("POST", `/api/v1/users/${encodeURIComponent(u.name)}/dns-domain`, { domain: d.trim().toLowerCase() });
+    toast(`${u.name}'s machines are now <machine>.${r.dnsDomain}`);
     refresh();
   } catch (e) { handleErr(e); }
 }
@@ -683,7 +696,39 @@ async function loadAccount() {
   if (me.token) return;
   const st = await api("GET", "/api/v1/me/settings");
   $("require-approval").checked = st.requireMachineApproval;
+  showDomain(st);
 }
+
+function showDomain(st) {
+  $("domain-example").textContent = `machine.${st.dnsDomain}`;
+  $("dns-domain").value = st.dnsDomain;
+  $("dns-domain").placeholder = st.defaultDomain;
+  $("dns-domain").disabled = !st.canSetDomain;
+  $("domain-form").querySelectorAll("button").forEach((b) => (b.disabled = !st.canSetDomain));
+  $("domain-reset").hidden = !st.customDomain;
+  const suf = st.domainSuffixes || [];
+  $("domain-hint").textContent = !st.canSetDomain
+    ? "Only an operator can change your domain on this server."
+    : suf.length
+      ? `Default: ${st.defaultDomain}. Your own must end in ${suf.map((s) => "." + s).join(" or ")}, for example acme.${suf[0]}.`
+      : `Default: ${st.defaultDomain}.`;
+}
+
+async function saveDomain(domain) {
+  const label = domain || "the default";
+  if (!confirm(`Rename every machine in your account to <machine>.${label}? Names under the old domain stop resolving.`)) return;
+  try {
+    const st = await api("POST", "/api/v1/me/settings", { dnsDomain: domain });
+    showDomain(st);
+    toast(`Your machines are now <machine>.${st.dnsDomain}`);
+  } catch (e) { handleErr(e); }
+}
+
+$("domain-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  saveDomain($("dns-domain").value.trim().toLowerCase().replace(/\.$/, ""));
+});
+$("domain-reset").addEventListener("click", () => saveDomain(""));
 
 $("require-approval").addEventListener("change", async () => {
   try {

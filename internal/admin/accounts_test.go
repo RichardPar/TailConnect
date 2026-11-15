@@ -457,3 +457,46 @@ func TestExitNodeAPI(t *testing.T) {
 		t.Fatalf("disable: %d %v", code, m)
 	}
 }
+
+func TestTenantDNSDomainAPI(t *testing.T) {
+	f := newFx(t)
+	acme := f.account("acme", db.RoleTenant)
+	op := f.account("boss", db.RoleOperator)
+	f.machine("acme", "laptop")
+
+	// No allowed suffixes: tenants can't choose a domain.
+	if code, m, _ := f.do(acme, "POST", "/api/v1/me/settings", map[string]string{"dnsDomain": "acme.internal"}, nil); code != 400 {
+		t.Fatalf("without suffixes: %d %v", code, m)
+	}
+	f.srv.info.TenantDomainSuffixes = []string{"internal"}
+	if _, m, _ := f.do(acme, "GET", "/api/v1/me/settings", nil, nil); m["dnsDomain"] != "acme.home.internal" || m["canSetDomain"] != true {
+		t.Fatalf("settings: %v", m)
+	}
+	// Outside the allowed suffixes (a real internet name): refused.
+	if code, _, _ := f.do(acme, "POST", "/api/v1/me/settings", map[string]string{"dnsDomain": "bank.com"}, nil); code != 400 {
+		t.Fatalf("bank.com: %d", code)
+	}
+	code, m, _ := f.do(acme, "POST", "/api/v1/me/settings", map[string]string{"dnsDomain": "acme.internal"}, nil)
+	if code != 200 || m["dnsDomain"] != "acme.internal" || m["customDomain"] != "acme.internal" {
+		t.Fatalf("set: %d %v", code, m)
+	}
+	// Leaving the field out keeps it; approval still works on its own.
+	if _, m, _ := f.do(acme, "POST", "/api/v1/me/settings", map[string]bool{"requireMachineApproval": true}, nil); m["dnsDomain"] != "acme.internal" {
+		t.Fatalf("approval change touched the domain: %v", m)
+	}
+	_, _, raw := f.do(acme, "GET", "/api/v1/nodes", nil, nil)
+	if !strings.Contains(string(raw), `"fqdn":"laptop.acme.internal"`) {
+		t.Fatalf("machine FQDN: %s", raw)
+	}
+
+	// Operators may set any domain for any account, and reset it.
+	if code, m, _ := f.do(op, "POST", "/api/v1/users/acme/dns-domain", map[string]string{"domain": "acme.example.com"}, nil); code != 200 || m["dnsDomain"] != "acme.example.com" {
+		t.Fatalf("operator set: %d %v", code, m)
+	}
+	if code, _, _ := f.do(acme, "POST", "/api/v1/users/acme/dns-domain", map[string]string{"domain": "x.internal"}, nil); code != 403 {
+		t.Fatalf("tenant used the operator endpoint: %d", code)
+	}
+	if code, m, _ := f.do(op, "POST", "/api/v1/users/acme/dns-domain", map[string]string{"domain": ""}, nil); code != 200 || m["dnsDomain"] != "acme.home.internal" || m["customDomain"] != false {
+		t.Fatalf("operator reset: %d %v", code, m)
+	}
+}

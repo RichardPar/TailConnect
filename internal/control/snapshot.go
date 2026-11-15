@@ -213,6 +213,15 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 	slices.Sort(peerIDs)
 	peerIDs = slices.Compact(peerIDs)
 
+	// Every domain a name in this map can end in: the base, plus accounts'
+	// own domains (self's and its peers').
+	domains := []string{s.cfg.BaseDomain}
+	addDomain := func(n db.Node) {
+		if n.UserDomain != "" && !slices.Contains(domains, n.UserDomain) {
+			domains = append(domains, n.UserDomain)
+		}
+	}
+	addDomain(self)
 	plan := &mapPlan{
 		resp: protocol.MapResponse{
 			Self: sn.proto,
@@ -221,7 +230,7 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 				Domain:   s.cfg.BaseDomain,
 				// The tenant domain first ("laptop" is our laptop), then the base
 				// domain, so shared machines' short forms ("nas.acme") resolve.
-				Search:      []string{s.tenantDomain(self.UserName), s.cfg.BaseDomain},
+				Search:      []string{s.tenantDomain(self.UserName, self.UserDomain), s.cfg.BaseDomain},
 				Resolver:    protocol.MagicDNSAddr,
 				Nameservers: s.cfg.Nameservers,
 			},
@@ -252,7 +261,10 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 		}
 		plan.peers = append(plan.peers, p)
 		plan.views = append(plan.views, view)
+		addDomain(p.db)
 	}
+	slices.Sort(domains[1:])
+	plan.resp.DNS.Domains = domains
 	return plan, nil
 }
 

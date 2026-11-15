@@ -19,6 +19,7 @@ type Node struct {
 	UserID     int64
 	UserName   string
 	UserStatus string // the owning account's status (StatusActive, ...)
+	UserDomain string // the owning account's own MagicDNS domain ("" = default)
 	MachineKey string
 	NodeKey    string
 	DiscoKey   string
@@ -259,7 +260,7 @@ func (d *DB) TouchNode(ctx context.Context, id int64) error {
 }
 
 const nodeSelect = `
-	SELECT n.id, n.user_id, u.name, u.status, n.machine_key, n.node_key, n.disco_key, n.hostname, n.given_name,
+	SELECT n.id, n.user_id, u.name, u.status, u.dns_domain, n.machine_key, n.node_key, n.disco_key, n.hostname, n.given_name,
 	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.approved, n.tags, n.exit_node, n.created_at, n.last_seen, n.expires_at
 	FROM nodes n JOIN users u ON u.id = n.user_id`
 
@@ -268,7 +269,7 @@ func scanNode(r rowScanner) (Node, error) {
 	var v4, v6, eps, tags string
 	var created int64
 	var lastSeen, expires sql.NullInt64
-	err := r.Scan(&n.ID, &n.UserID, &n.UserName, &n.UserStatus, &n.MachineKey, &n.NodeKey, &n.DiscoKey, &n.Hostname,
+	err := r.Scan(&n.ID, &n.UserID, &n.UserName, &n.UserStatus, &n.UserDomain, &n.MachineKey, &n.NodeKey, &n.DiscoKey, &n.Hostname,
 		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &n.Approved, &tags, &n.ExitNode, &created, &lastSeen, &expires)
 	if err != nil {
 		return Node{}, err

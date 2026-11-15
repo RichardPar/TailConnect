@@ -176,7 +176,14 @@ type Node struct {
 // in-tunnel resolver); otherwise the OS keeps its own resolvers for them.
 type DNSConfig struct {
 	MagicDNS bool
-	Domain   string // base domain, e.g. "home.internal"; every machine is <name>.<tenant>.<Domain>
+	// Domain is the base domain, e.g. "home.internal". A machine is
+	// <name>.<tenant>.<Domain>, unless its tenant set its own domain.
+	Domain string
+	// Domains are all the domains this client answers and routes to
+	// MagicDNS: Domain plus the tenant domains outside it (e.g.
+	// "acme.internal") of this machine and its peers. Empty: just Domain
+	// (servers from before tenant domains).
+	Domains []string `json:",omitempty"`
 	// Search domains for short names; the first is this machine's tenant
 	// domain (e.g. "acme.home.internal"), so "laptop" finds its own laptop,
 	// then the base domain, so "nas.globex" finds a machine shared by globex.

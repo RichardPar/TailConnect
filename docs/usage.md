@@ -27,7 +27,7 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 | **Operator** | An account that also runs the server: it sees every account and machine, approves sign-ups, suspends accounts and issues invites. As a member of the network, an operator's own machines are as isolated as anyone else's. |
 | **Status** | `active`, `pending` (signed up, waiting for an operator's approval) or `suspended`. Pending and suspended accounts can't sign in, and their machines are cut off from the network until the account is active again. |
 | **Machine** (device, node) | A computer running `tcd`, belonging to one account. It gets an IPv4 address from `100.64.0.0/10` and a matching IPv6 address, for its lifetime. Its name, taken from its hostname, is unique within the account: two accounts can both have a `laptop`. |
-| **Name** | `machine.account.domain`, for example `laptop.alice.tc.internal`. Within an account, the short name (`laptop`) works too. |
+| **Name** | `machine.account.domain`, for example `laptop.alice.tc.internal`, or `machine.` the account's own domain if it set one (`laptop.alice.internal`). Within an account, the short name (`laptop`) works too. |
 | **Auth key** | A `tc-auth-…` secret that lets a device join an account. It can be **single-use** or **reusable**, always **expires**, and can be **revoked**. Revoking a key or letting it expire stops new joins; machines that already joined stay. An **ephemeral** key's machines are removed automatically once they've been offline for 30 minutes (CI runners, short-lived containers). A **pre-approved** key's machines skip the account's machine approval. |
 | **Key expiry** | Each machine's authorisation lasts 180 days by default (the server's `-key-expiry`). After that it's cut off, with a notice, until someone re-authenticates it with `sudo tc up --authkey KEY`, which renews it. The owner or an operator can set a machine to **never expire** (servers that must not drop off). Machines that joined before expiry existed never expire. |
 | **Machine approval** | An account can require approval for new machines (My account → *Require approval for new machines*). A new machine then stays cut off, with a notice, until the owner or an operator clicks **Approve**. |
@@ -55,6 +55,7 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 | Reset a forgotten password | Accounts → Reset password | `sudo tc-control users passwd bob` |
 | Approve a new machine | Machines → Approve | `sudo tc-control nodes approve 4` |
 | Require approval for new machines | My account | `sudo tc-control users machine-approval bob on` |
+| Give an account its own MagicDNS domain | My account → MagicDNS domain (own), Accounts → Domain (operators) | `sudo tc-control users domain bob bob.internal` |
 | Make a machine an exit node | Machines → **Exit node: off** (Linux machines) | `sudo tc-control nodes exit-node 4 on` |
 | Send a machine's internet traffic through an exit node | | on the machine: `sudo tc up --exit-node NAME` (`--exit-node ""` stops) |
 | Keep a server from ever expiring | Machines → Never expire | `sudo tc-control nodes expiry 4 never` |
@@ -212,6 +213,7 @@ The portal is where you manage the network in a browser, at port 7741 on the ser
 tc-control users create NAME [-operator] [-password] | list | delete NAME
 tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
 tc-control users role NAME operator|tenant | machine-approval NAME on|off
+tc-control users domain NAME [DOMAIN|default]
 tc-control invites create [-expiration 168h] | list | revoke ID
 tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expiration 24h]
 tc-control keys list [-user NAME] | revoke ID
@@ -254,7 +256,7 @@ curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://SERVER:7741/api/v1/nodes
 |---|---|---|
 | `GET /api/v1/status` | | version, domain, control URL, machine counts; for operators also account and pending counts |
 | `GET /api/v1/me` | | `{login, role, status, operator, token}` |
-| `GET /api/v1/me/settings`, `POST /api/v1/me/settings` | `{"requireMachineApproval": true}` | the account's machine approval setting |
+| `GET /api/v1/me/settings`, `POST /api/v1/me/settings` | `{"requireMachineApproval": true, "dnsDomain": "acme.internal"}` | the account's machine approval and MagicDNS domain; fields left out are unchanged, `"dnsDomain": ""` restores the default |
 | `POST /api/v1/me/password` | `{"current", "new"}` | |
 | `GET /api/v1/nodes` | | `[{id, name, fqdn, user, hostname, os, ipv4, ipv6, endpoints, nodeKey, ephemeral, approved, tags, exitNode, keyExpiry, expired, created, lastSeen, online, traffic}]` (`keyExpiry` absent = never) |
 | `POST /api/v1/nodes/{id}/rename` | `{"name"}` | |
@@ -285,6 +287,7 @@ curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://SERVER:7741/api/v1/nodes
 | `DELETE /api/v1/users/{name}` | | also removes their machines, keys and shares |
 | `POST /api/v1/users/{name}/status` | `{"status": "active" \| "suspended"}` | approve, suspend, reactivate |
 | `POST /api/v1/users/{name}/role` | `{"role": "operator" \| "tenant"}` | |
+| `POST /api/v1/users/{name}/dns-domain` | `{"domain"}` | any domain; `""` restores the default |
 | `POST /api/v1/users/{name}/password` | `{"password"}` | |
 | `GET /api/v1/invites`, `POST /api/v1/invites` `{"ttl"}`, `DELETE /api/v1/invites/{id}` | | invites (TTL up to 720h) |
 
@@ -347,6 +350,13 @@ Every machine is reachable as `machine.account.domain`, where the domain is the 
 - `laptop` is your account's laptop (`laptop.richard.home.internal`);
 - `alicebox.alice` is a machine alice shared with you (`alicebox.alice.home.internal`).
 
+**An account's own domain.** Instead of `<account>.<domain>`, an account can use a domain of its own, so its machines are `laptop.acme.internal` rather than `laptop.acme.home.internal`. Set it under **My account → MagicDNS domain**, or as an operator with **Accounts → Domain** or `sudo tc-control users domain acme acme.internal` (`default` puts it back). It renames every machine in the account, for the account and for everyone it shares machines with, within a few seconds; names under the old domain stop resolving.
+
+- Tenants may only choose domains ending in one of the server's `-tenant-domain-suffixes` (`internal` by default, so `acme.internal`). That keeps an account from pointing the machines it shares with at real internet names such as `bank.com`. Operators may set any domain. `-tenant-domain-suffixes ""` leaves it to operators.
+- No two accounts may share a domain or have one inside the other, and an account's domain can't be inside the server's `-domain` (where every account's default lives).
+- Short names work as before inside the account (`laptop`). Machines shared from an account with its own domain have no short form: use the full name, `nas.acme.internal`.
+- Machines need this version of `tcd` (and of the Android app) to resolve names under an account's own domain; older ones only answer names under `-domain`. On Android, a domain change applies to short names the next time the VPN starts.
+
 Reverse lookups of tunnel addresses return names, and renames reach every machine within a few seconds.
 
 ![Terminal: MagicDNS via systemd-resolved; tc0 uses 100.100.100.100 with search domains richard.home.internal and home.internal; short names and reverse lookups resolve; example.com still uses the LAN's resolver](images/term-magicdns.png)
@@ -355,7 +365,7 @@ Each machine runs its own resolver at `100.100.100.100`, answering from the netw
 
 | Mode | When `auto` picks it | What it does |
 |---|---|---|
-| `systemd-resolved` | `/etc/resolv.conf` points at resolved's stub (127.0.0.53): Ubuntu, Fedora, Mint, Debian with resolved | Split DNS on the `tc0` link: only `.<domain>` names and reverse lookups of tunnel addresses go to MagicDNS; everything else keeps using your normal DNS. |
+| `systemd-resolved` | `/etc/resolv.conf` points at resolved's stub (127.0.0.53): Ubuntu, Fedora, Mint, Debian with resolved | Split DNS on the `tc0` link: only `.<domain>` names (and accounts' own domains), and reverse lookups of tunnel addresses go to MagicDNS; everything else keeps using your normal DNS. |
 | `file` | any other `/etc/resolv.conf` | Rewrites `resolv.conf` to use `100.100.100.100` with the search domains, keeping your options. MagicDNS forwards other names to the nameservers that were there before. The original comes back when `tcd` stops (or at the next start after a crash). |
 | `off` | userspace mode, or `tcd` in a network namespace other than the host's | Leaves the OS alone. Query the resolver directly: `dig @100.100.100.100 laptop.richard.tc.internal`. |
 

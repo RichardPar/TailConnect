@@ -31,7 +31,7 @@ type apiShare struct {
 func (s *Server) toAPIShare(sh db.Share) apiShare {
 	out := apiShare{
 		ID: sh.ID, NodeID: sh.NodeID, Machine: sh.NodeName,
-		FQDN:  sh.NodeName + "." + db.TenantLabel(sh.OwnerName) + "." + s.info.BaseDomain,
+		FQDN:  sh.NodeName + "." + db.TenantDomain(sh.OwnerName, sh.OwnerDomain, s.info.BaseDomain),
 		Owner: sh.OwnerName, Recipient: sh.RecipientName, Status: sh.Status, InEffect: sh.InEffect(),
 		Link: sh.Link, LinkPrefix: sh.LinkPrefix, Created: sh.CreatedAt,
 	}

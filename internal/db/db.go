@@ -272,6 +272,15 @@ CREATE TRIGGER nodes_gen_exit AFTER UPDATE OF exit_node ON nodes
 	WHEN OLD.exit_node IS NOT NEW.exit_node
 	BEGIN UPDATE generation SET value = value + 1; END;
 `,
+	// 11: per-account MagicDNS domains. '' = the default <account>.<base>.
+	// Changing one renames every machine in the account, so it affects maps.
+	`
+ALTER TABLE users ADD COLUMN dns_domain TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX users_dns_domain ON users(dns_domain) WHERE dns_domain != '';
+CREATE TRIGGER users_gen_dns AFTER UPDATE OF dns_domain ON users
+	WHEN OLD.dns_domain IS NOT NEW.dns_domain
+	BEGIN UPDATE generation SET value = value + 1; END;
+`,
 }
 
 // Generation returns a counter that increases whenever nodes or users change

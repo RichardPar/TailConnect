@@ -204,6 +204,7 @@ The server's own settings are command-line options, set in `/etc/default/tc-cont
 | How long machines stay authorised | `-key-expiry 180d` (or `never`) | 180 days |
 | When ephemeral machines are removed | `-ephemeral-timeout 30m` | 30 minutes |
 | The MagicDNS domain | `-domain home.internal` | `tc.internal` |
+| Domains accounts may choose (My account → MagicDNS domain) | `-tenant-domain-suffixes internal` | `internal` |
 | The URL shown for joining | `-public-url` | derived from `-listen` |
 | Where the portal listens | `-admin-listen` | `:7741` (every address) |
 | HTTPS | `-acme-domain NAME`, or `-tls-cert`/`-tls-key` | off |

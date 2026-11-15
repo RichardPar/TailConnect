@@ -34,7 +34,10 @@ type User struct {
 	// RequireMachineApproval: new machines joining this account are cut off
 	// until the owner or an operator approves them.
 	RequireMachineApproval bool
-	CreatedAt              time.Time
+	// DNSDomain is the account's own MagicDNS domain ("" = the default,
+	// <name>.<base>); see TenantDomain.
+	DNSDomain string
+	CreatedAt time.Time
 }
 
 func (u User) Active() bool      { return u.Status == StatusActive }
@@ -113,12 +116,12 @@ func validStatus(s string) bool {
 }
 func validRole(r string) bool { return r == RoleTenant || r == RoleOperator }
 
-const userCols = `id, name, status, role, password_hash, session_epoch, require_machine_approval, created_at`
+const userCols = `id, name, status, role, password_hash, session_epoch, require_machine_approval, dns_domain, created_at`
 
 func scanUser(r rowScanner) (User, error) {
 	var u User
 	var created int64
-	err := r.Scan(&u.ID, &u.Name, &u.Status, &u.Role, &u.PasswordHash, &u.SessionEpoch, &u.RequireMachineApproval, &created)
+	err := r.Scan(&u.ID, &u.Name, &u.Status, &u.Role, &u.PasswordHash, &u.SessionEpoch, &u.RequireMachineApproval, &u.DNSDomain, &created)
 	u.CreatedAt = fromUnix(created)
 	return u, err
 }
@@ -202,6 +205,93 @@ func (d *DB) SetMachineApproval(ctx context.Context, name string, on bool) error
 		return fmt.Errorf("user %q: %w", name, ErrNotFound)
 	}
 	return nil
+}
+
+// SetUserDNSDomain sets an account's MagicDNS domain ("" restores the
+// default <name>.<base>). It renames every machine in the account. The
+// domain may not equal, contain or lie inside base or another account's
+// domain, so every machine name has exactly one owner.
+func (d *DB) SetUserDNSDomain(ctx context.Context, name, domain, base string) error {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if domain != "" {
+		if err := ValidDomain(domain); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		if base != "" && domainsOverlap(domain, base) {
+			return fmt.Errorf("%w: %s overlaps the server's MagicDNS domain %s", ErrInvalid, domain, base)
+		}
+	}
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if domain != "" {
+		rows, err := tx.QueryContext(ctx, `SELECT name, dns_domain FROM users WHERE dns_domain != '' AND name != ?`, name)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var other, od string
+			if err := rows.Scan(&other, &od); err != nil {
+				rows.Close()
+				return err
+			}
+			if domainsOverlap(domain, od) {
+				rows.Close()
+				return fmt.Errorf("domain %s overlaps another account's domain: %w", domain, ErrExists)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE users SET dns_domain = ? WHERE name = ?`, domain, name)
+	if isUniqueViolation(err) {
+		return fmt.Errorf("domain %s: %w", domain, ErrExists)
+	}
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("user %q: %w", name, ErrNotFound)
+	}
+	return tx.Commit()
+}
+
+// domainsOverlap reports whether a and b are equal or one is inside the other.
+func domainsOverlap(a, b string) bool {
+	return a == b || strings.HasSuffix(a, "."+b) || strings.HasSuffix(b, "."+a)
+}
+
+// ValidDomain checks that d (lowercase, no trailing dot) can be a MagicDNS
+// domain: two or more labels of letters, digits and '-'.
+func ValidDomain(d string) error {
+	labels := strings.Split(d, ".")
+	if d == "" || len(d) > 200 || len(labels) < 2 {
+		return fmt.Errorf("%q: want a domain like tc.internal", d)
+	}
+	for _, l := range labels {
+		if l == "" || SanitizeName(l) != l {
+			return fmt.Errorf("%q: labels must be lowercase letters, digits and '-'", d)
+		}
+	}
+	return nil
+}
+
+// TenantDomain is the MagicDNS domain of an account's machines: its own
+// domain if it set one, otherwise <account>.<base>.
+func TenantDomain(user, custom, base string) string {
+	if custom != "" {
+		return custom
+	}
+	return TenantLabel(user) + "." + base
+}
+
+// DomainUnder reports whether name (no trailing dot) is d or inside it.
+func DomainUnder(name, d string) bool {
+	return d != "" && (name == d || strings.HasSuffix(name, "."+d))
 }
 
 // DeleteUser removes a user along with their nodes and auth keys.

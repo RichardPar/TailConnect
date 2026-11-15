@@ -26,6 +26,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 | Setting | Option | Default |
 |---|---|---|
 | MagicDNS domain | `-domain` | `tc.internal` |
+| Domains accounts may choose for themselves | `-tenant-domain-suffixes` | `internal` |
 | MagicDNS on or off | `-magic-dns` | on |
 | Send all of the devices' DNS through MagicDNS | `-dns-nameservers 1.1.1.1,…` | off (devices keep their own DNS) |
 | Control and relay address | `-listen` | `:7740` |
@@ -51,6 +52,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 | Operator or tenant | Accounts → Make operator / Make tenant | `users role NAME operator\|tenant` |
 | Password | My account (own), Accounts → Reset password | `users passwd NAME` |
 | Require approval for new machines | My account | `users machine-approval NAME on\|off` |
+| Account's own MagicDNS domain | My account (own), Accounts → Domain | `users domain NAME [DOMAIN\|default]` |
 | Access rules | Access rules | `rules add -user NAME FROM TO [PORTS]`, `rules delete ID` |
 | Invites (sign-up without approval) | Accounts → Invites | `invites create [-expiration 168h]`, `invites revoke ID` |
 | Delete an account | Accounts → Delete | `users delete NAME` |
@@ -107,6 +109,7 @@ The coordination server: control API, built-in relay, STUN, web portal.
 | `-signup` | `approval` | Who may create accounts in the portal: `off`, `approval` (pending until an operator approves), `invite` (needs an invite code) or `open`. A valid invite skips approval in every mode except `off`. |
 | `-stun-listen` | `:3478` | Built-in STUN server (UDP). `""` turns it off; devices then can't learn their public address, and NAT traversal suffers. |
 | `-domain` | `tc.internal` | MagicDNS suffix: devices are `<name>.<domain>`. Needs two or more labels of lowercase letters, digits and `-`. |
+| `-tenant-domain-suffixes` | `internal` | Comma-separated suffixes an account may choose its own MagicDNS domain under in the portal (`internal` allows `acme.internal`). `""` lets only operators set account domains, which may be anything. See [MagicDNS](usage.md#magicdns). |
 | `-magic-dns` | `true` | Devices resolve MagicDNS names and point the OS at the resolver. `=false` turns it off. |
 | `-dns-nameservers` | none | Comma-separated upstream resolvers. When set, devices send **all** DNS through MagicDNS, which forwards non-MagicDNS names to these. |
 | `-relay` | `true` | Serve the built-in relay at `/relay` on the control listener (registered devices only) |
@@ -126,6 +129,7 @@ The coordination server: control API, built-in relay, STUN, web portal.
 tc-control users create NAME [-operator] [-password] | list | delete NAME
 tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
 tc-control users role NAME operator|tenant | machine-approval NAME on|off
+tc-control users domain NAME [DOMAIN|default]
 tc-control invites create [-expiration 168h] | list | revoke ID
 tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expiration 24h]
 tc-control keys list [-user NAME] | revoke ID

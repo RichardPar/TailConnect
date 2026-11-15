@@ -501,7 +501,7 @@ func (s *Server) toProtocol(n db.Node) (protocol.Node, error) {
 	_ = json.Unmarshal([]byte(n.Hostinfo), &hi)
 	out := protocol.Node{
 		ID:        protocol.NodeID(n.ID),
-		Name:      n.GivenName + "." + s.tenantDomain(n.UserName),
+		Name:      n.GivenName + "." + s.tenantDomain(n.UserName, n.UserDomain),
 		User:      n.UserName,
 		NodeKey:   nk,
 		DiscoKey:  dk,
@@ -713,22 +713,12 @@ const (
 
 // ValidDomain checks that d (lowercase, no trailing dot) can be a MagicDNS
 // base domain: two or more labels of letters, digits and '-'.
-func ValidDomain(d string) error {
-	labels := strings.Split(d, ".")
-	if d == "" || len(d) > 200 || len(labels) < 2 {
-		return fmt.Errorf("%q: want a domain like tc.internal", d)
-	}
-	for _, l := range labels {
-		if l == "" || db.SanitizeName(l) != l {
-			return fmt.Errorf("%q: labels must be lowercase letters, digits and '-'", d)
-		}
-	}
-	return nil
-}
+func ValidDomain(d string) error { return db.ValidDomain(d) }
 
-// tenantDomain is the DNS domain of a tenant's machines: <tenant>.<base>.
-func (s *Server) tenantDomain(user string) string {
-	return db.TenantLabel(user) + "." + s.cfg.BaseDomain
+// tenantDomain is the DNS domain of a tenant's machines: its own domain,
+// or <tenant>.<base>.
+func (s *Server) tenantDomain(user, custom string) string {
+	return db.TenantDomain(user, custom, s.cfg.BaseDomain)
 }
 
 // keyPrefix is the start of an auth key, as `tc-control keys list` shows it

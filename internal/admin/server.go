@@ -41,6 +41,10 @@ const OnlineWindow = 5 * time.Minute
 type Info struct {
 	MachineKey string
 	BaseDomain string
+	// TenantDomainSuffixes are the suffixes accounts may choose their own
+	// MagicDNS domain under (e.g. "internal" allows "acme.internal").
+	// Empty: only operators can set account domains.
+	TenantDomainSuffixes []string
 	ControlURL string
 	Version    string
 	Signup     string        // sign-up mode (SignupOff, ...); "" = off
@@ -102,6 +106,7 @@ func (s *Server) Handler() http.Handler {
 	op("DELETE /api/v1/users/{name}", s.deleteUser)
 	op("POST /api/v1/users/{name}/status", s.setStatus)
 	op("POST /api/v1/users/{name}/role", s.setRole)
+	op("POST /api/v1/users/{name}/dns-domain", s.setUserDNSDomain)
 	op("POST /api/v1/users/{name}/password", s.setUserPassword)
 	op("GET /api/v1/invites", s.listInvites)
 	op("POST /api/v1/invites", s.createInvite)
@@ -194,12 +199,16 @@ type apiUser struct {
 	Status      string    `json:"status"`
 	Role        string    `json:"role"`
 	HasPassword bool      `json:"hasPassword"`
+	DNSDomain   string    `json:"dnsDomain"` // the account's machines are <machine>.<DNSDomain>
+	Custom      bool      `json:"customDomain"`
 	Created     time.Time `json:"created"`
 	Nodes       int       `json:"nodes"`
 }
 
-func toAPIUser(u db.User, nodes int) apiUser {
-	return apiUser{Name: u.Name, Status: u.Status, Role: u.Role, HasPassword: u.HasPassword(), Created: u.CreatedAt, Nodes: nodes}
+func (s *Server) toAPIUser(u db.User, nodes int) apiUser {
+	return apiUser{Name: u.Name, Status: u.Status, Role: u.Role, HasPassword: u.HasPassword(),
+		DNSDomain: db.TenantDomain(u.Name, u.DNSDomain, s.info.BaseDomain), Custom: u.DNSDomain != "",
+		Created: u.CreatedAt, Nodes: nodes}
 }
 
 type apiKey struct {
@@ -284,7 +293,7 @@ func (s *Server) traffic(id int64, byKey map[string]db.Node) *apiTraffic {
 }
 
 func (s *Server) fqdn(n db.Node) string {
-	return n.GivenName + "." + db.TenantLabel(n.UserName) + "." + s.info.BaseDomain
+	return n.GivenName + "." + db.TenantDomain(n.UserName, n.UserDomain, s.info.BaseDomain)
 }
 
 func (s *Server) toAPINode(n db.Node) apiNode {
@@ -384,7 +393,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]apiUser, 0, len(users))
 	for _, u := range users {
-		out = append(out, toAPIUser(u, count[u.ID]))
+		out = append(out, s.toAPIUser(u, count[u.ID]))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -412,7 +421,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("admin: user created", "user", u.Name)
-	writeJSON(w, http.StatusCreated, toAPIUser(u, 0))
+	writeJSON(w, http.StatusCreated, s.toAPIUser(u, 0))
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
@@ -721,7 +730,40 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "signed in with the admin token: no account settings")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"requireMachineApproval": p.user.RequireMachineApproval})
+	writeJSON(w, http.StatusOK, s.settingsJSON(*p.user))
+}
+
+func (s *Server) settingsJSON(u db.User) map[string]any {
+	suffixes := s.info.TenantDomainSuffixes
+	if u.Operator() {
+		suffixes = nil // any domain
+	}
+	return map[string]any{
+		"requireMachineApproval": u.RequireMachineApproval,
+		"dnsDomain":              db.TenantDomain(u.Name, u.DNSDomain, s.info.BaseDomain),
+		"customDomain":           u.DNSDomain,
+		"defaultDomain":          db.TenantDomain(u.Name, "", s.info.BaseDomain),
+		"domainSuffixes":         suffixes,
+		"canSetDomain":           u.Operator() || len(s.info.TenantDomainSuffixes) > 0,
+	}
+}
+
+// checkTenantDomain enforces the allowed suffixes on a domain an account
+// chooses for itself, so a tenant can't make clients it shares machines
+// with send real internet names (say, bank.com) to MagicDNS.
+func (s *Server) checkTenantDomain(domain string) error {
+	if domain == "" {
+		return nil
+	}
+	if len(s.info.TenantDomainSuffixes) == 0 {
+		return fmt.Errorf("%w: only an operator can set an account's domain on this server", db.ErrInvalid)
+	}
+	for _, suf := range s.info.TenantDomainSuffixes {
+		if strings.HasSuffix(domain, "."+suf) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: the domain must end in .%s", db.ErrInvalid, strings.Join(s.info.TenantDomainSuffixes, " or ."))
 }
 
 func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
@@ -730,13 +772,36 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "signed in with the admin token: no account settings")
 		return
 	}
-	var req struct{ RequireMachineApproval bool }
+	// Fields left out are unchanged. DNSDomain "" restores the default.
+	var req struct {
+		RequireMachineApproval *bool
+		DNSDomain              *string
+	}
 	if !decode(w, r, &req) {
 		return
 	}
-	if s.dbError(w, "settings", s.db.SetMachineApproval(r.Context(), p.user.Name, req.RequireMachineApproval)) {
+	if req.DNSDomain != nil {
+		d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(*req.DNSDomain)), ".")
+		if d == db.TenantDomain(p.user.Name, "", s.info.BaseDomain) {
+			d = "" // the default, typed out
+		}
+		if !p.user.Operator() && s.dbError(w, "settings", s.checkTenantDomain(d)) {
+			return
+		}
+		if s.dbError(w, "settings", s.db.SetUserDNSDomain(r.Context(), p.user.Name, d, s.info.BaseDomain)) {
+			return
+		}
+		s.log.Info("account settings", "login", p.user.Name, "dns_domain", d)
+	}
+	if req.RequireMachineApproval != nil {
+		if s.dbError(w, "settings", s.db.SetMachineApproval(r.Context(), p.user.Name, *req.RequireMachineApproval)) {
+			return
+		}
+		s.log.Info("account settings", "login", p.user.Name, "require_machine_approval", *req.RequireMachineApproval)
+	}
+	u, err := s.db.GetUser(r.Context(), p.user.Name)
+	if s.dbError(w, "settings", err) {
 		return
 	}
-	s.log.Info("account settings", "login", p.user.Name, "require_machine_approval", req.RequireMachineApproval)
-	writeJSON(w, http.StatusOK, map[string]any{"requireMachineApproval": req.RequireMachineApproval})
+	writeJSON(w, http.StatusOK, s.settingsJSON(u))
 }

@@ -192,7 +192,7 @@
           <button type="submit" class="primary">Add account</button>
         </form>
         <div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Machines</th><th>Created</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Domain</th><th>Machines</th><th>Created</th><th></th></tr></thead>
           <tbody id="users-body"></tbody>
         </table></div>
       </div>
@@ -228,6 +228,17 @@
           <h3>Machines</h3>
           <label class="check"><input type="checkbox" id="require-approval"> Require approval for new machines</label>
           <p class="sub">New devices joining your account stay cut off until you approve them on the Machines tab. Auth keys marked <i>Pre-approved</i> skip this.</p>
+        </form>
+        <form id="domain-form" class="stack">
+          <h3>MagicDNS domain</h3>
+          <p class="sub">Your machines are reachable as <code id="domain-example"></code>.</p>
+          <label class="field">Domain <input id="dns-domain" autocomplete="off" spellcheck="false" placeholder="acme.internal"></label>
+          <p class="sub" id="domain-hint"></p>
+          <div class="copy-row">
+            <button type="submit" class="primary">Save domain</button>
+            <button type="button" class="ghost" id="domain-reset">Use the default</button>
+          </div>
+          <p class="sub">Changing it renames every machine in your account, for you and for anyone you share machines with.</p>
         </form>
         <form id="password-form" class="stack">
           <h3>Change password</h3>

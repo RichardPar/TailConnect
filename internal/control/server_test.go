@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -491,4 +492,58 @@ func mustUserID(t *testing.T, f *fixture, name string) int64 {
 		t.Fatal(err)
 	}
 	return u.ID
+}
+
+func TestTenantDNSDomains(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	reg := func(user, host string) int64 {
+		u, err := f.db.GetUser(ctx, user)
+		if err != nil {
+			u, _ = f.db.CreateUser(ctx, user)
+		}
+		k, _, _ := f.db.CreatePreAuthKey(ctx, db.CreatePreAuthKeyParams{UserID: u.ID, TTL: time.Hour})
+		res, err := f.db.RegisterNode(ctx, db.RegisterParams{
+			MachineKey: key.NewPrivate[key.MachineKind]().Public().String(), NodeKey: key.NewPrivate[key.NodeKind]().Public().String(),
+			DiscoKey: key.NewPrivate[key.DiscoKind]().Public().String(), Hostname: host, AuthKey: k, Alloc: f.srv.ipam.Next,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Node.ID
+	}
+	nas := reg("acme", "nas")
+	desk := reg("acme", "desk")
+	laptop := reg("globex", "laptop")
+	if err := f.db.SetUserDNSDomain(ctx, "acme", "acme.internal", "home.internal"); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.checkGeneration()
+
+	m, err := f.srv.BuildMap(ctx, desk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Self.Name != "desk.acme.internal" || len(m.Peers) != 1 || m.Peers[0].Name != "nas.acme.internal" {
+		t.Fatalf("names: self %q peers %+v", m.Self.Name, m.Peers)
+	}
+	if m.DNS.Domain != "home.internal" || !slices.Equal(m.DNS.Domains, []string{"home.internal", "acme.internal"}) ||
+		!slices.Equal(m.DNS.Search, []string{"acme.internal", "home.internal"}) {
+		t.Fatalf("acme DNS: %+v", m.DNS)
+	}
+
+	// globex sees nothing of acme's domain until a machine is shared.
+	if m, _ := f.srv.BuildMap(ctx, laptop); !slices.Equal(m.DNS.Domains, []string{"home.internal"}) {
+		t.Fatalf("globex domains before sharing: %v", m.DNS.Domains)
+	}
+	sh, _ := f.db.ShareWith(ctx, nas, "globex")
+	f.db.AcceptShare(ctx, sh.ID, mustUserID(t, f, "globex"))
+	f.srv.checkGeneration()
+	m, _ = f.srv.BuildMap(ctx, laptop)
+	if len(m.Peers) != 1 || m.Peers[0].Name != "nas.acme.internal" || !slices.Equal(m.DNS.Domains, []string{"home.internal", "acme.internal"}) {
+		t.Fatalf("globex after sharing: peers %+v DNS %+v", m.Peers, m.DNS)
+	}
+	if m.Self.Name != "laptop.globex.home.internal" {
+		t.Fatalf("globex keeps the default domain: %q", m.Self.Name)
+	}
 }

@@ -290,6 +290,28 @@ func (s *Server) setRole(w http.ResponseWriter, r *http.Request) {
 	s.writeUser(w, r, u.Name)
 }
 
+// setUserDNSDomain sets an account's MagicDNS domain (operators only, so
+// the tenant suffix restriction doesn't apply). Domain "" restores the default.
+func (s *Server) setUserDNSDomain(w http.ResponseWriter, r *http.Request) {
+	u, ok := s.targetUser(w, r, false)
+	if !ok {
+		return
+	}
+	var req struct{ Domain string }
+	if !decode(w, r, &req) {
+		return
+	}
+	d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(req.Domain)), ".")
+	if d == db.TenantDomain(u.Name, "", s.info.BaseDomain) {
+		d = ""
+	}
+	if s.dbError(w, "set dns domain", s.db.SetUserDNSDomain(r.Context(), u.Name, d, s.info.BaseDomain)) {
+		return
+	}
+	s.log.Info("admin: account dns domain", "login", u.Name, "dns_domain", d, "by", principalFrom(r.Context()).name())
+	s.writeUser(w, r, u.Name)
+}
+
 func (s *Server) setUserPassword(w http.ResponseWriter, r *http.Request) {
 	u, ok := s.targetUser(w, r, false)
 	if !ok {
@@ -318,7 +340,7 @@ func (s *Server) writeUser(w http.ResponseWriter, r *http.Request, name string) 
 	if s.dbError(w, "user", err) {
 		return
 	}
-	writeJSON(w, http.StatusOK, toAPIUser(u, 0))
+	writeJSON(w, http.StatusOK, s.toAPIUser(u, 0))
 }
 
 // ---- operator: invites ----
