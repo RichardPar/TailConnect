@@ -188,7 +188,7 @@ Details:
 
 The portal is where you manage the network in a browser, at port 7741 on the server: for example `http://192.168.1.10:7741`, or `https://vpn.example.com:7741` with HTTPS.
 
-![Operator view of the Machines tab: six machines in two accounts, one waiting for approval](images/portal-machines.png)
+![Operator view of the Machines tab: six machines in two accounts, jellyfin an exit node, one waiting for approval](images/portal-machines.png)
 
 | Tab | For |
 |---|---|

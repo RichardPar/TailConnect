@@ -16,7 +16,7 @@ Windows is next (see [Roadmap](#roadmap)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/portal-machines-dark.png">
-  <img alt="Web portal, operator view: six machines online across two accounts, one waiting for approval" src="docs/images/portal-machines.png">
+  <img alt="Web portal, operator view: six machines online across two accounts, jellyfin an exit node, one waiting for approval" src="docs/images/portal-machines.png">
 </picture>
 
 <sub>The terminal images come from a real test network: a Raspberry Pi running the server and Linux machines on a home LAN, one of them behind NAT, across two accounts (`richard` and `alice`). The portal screenshots come from a demo network with the same accounts and machine names. The Android screenshot comes from a real tablet on the test network. Use your own addresses in place of `192.168.10.x`. Secrets are masked.</sub>

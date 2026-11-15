@@ -2,7 +2,7 @@
 
 The portal is where you manage the network in a browser: machines, auth keys, access rules, sharing and, for operators, accounts. Everything in it can also be done with the [admin CLI](usage.md#admin-cli) or the [HTTP API](usage.md#admin-http-api).
 
-![Operator view of the Machines tab: six machines in two accounts, one waiting for approval](images/portal-machines.png)
+![Operator view of the Machines tab: six machines in two accounts, jellyfin an exit node, one waiting for approval](images/portal-machines.png)
 
 - [Open the portal](#open-the-portal)
 - [Sign in and sign up](#sign-in-and-sign-up)
@@ -93,7 +93,7 @@ The cards along the top show machines online, accounts, machines waiting for app
 
 Click a machine's traffic to see whom it exchanges data with: the speed in each direction, and the totals, per peer.
 
-![Machines tab with jellyfin's traffic opened: 2.1 MB/s up to the laptop, 177 KB/s to the tablet](images/portal-traffic.png)
+![Machines tab with jellyfin's traffic opened: 2.4 MB/s up to the laptop, 188 KB/s to the tablet](images/portal-traffic.png)
 
 How the numbers come about:
 - **Machines report them.** Traffic between your devices goes directly from one to the other, or through a relay, so the server never sees most of it. Every machine counts the bytes it exchanges with each peer, as `tc status` shows. It sends the counts to the server every 30 seconds while they change, over its encrypted control connection.

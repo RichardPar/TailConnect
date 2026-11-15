@@ -118,7 +118,7 @@ Open **http://SERVER:7741** (or **https://vpn.example.com:7741** with HTTPS) in 
 
 If you chose to keep the portal on the server only, tunnel to it from your computer instead: `ssh -L 7741:127.0.0.1:7741 you@SERVER`, then open http://localhost:7741.
 
-![Web portal, Machines tab: six machines in two accounts, one waiting for approval](docs/images/portal-machines.png)
+![Web portal, Machines tab: six machines in two accounts, jellyfin an exit node, one waiting for approval](docs/images/portal-machines.png)
 
 Here you manage machines, auth keys, access rules, sharing and accounts. [The web portal](docs/portal.md) explains every tab and setting.
 
