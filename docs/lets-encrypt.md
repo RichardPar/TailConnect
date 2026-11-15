@@ -78,7 +78,7 @@ sudo ufw allow 443/tcp && sudo ufw allow 3478/udp
 
 ### On a port other than 443
 
-Let's Encrypt only connects to ports 443 and 80. If 443 is taken (by another web server, or on your router), keep your port for HTTPS and let `tc-control` answer Let's Encrypt's checks on port 80:
+Let's Encrypt only connects to ports 443 and 80. If 443 is taken (by another web server, or on your router), keep your port for HTTPS and let `tc-control` answer Let's Encrypt's checks on port 80. With a DuckDNS name you don't need port 80 either: see [no open port: the DNS check](#no-open-port-the-dns-check-duckdns).
 
 ```sh
 # /etc/default/tc-control
@@ -89,7 +89,23 @@ TC_CONTROL_ARGS="-listen :8443 -acme-http-listen :80 -acme-domain vpn.example.co
 - Port 80 answers the checks and redirects everything else to HTTPS.
 - Devices use `https://vpn.example.com:8443`.
 
-If neither can work (HTTPS on another port, and no `-acme-http-listen`), `tc-control` refuses to start and says why, instead of failing to get a certificate later.
+If neither can work (HTTPS on another port, no `-acme-http-listen` and no `-acme-dns`), `tc-control` refuses to start and says why, instead of failing to get a certificate later.
+
+### No open port: the DNS check (DuckDNS)
+
+Let's Encrypt has a third way to check that a name is yours: it looks up a TXT record in DNS that the server has just set, and never connects in. `tc-control` does this for DuckDNS names, through DuckDNS's API. HTTPS can then be on any port, and nothing has to be open for Let's Encrypt (devices away from home still need their port forwarded, of course).
+
+```sh
+# /etc/default/tc-control
+TC_CONTROL_ARGS="-listen :7740 -acme-domain mytc.duckdns.org -acme-dns duckdns -public-url https://mytc.duckdns.org:8443 -domain home.internal"
+TC_DUCKDNS_TOKEN=1a2b3c4d-…
+```
+
+- **The token** goes in `TC_DUCKDNS_TOKEN` in the same file, not on the command line, where every user could see it. Make the file readable by root only: `sudo chmod 600 /etc/default/tc-control`. systemd reads it as root.
+- **`-public-url`** is needed when devices use another port than `-listen`, here because the router forwards outside port 8443 to the server's 7740.
+- **At start**, `tc-control` gets the certificate in the background (a minute or two: it waits until DuckDNS's name servers serve the record, then asks Let's Encrypt). HTTPS connections fail until then. It renews in the last third of the certificate's life, and retries failures after 2 minutes, 10 minutes, an hour, then every 6 hours.
+- **Test and real certificates are stored separately** (`acme/dns01-staging-…` and `acme/dns01-letsencrypt-…`), so leaving `-acme-staging` needs no clean-up.
+- **`letsencrypt.sh`** sets all of this for DuckDNS names by itself: `sudo ./packaging/linux/letsencrypt.sh mytc.duckdns.org --port 7740 --public-port 8443`. It takes the token from the DuckDNS updater ([`duckdns.sh`](duckdns.md#2-keep-the-name-up-to-date)) or asks for it.
 
 ### At home behind your router
 
@@ -211,6 +227,7 @@ If the name has an `AAAA` (IPv6) record, Let's Encrypt prefers it. If that IPv6 
 | `-acme-http-listen` | none | Also answer Let's Encrypt's checks on this address (`:80`), redirecting other requests to HTTPS. Needed when `-listen` isn't on port 443. |
 | `-acme-email` | none | Contact address for the Let's Encrypt account (optional) |
 | `-acme-staging` | `false` | Use the test service: generous limits, untrusted certificates |
+| `-acme-dns` | none | `duckdns`: prove the name through DuckDNS (a TXT record) instead of a connection, so no port needs to be open for Let's Encrypt. The token is read from `$TC_DUCKDNS_TOKEN`. `tc-control` only. |
 | `-acme-dir` (`tc-relay` only) | `acme` | Where `tc-relay` keeps its certificates. `tc-control` always uses `acme/` next to its database. |
 
 All other options are in the [configuration reference](configuration.md#tc-control-serve). To use a certificate you already have instead, see [Your own certificate](installation.md#your-own-certificate).

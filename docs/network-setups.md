@@ -171,7 +171,7 @@ Forward these to `192.168.1.10`:
 | 443 | TCP | Control API and relay over HTTPS; Let's Encrypt's checks |
 | 3478 | UDP | STUN |
 
-If port 443 on your router is already used by something else, forward another outside port, such as 8443, to the server. Then forward TCP 80 too, for Let's Encrypt's checks (see below).
+If port 443 on your router is already used by something else, forward another outside port, such as 8443, to the server. Then forward TCP 80 too, for Let's Encrypt's checks (see below), or, with a DuckDNS name, let Let's Encrypt check through DuckDNS and skip port 80 ([the DNS check](lets-encrypt.md#no-open-port-the-dns-check-duckdns)).
 
 ### Server
 

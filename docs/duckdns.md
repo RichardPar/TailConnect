@@ -81,60 +81,55 @@ Then run `crontab -e` and add this line at the bottom:
 
 ## 3. Forward the ports
 
-On your router, forward these to the server (`192.168.1.10`):
+Let's Encrypt checks your name through DuckDNS, so it needs **no** open port. Only devices away from home need a way in. On your router, forward to the server (`192.168.1.10`):
 
 | Outside port | Protocol | To | Why |
 |---|---|---|---|
-| 443 | TCP | 192.168.1.10:443 | Devices (control, and the relay when no direct path exists), and Let's Encrypt's check that the name is yours |
+| 443, or any free port such as 8443 | TCP | the port `tc-control` listens on (443, or e.g. 7740) | Devices away from home: control, and the relay when no direct path exists |
 | 3478 | UDP | 192.168.1.10:3478 | STUN: devices learn their public address, for direct connections |
 | 7741 | TCP | 192.168.1.10:7741 | Optional: the web portal from outside |
 
-If the server has a firewall, open the same ports there:
+The outside port and the server's port can differ: say your router already uses 443, and you forward outside **8443** to the server's **7740**. Step 4 tells `tc-control` about it.
+
+If the server has a firewall, open its ports:
 
 ```sh
-sudo ufw allow 443/tcp
+sudo ufw allow 7740/tcp      # or 443, whichever tc-control listens on
 sudo ufw allow 3478/udp
 sudo ufw allow 7741/tcp      # only if you forwarded it
 ```
 
-Port 443 already used on your router? Forward another outside port, such as 8443, to the server's 8443, and TCP 80 to the server's 80 for Let's Encrypt. See step 4.
-
 ## 4. Turn on HTTPS
 
-`letsencrypt.sh` (next to `duckdns.sh`) switches `tc-control` to a Let's Encrypt certificate for your name. `tc-control` then gets and renews the certificate itself; the script only changes its settings, restarts it and checks the result.
+`letsencrypt.sh` (next to `duckdns.sh`) switches `tc-control` to a Let's Encrypt certificate for your name. For a DuckDNS name it uses the **DNS check**: `tc-control` puts a code in your name's TXT record through DuckDNS, Let's Encrypt looks it up, and nothing connects in. The script takes the token from step 2.
 
-Try it first with Let's Encrypt's **test service**. Its limits are generous, so a mistake in the forwarding costs nothing, but devices won't trust its certificates:
+Try it first with Let's Encrypt's **test service**. Its limits are generous, so a mistake costs nothing, but devices won't trust its certificates:
 
 ```sh
+# outside 8443 forwarded to the server's 7740:
+sudo ./packaging/linux/letsencrypt.sh mytc.duckdns.org --port 7740 --public-port 8443 --staging
+# outside 443 forwarded to the server's 443: no options needed
 sudo ./packaging/linux/letsencrypt.sh mytc.duckdns.org --staging
-# HTTPS works: https://mytc.duckdns.org (issuer=… (STAGING) …)
 ```
 
-When that works, get the real certificate:
-
-```sh
-sudo ./packaging/linux/letsencrypt.sh mytc.duckdns.org --email you@example.com
-# HTTPS works: https://mytc.duckdns.org (issuer=C=US, O=Let's Encrypt, …)
-```
+It takes a minute or two, then says `HTTPS works: https://mytc.duckdns.org:8443 (issuer=… (STAGING) …)`. Then the real certificate: the same command without `--staging` (add `--email you@example.com` if you like; Let's Encrypt uses it only to warn about problems).
 
 What it does:
-- **Keeps your other settings** (`-domain`, `-signup` and so on) and replaces the HTTPS ones: it sets `-listen :443 -acme-domain mytc.duckdns.org`, and removes `-tls-self-signed`, `-tls-cert`/`-tls-key` and `-public-url` (the public URL becomes `https://mytc.duckdns.org` by itself). `--dry-run` shows the new settings without changing anything.
-- **Backs up** `/etc/default/tc-control` first. `sudo ./packaging/linux/letsencrypt.sh --restore` puts the previous settings back.
-- **Clears the stored test certificate** when you move from `--staging` to the real one. Otherwise `tc-control` would keep serving it.
-- **Fetches the certificate** by connecting to the server itself, so it works even if your router can't loop connections back in. If Let's Encrypt can't reach you, it shows why and what to check.
-- **Another port:** `--port 8443` (forwarded to the server's 8443, with TCP 80 forwarded too, for Let's Encrypt's check).
-- `--email` is optional: Let's Encrypt uses it only to warn about problems.
+- **Keeps your other settings** (`-domain`, `-signup` and so on) and sets the HTTPS ones: `-listen :7740 -acme-domain mytc.duckdns.org -acme-dns duckdns -public-url https://mytc.duckdns.org:8443`. It removes `-tls-self-signed` and other HTTPS options. `--dry-run` shows the new settings without changing anything.
+- **Stores the token** in `/etc/default/tc-control` as `TC_DUCKDNS_TOKEN`, and makes that file readable by root only.
+- **Backs up** the settings first. `sudo ./packaging/linux/letsencrypt.sh --restore` puts the previous ones back.
+- **Waits for the certificate** by asking the server itself, and if it doesn't come, shows `tc-control`'s reason.
 
-`tc-control` renews the certificate by itself, well before it expires, and keeps it in `acme/` next to the database. Back that folder up with the database. Your DuckDNS name counts as its own domain for Let's Encrypt's limits, so other DuckDNS users don't use yours up.
+`tc-control` renews the certificate by itself, in the last third of its life, the same way. It keeps it in `acme/` next to the database: back that folder up with the database. Your DuckDNS name counts as its own domain for Let's Encrypt's limits, so other DuckDNS users don't use yours up.
 
-**By hand instead:** set `TC_CONTROL_ARGS="-domain home.internal -listen :443 -acme-domain mytc.duckdns.org"` in `/etc/default/tc-control` (keeping your other options), run `sudo systemctl restart tc-control`, then `curl https://mytc.duckdns.org/key`. Or run `sudo ./packaging/linux/install.sh server --reconfigure` and choose **2) From anywhere, over HTTPS**.
+**By hand instead:** see [no open port: the DNS check](lets-encrypt.md#no-open-port-the-dns-check-duckdns).
 
 ## 5. Move your devices
 
 On each device, point it at the new address. It's the same server, so the device keeps its name and address, and needs no auth key:
 
 ```sh
-sudo tc up --server https://mytc.duckdns.org
+sudo tc up --server https://mytc.duckdns.org        # add :8443 (your outside port) if it isn't 443
 ```
 
 - **Android:** change the Server field to `https://mytc.duckdns.org` and tap Connect.
@@ -147,10 +142,10 @@ Away from home (on mobile data, say), `tc status` should show `control: https://
 
 | Symptom | Cause and fix |
 |---|---|
-| Works from outside, times out at home | Your router can't connect a LAN device to its own public address ("NAT loopback"). Make `mytc.duckdns.org` resolve to `192.168.1.10` at home, with a local DNS entry on the router ([details](network-setups.md#the-one-catch-reaching-the-public-name-from-inside)). The certificate is for the name, so HTTPS still works. |
+| Works from outside, times out at home | Your router can't connect a LAN device to its own public address ("NAT loopback"). Make `mytc.duckdns.org` resolve to the server's LAN address at home, with a local DNS entry on the router ([details](network-setups.md#the-one-catch-reaching-the-public-name-from-inside)). The certificate is for the name, so HTTPS still works. This only helps when the outside port and the server's port are the same: with 8443 forwarded to 7740, forward 8443 to 8443 instead and run `letsencrypt.sh` with `--port 8443`. |
 | `getent hosts mytc.duckdns.org` shows an old address | The update isn't running or is refused: `./packaging/linux/duckdns.sh status` and `journalctl -u duckdns.service` (or `cat ~/duckdns/duck.log` with the cron script). `KO` from DuckDNS means a wrong name or token. |
-| `letsencrypt.sh` says "No certificate yet", or `the certificate authority can't verify the domain` in the log | Let's Encrypt couldn't reach port 443 (or 80 with `-acme-http-listen`). Check the forwarding, the server's firewall, and that the name shows your current address. More in [HTTPS with Let's Encrypt](lets-encrypt.md#troubleshooting). |
-| Nothing works from outside at all | Check for carrier-grade NAT ([before you start](#before-you-start)). Some providers also block incoming port 443 on home lines: try 8443 (step 3). |
+| `letsencrypt.sh` says "No certificate yet" | The lines above it are `tc-control`'s reason. `DuckDNS refused the update … check the token`: the token is wrong (copy it again from duckdns.org and rerun `duckdns.sh install`, then `letsencrypt.sh`). `the CA's DNS check failed`: try again in a few minutes; `journalctl -u tc-control` has Let's Encrypt's answer. More in [HTTPS with Let's Encrypt](lets-encrypt.md#troubleshooting). |
+| Works at home, not from outside | Check the router forwards the outside port to the server's port (step 3), and for carrier-grade NAT ([before you start](#before-you-start)). Some providers block incoming port 443 on home lines: use 8443. The certificate doesn't depend on this: it comes through DuckDNS. |
 | `400 Client sent an HTTP request to an HTTPS server` on a device | It still uses the old `http://` address: run step 5 on it. |
 
 More: [HTTPS with Let's Encrypt](lets-encrypt.md) (all options, renewals, rate limits), [Network setups](network-setups.md), [Troubleshooting](troubleshooting.md).

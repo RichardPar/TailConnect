@@ -195,6 +195,7 @@ func cmdServe(args []string) error {
 	acmeDomain := fs.String("acme-domain", "", "get HTTPS certificates from Let's Encrypt for this DNS name (comma-separated for several); the name must point at this server, and port 443 (or -acme-http-listen) be reachable from the internet")
 	acmeEmail := fs.String("acme-email", "", "contact address for the Let's Encrypt account (optional)")
 	acmeHTTP := fs.String("acme-http-listen", "", `also serve Let's Encrypt's checks on this address, e.g. ":80" (needed unless -listen is on port 443; it redirects other requests to HTTPS)`)
+	acmeDNS := fs.String("acme-dns", "", `prove -acme-domain through DNS instead of a connection from Let's Encrypt, so no port needs to be open for it: "duckdns" (a NAME.duckdns.org name; the token is read from $TC_DUCKDNS_TOKEN, set in /etc/default/tc-control)`)
 	acmeStaging := fs.Bool("acme-staging", false, "use Let's Encrypt's test service (untrusted certificates, for trying a setup)")
 	metricsListen := fs.String("metrics-listen", "", `serve metrics (Prometheus text format) at /metrics on this address, e.g. "127.0.0.1:7743" ("" = off)`)
 	logJSON := fs.Bool("log-json", false, "log in JSON format")
@@ -228,7 +229,26 @@ func cmdServe(args []string) error {
 			return usageError("-acme-domain: " + err.Error())
 		}
 		cfg := autotls.Config{Domains: domains, Email: *acmeEmail, HTTPListen: *acmeHTTP, TLSListen: *listen,
-			CacheDir: filepath.Join(filepath.Dir(*dbPath), "acme")}
+			CacheDir: filepath.Join(filepath.Dir(*dbPath), "acme"), Logf: log.Info}
+		switch *acmeDNS {
+		case "":
+		case "duckdns":
+			if *acmeHTTP != "" {
+				return usageError("-acme-dns needs no -acme-http-listen: Let's Encrypt checks through DNS")
+			}
+			for _, d := range domains {
+				if _, err := autotls.DuckDNSName(d); err != nil {
+					return usageError("-acme-dns duckdns: " + err.Error())
+				}
+			}
+			tok := strings.TrimSpace(os.Getenv("TC_DUCKDNS_TOKEN"))
+			if tok == "" {
+				return usageError("-acme-dns duckdns: set TC_DUCKDNS_TOKEN (your DuckDNS token) in /etc/default/tc-control")
+			}
+			cfg.DNS = &autotls.DuckDNS{Token: tok}
+		default:
+			return usageError(`-acme-dns: only "duckdns" is supported`)
+		}
 		if *acmeStaging {
 			cfg.DirectoryURL = autotls.StagingURL
 		}
@@ -241,8 +261,8 @@ func cmdServe(args []string) error {
 				*publicURL += ":" + port
 			}
 		}
-	} else if *acmeHTTP != "" || *acmeEmail != "" || *acmeStaging {
-		return usageError("-acme-http-listen, -acme-email and -acme-staging need -acme-domain")
+	} else if *acmeHTTP != "" || *acmeEmail != "" || *acmeStaging || *acmeDNS != "" {
+		return usageError("-acme-http-listen, -acme-email, -acme-dns and -acme-staging need -acme-domain")
 	}
 	if !admin.ValidSignupMode(*signup) {
 		return usageError("-signup must be off, approval, invite or open")
@@ -289,6 +309,9 @@ func cmdServe(args []string) error {
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	if certs != nil {
+		certs.Start(ctx) // DNS checks: get the certificate now, renew in the background
+	}
 	defer stop()
 
 	var relays protocol.RelayMap

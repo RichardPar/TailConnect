@@ -5,6 +5,7 @@
 package autotls
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -36,6 +37,12 @@ type Config struct {
 	TLSListen string
 	// DirectoryURL is the CA (default: Let's Encrypt).
 	DirectoryURL string
+	// DNS, if set, proves the domains with DNS TXT records (DNS-01)
+	// instead of connections to this machine: no port needs to be
+	// reachable from the internet, and HTTPListen is unused.
+	DNS TXTSetter
+	// Logf logs certificate events (DNS mode), slog style.
+	Logf func(msg string, args ...any)
 }
 
 // ParseDomains splits a comma-separated list into lowercase names.
@@ -59,7 +66,8 @@ func ParseDomains(s string) ([]string, error) {
 
 // Manager issues certificates on demand and renews them before they expire.
 type Manager struct {
-	m *autocert.Manager
+	m   *autocert.Manager // connection checks (TLS-ALPN-01, HTTP-01)
+	dns *dnsManager       // DNS checks (DNS-01)
 }
 
 // New checks the configuration and prepares the certificate cache.
@@ -67,15 +75,25 @@ func New(c Config) (*Manager, error) {
 	if len(c.Domains) == 0 {
 		return nil, errors.New("autotls: no domains")
 	}
-	if c.HTTPListen == "" && listenPort(c.TLSListen) != "443" {
-		return nil, fmt.Errorf("the certificate authority can't verify the domain: it connects to port 443 or 80, "+
-			"but HTTPS listens on %q; listen on :443, or also serve port 80 for its checks", c.TLSListen)
-	}
 	if c.CacheDir == "" {
 		return nil, errors.New("autotls: no cache directory")
 	}
 	if err := os.MkdirAll(c.CacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("certificate cache: %w", err)
+	}
+	if c.DNS != nil {
+		if c.HTTPListen != "" {
+			return nil, errors.New("a DNS check needs no HTTP listener for the CA")
+		}
+		dm, err := newDNSManager(c)
+		if err != nil {
+			return nil, err
+		}
+		return &Manager{dns: dm}, nil
+	}
+	if c.HTTPListen == "" && listenPort(c.TLSListen) != "443" {
+		return nil, fmt.Errorf("the certificate authority can't verify the domain: it connects to port 443 or 80, "+
+			"but HTTPS listens on %q; listen on :443, also serve port 80 for its checks, or prove the domain through DNS", c.TLSListen)
 	}
 	m := &autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
@@ -92,9 +110,21 @@ func New(c Config) (*Manager, error) {
 // TLSConfig is for the HTTPS listeners: it answers the CA's TLS challenges
 // and serves the issued certificates.
 func (m *Manager) TLSConfig() *tls.Config {
+	if m.dns != nil {
+		return &tls.Config{GetCertificate: m.dns.getCertificate, MinVersion: tls.VersionTLS12}
+	}
 	cfg := m.m.TLSConfig()
 	cfg.MinVersion = tls.VersionTLS12
 	return cfg
+}
+
+// Start gets the first certificate and keeps renewing it in the
+// background, until ctx ends (DNS checks). Connection checks need nothing:
+// they happen on the first HTTPS connection.
+func (m *Manager) Start(ctx context.Context) {
+	if m.dns != nil {
+		go m.dns.run(ctx)
+	}
 }
 
 // HTTPHandler serves the CA's HTTP challenges and redirects everything else

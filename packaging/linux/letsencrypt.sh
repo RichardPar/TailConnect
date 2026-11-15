@@ -1,39 +1,50 @@
 #!/bin/sh
 # Switch tc-control to HTTPS with a free Let's Encrypt certificate for a DNS
-# name (e.g. a DuckDNS name). tc-control gets and renews the certificate
-# itself; this script only changes its settings, restarts it and checks.
+# name. tc-control gets and renews the certificate itself; this script only
+# changes its settings, restarts it and checks.
 #
 #   sudo packaging/linux/letsencrypt.sh NAME [options]
 #   sudo packaging/linux/letsencrypt.sh --restore     # put the previous settings back
 #
-#   --port N      HTTPS port devices connect to (default 443). With another
-#                 port, TCP 80 must reach this machine too, for Let's Encrypt.
-#   --email ADDR  contact address for Let's Encrypt (optional)
-#   --staging     use Let's Encrypt's test service first (untrusted
-#                 certificates, generous limits); run again without it after
-#   --dry-run     show the new settings without changing anything
+#   --port N         port tc-control listens on (default 443)
+#   --public-port N  port devices connect to, when the router forwards
+#                    another outside port to --port (e.g. 8443 to 7740)
+#   --email ADDR     contact address for Let's Encrypt (optional)
+#   --staging        use Let's Encrypt's test service first (untrusted
+#                    certificates, generous limits); run again without it after
+#   --no-dns         for a DuckDNS name: let Let's Encrypt connect in on port
+#                    443 or 80 instead of checking through DuckDNS
+#   --dry-run        show the new settings without changing anything
 #
-# Before running it: NAME must point at this network's public address, and
-# the router must forward TCP 443 (or --port, and 80) and UDP 3478 here.
-# Only the server needs the certificate: devices need nothing but the URL.
+# How Let's Encrypt checks the name is yours:
+#   NAME.duckdns.org  through DuckDNS (a TXT record): no port needs to be open
+#                     for it. Uses the token from duckdns.sh, or $DUCKDNS_TOKEN,
+#                     or asks.
+#   any other name    it connects in: TCP 443 must reach this machine (or,
+#                     with another --port, TCP 80 too).
+# Devices need nothing but the URL: only the server has a certificate.
 # See docs/duckdns.md and docs/lets-encrypt.md.
 set -eu
 
 DEFAULTS=${DEFAULTS:-/etc/default}
 SETTINGS=$DEFAULTS/tc-control
 STATE_DIR=${STATE_DIR:-/var/lib/tc-control}
+DUCKDNS_CONF=${DUCKDNS_CONF:-/etc/duckdns/duckdns.conf}
 
 die() { echo "letsencrypt.sh: $*" >&2; exit 1; }
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
-name="" port=443 email="" staging=no dry=no restore=no
+name="" port=443 public_port="" email="" staging=no dry=no restore=no nodns=no
 while [ $# -gt 0 ]; do
 	case $1 in
 	--port) [ $# -ge 2 ] || usage; port=$2; shift ;;
 	--port=*) port=${1#*=} ;;
+	--public-port) [ $# -ge 2 ] || usage; public_port=$2; shift ;;
+	--public-port=*) public_port=${1#*=} ;;
 	--email) [ $# -ge 2 ] || usage; email=$2; shift ;;
 	--email=*) email=${1#*=} ;;
 	--staging) staging=yes ;;
+	--no-dns) nodns=yes ;;
 	--dry-run) dry=yes ;;
 	--restore) restore=yes ;;
 	-h | --help) usage ;;
@@ -49,7 +60,7 @@ done
 if [ "$restore" = yes ]; then
 	last=$(ls -1t "$SETTINGS".pre-letsencrypt-* 2>/dev/null | head -n 1 || true)
 	[ -n "$last" ] || die "no backup of the settings ($SETTINGS.pre-letsencrypt-*)"
-	cp "$last" "$SETTINGS"
+	cp -p "$last" "$SETTINGS"
 	systemctl restart tc-control
 	echo "Restored $last and restarted tc-control:"
 	grep '^TC_CONTROL_ARGS=' "$SETTINGS"
@@ -67,9 +78,39 @@ esac
 case $name in
 *[!a-z0-9.-]* | .* | *..*) die "\"$name\" isn't a valid DNS name" ;;
 esac
-case $port in
-'' | *[!0-9]*) die "--port: \"$port\" isn't a port number" ;;
+[ -n "$public_port" ] || public_port=$port
+for p in "$port" "$public_port"; do
+	case $p in
+	'' | *[!0-9]*) die "\"$p\" isn't a port number" ;;
+	esac
+done
+
+dns=no
+case $name in
+*.duckdns.org) [ "$nodns" = yes ] || dns=yes ;;
 esac
+
+# The DuckDNS token: from duckdns.sh's settings, the environment, or asked.
+token=""
+if [ "$dns" = yes ]; then
+	if [ -r "$DUCKDNS_CONF" ]; then
+		token=$(sed -n 's/^TOKEN=//p' "$DUCKDNS_CONF" | tail -n 1)
+	fi
+	[ -n "$token" ] || token=${DUCKDNS_TOKEN:-}
+	if [ -z "$token" ] && [ "$dry" = no ]; then
+		[ -t 0 ] || die "no DuckDNS token: install the updater (duckdns.sh install), or set DUCKDNS_TOKEN"
+		printf "DuckDNS token (from duckdns.org, top of the page; not shown): "
+		stty -echo 2>/dev/null || true
+		read -r token || true
+		stty echo 2>/dev/null || true
+		echo
+	fi
+	token=$(printf %s "$token" | tr -d '[:space:]')
+	case $token in
+	*[!0-9a-fA-F-]*) die "that doesn't look like a DuckDNS token (it looks like 1a2b3c4d-1a2b-...)" ;;
+	"") [ "$dry" = yes ] || die "no DuckDNS token" ;;
+	esac
+fi
 
 # The current options, without the ones this script decides.
 old=$(sed -n 's/^TC_CONTROL_ARGS=//p' "$SETTINGS" | tail -n 1)
@@ -87,39 +128,59 @@ for a in $old; do
 	-acme-domain=* | --acme-domain=*) old_domain=${a#*=} ;;
 	-acme-domain | --acme-domain) skip=acme-domain ;;
 	-tls-self-signed | --tls-self-signed | -tls-self-signed=*) ;;
-	-listen | -public-url | -tls-names | -tls-cert | -tls-key | -acme-email | -acme-http-listen | \
-		--listen | --public-url | --tls-names | --tls-cert | --tls-key | --acme-email | --acme-http-listen) skip=value ;;
-	-listen=* | -public-url=* | -tls-names=* | -tls-cert=* | -tls-key=* | -acme-email=* | -acme-http-listen=* | \
-		--listen=* | --public-url=* | --tls-names=* | --tls-cert=* | --tls-key=* | --acme-email=* | --acme-http-listen=*) ;;
+	-listen | -public-url | -tls-names | -tls-cert | -tls-key | -acme-email | -acme-http-listen | -acme-dns | \
+		--listen | --public-url | --tls-names | --tls-cert | --tls-key | --acme-email | --acme-http-listen | --acme-dns) skip=value ;;
+	-listen=* | -public-url=* | -tls-names=* | -tls-cert=* | -tls-key=* | -acme-email=* | -acme-http-listen=* | -acme-dns=* | \
+		--listen=* | --public-url=* | --tls-names=* | --tls-cert=* | --tls-key=* | --acme-email=* | --acme-http-listen=* | --acme-dns=*) ;;
 	*) keep="$keep $a" ;;
 	esac
 done
 
+url="https://$name"
+[ "$public_port" = 443 ] || url="$url:$public_port"
+
 new="-listen :$port -acme-domain $name"
-[ "$port" = 443 ] || new="$new -acme-http-listen :80"
+if [ "$dns" = yes ]; then
+	new="$new -acme-dns duckdns"
+elif [ "$port" != 443 ]; then
+	new="$new -acme-http-listen :80"
+fi
+# tc-control derives the URL from -listen; say it when devices use another port.
+[ "$public_port" = "$port" ] || new="$new -public-url $url"
 [ -n "$email" ] && new="$new -acme-email $email"
 [ "$staging" = yes ] && new="$new -acme-staging"
 new="${keep# }${keep:+ }$new"
 
-url="https://$name"
-[ "$port" = 443 ] || url="$url:$port"
-
 if [ "$dry" = yes ]; then
 	echo "Now:   TC_CONTROL_ARGS=\"$old\""
 	echo "Would: TC_CONTROL_ARGS=\"$new\""
+	[ "$dns" = yes ] && echo "       TC_DUCKDNS_TOKEN=… (Let's Encrypt checks the name through DuckDNS; no port needs to be open for it)"
 	exit 0
 fi
 
 addr=$(getent ahostsv4 "$name" 2>/dev/null | awk 'NR==1{print $1}')
 [ -n "$addr" ] || die "$name doesn't resolve to an address yet: set up the name first (for DuckDNS: duckdns.sh install)"
-echo "$name resolves to $addr here. Let's Encrypt must reach it from the internet on TCP $port$([ "$port" = 443 ] || echo " and 80")."
+echo "$name resolves to $addr here."
+if [ "$dns" = yes ]; then
+	echo "Let's Encrypt will check the name through DuckDNS: no port needs to be open for that."
+	echo "Devices away from home need the router to forward TCP $public_port to this machine's port $port."
+else
+	echo "Let's Encrypt must reach this machine from the internet on TCP $port$([ "$port" = 443 ] || echo " and 80")."
+fi
 
 backup=$SETTINGS.pre-letsencrypt-$(date +%Y%m%d-%H%M%S)
-cp "$SETTINGS" "$backup"
+cp -p "$SETTINGS" "$backup"
+chmod 600 "$backup"
 tmp=$(mktemp)
-awk -v line="TC_CONTROL_ARGS=\"$new\"" '/^TC_CONTROL_ARGS=/ { if (!done) print line; done = 1; next } { print } END { if (!done) print line }' "$SETTINGS" >"$tmp"
+awk -v line="TC_CONTROL_ARGS=\"$new\"" -v tok="$token" '
+	/^TC_CONTROL_ARGS=/ { if (!done) print line; done = 1; next }
+	/^TC_DUCKDNS_TOKEN=/ { next }
+	{ print }
+	END { if (!done) print line; if (tok != "") print "TC_DUCKDNS_TOKEN=" tok }' "$SETTINGS" >"$tmp"
 cat "$tmp" >"$SETTINGS"
 rm -f "$tmp"
+# The token is a secret: only root (and systemd, which reads it) may read the file.
+[ -z "$token" ] || chmod 600 "$SETTINGS"
 
 systemctl stop tc-control
 # Certificates are stored by name: a stored test certificate would keep
@@ -138,19 +199,31 @@ systemctl is-active --quiet tc-control || {
 	die "tc-control didn't start (see above). Put the old settings back with: sudo $0 --restore"
 }
 
-# The first HTTPS connection makes tc-control fetch the certificate. Ask
-# this machine directly, so it works even where the router can't loop
-# connections to its public address back in.
-echo "Getting the certificate (can take up to a minute)..."
+# Ask this machine directly, so it works even where the router can't loop
+# connections to its public address back in. With connection checks, the
+# first connection makes tc-control fetch the certificate; with DNS checks
+# it fetches it at start, which takes a minute or two.
+echo "Getting the certificate (can take up to 5 minutes)..."
 k=""
 [ "$staging" = yes ] && k=-k
-if out=$(curl -sS $k --max-time 90 --resolve "$name:$port:127.0.0.1" "https://$name:$port/key" 2>&1); then
+start=$(date +%s)
+ok=no out=""
+while :; do
+	if out=$(curl -sS $k --max-time 90 --resolve "$name:$port:127.0.0.1" "https://$name:$port/key" 2>&1); then
+		ok=yes
+		break
+	fi
+	[ $(($(date +%s) - start)) -lt 300 ] || break
+	[ "$dns" = yes ] || break # connection checks either work at once or not
+	sleep 10
+done
+
+if [ "$ok" = yes ]; then
 	issuer=$(echo | openssl s_client -connect "127.0.0.1:$port" -servername "$name" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null || true)
 	echo "HTTPS works: $url (${issuer:-certificate in place})"
 	if [ "$staging" = yes ]; then
 		echo
-		echo "That was Let's Encrypt's test service: devices won't trust it. Now run without --staging:"
-		echo "  sudo $0 $name$([ "$port" = 443 ] || echo " --port $port")${email:+ --email $email}"
+		echo "That was Let's Encrypt's test service: devices won't trust it. Now run the same without --staging."
 	else
 		echo
 		echo "Move each device to it (same server: they keep their names and addresses, no auth key needed):"
@@ -160,10 +233,15 @@ if out=$(curl -sS $k --max-time 90 --resolve "$name:$port:127.0.0.1" "https://$n
 else
 	echo "$out" >&2
 	echo >&2
-	journalctl -u tc-control --since "-3min" --no-pager -o cat 2>/dev/null | grep -iE 'acme|certificate|verify' | tail -n 5 >&2 || true
+	journalctl -u tc-control --since "-6min" --no-pager -o cat 2>/dev/null | grep -iE 'acme|certificate|duckdns|verify' | tail -n 5 >&2 || true
 	echo >&2
-	echo "No certificate yet. Usually Let's Encrypt couldn't reach this machine: check that $name points at your" >&2
-	echo "public address and that the router forwards TCP $port$([ "$port" = 443 ] || echo " and 80") here. Then run this again." >&2
+	if [ "$dns" = yes ]; then
+		echo "No certificate yet. The lines above are tc-control's reason. Check the DuckDNS token" >&2
+		echo "(duckdns.sh status), then run this again." >&2
+	else
+		echo "No certificate yet. Usually Let's Encrypt couldn't reach this machine: check that $name points at your" >&2
+		echo "public address and that the router forwards TCP $port$([ "$port" = 443 ] || echo " and 80") here. Then run this again." >&2
+	fi
 	echo "To go back to the previous settings: sudo $0 --restore" >&2
 	exit 1
 fi

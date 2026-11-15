@@ -110,10 +110,14 @@ status() {
 		echo "DuckDNS updater: not installed (sudo $0 install NAME)"
 		return 0
 	fi
-	name=$( (. "$CONF" 2>/dev/null && echo "$DOMAIN") || true)
-	echo "DuckDNS updater: installed${name:+ for $name.duckdns.org}"
-	echo "Timer: $(systemctl is-enabled duckdns.timer 2>/dev/null || echo off), $(systemctl is-active duckdns.timer 2>/dev/null || true)"
-	systemctl list-timers duckdns.timer --no-legend 2>/dev/null | awk 'NF {print "Next update: " $2 " " $3}' || true
+	name=""
+	if [ -r "$CONF" ]; then
+		name=$(sed -n 's/^DOMAIN=//p' "$CONF" | tail -n 1)
+		echo "DuckDNS updater: installed for $name.duckdns.org"
+	else
+		echo "DuckDNS updater: installed (run with sudo to see the name)"
+	fi
+	echo "Timer: $(systemctl is-enabled duckdns.timer 2>/dev/null || echo off), $(systemctl is-active duckdns.timer 2>/dev/null || true), every 5 minutes"
 	last=$(journalctl -u duckdns.service -n 50 --no-pager -o cat 2>/dev/null | grep -E 'updated|refused|curl' | tail -n 1 || true)
 	[ -n "$last" ] && echo "Last result: $last"
 	if [ -n "${name:-}" ]; then

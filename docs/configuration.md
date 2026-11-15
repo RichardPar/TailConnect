@@ -33,7 +33,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 | Control and relay address | `-listen` | `:7740` |
 | Portal address | `-admin-listen` | `:7741` (every address) |
 | URL shown for joining | `-public-url` | derived |
-| HTTPS: automatic (Let's Encrypt) | `-acme-domain`, `-acme-http-listen`, `-acme-email`, `-acme-staging` | off ([guide](lets-encrypt.md)) |
+| HTTPS: automatic (Let's Encrypt) | `-acme-domain`, `-acme-http-listen`, `-acme-dns`, `-acme-email`, `-acme-staging` | off ([guide](lets-encrypt.md)) |
 | HTTPS: your own certificate | `-tls-cert`, `-tls-key` | off |
 | HTTPS: a self-signed certificate | `-tls-self-signed` (extra names: `-tls-names`) | off |
 | Who may create accounts | `-signup off\|approval\|invite\|open` | `approval` |
@@ -122,6 +122,7 @@ The coordination server: control API, built-in relay, STUN, web portal.
 | `-acme-http-listen` | none | Also serve Let's Encrypt's checks on this address (`:80`), and redirect other requests there to HTTPS. Needed when `-listen` isn't on port 443. |
 | `-acme-email` | none | Contact address for the Let's Encrypt account (optional) |
 | `-acme-staging` | `false` | Use Let's Encrypt's test service (certificates clients won't trust) |
+| `-acme-dns` | none | `duckdns`: Let's Encrypt checks a `NAME.duckdns.org` name through DuckDNS (a TXT record) instead of connecting in, so HTTPS can use any port and nothing has to be open for the check. Needs `TC_DUCKDNS_TOKEN`. Excludes `-acme-http-listen`. [Details](lets-encrypt.md#no-open-port-the-dns-check-duckdns). |
 | `-tls-cert`, `-tls-key` | none | Your own PEM certificate (with chain) and key, instead of `-acme-domain`. Turns on HTTPS for both the control and portal listeners. |
 | `-tls-self-signed` | off | HTTPS with a certificate `tc-control` makes itself, kept in `tls/` next to the database. It logs the certificate's fingerprint, and the portal shows it; clients trust it with `tc up --tls-fingerprint`. Excludes `-tls-cert` and `-acme-domain`. See [Self-signed certificate](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed). |
 | `-tls-names` | none | With `-tls-self-signed`: more comma-separated DNS names or addresses for the certificate, beyond the hostname, `hostname.local`, the machine's IPv4 addresses, `::1` and the `-public-url` host. |
@@ -222,7 +223,7 @@ In `packaging/linux/`, next to `install.sh`, for HTTPS on a server reachable fro
 
 | Script | What it does |
 |---|---|
-| `letsencrypt.sh NAME [--port N] [--email ADDR] [--staging] [--dry-run]` | Switches `tc-control` to a Let's Encrypt certificate for NAME: sets `-listen` and `-acme-domain` (and `-acme-http-listen :80` for a port other than 443), removes other HTTPS options and `-public-url`, keeps everything else. Backs up the settings first, clears a stored test certificate when leaving `--staging`, restarts and checks that the certificate arrives. `--restore` puts the previous settings back. |
+| `letsencrypt.sh NAME [--port N] [--public-port N] [--email ADDR] [--staging] [--no-dns] [--dry-run]` | Switches `tc-control` to a Let's Encrypt certificate for NAME: sets `-listen` and `-acme-domain`, removes other HTTPS options, keeps everything else. For a DuckDNS name it uses the DNS check (`-acme-dns duckdns`, no port needs to be open for Let's Encrypt) and stores the token from `duckdns.sh`; for other names, `-acme-http-listen :80` when the port isn't 443. `--public-port` sets `-public-url` when the router forwards another outside port. Backs up the settings first, clears a stored test certificate when leaving `--staging`, restarts and checks that the certificate arrives. `--restore` puts the previous settings back. |
 | `duckdns.sh install NAME` | Keeps the DuckDNS name NAME pointing at this network's public address: an update script and a systemd timer, every 5 minutes. Asks for the token (or reads `DUCKDNS_TOKEN`). Also `status`, `update`, `uninstall`. |
 
 Details and a walk-through: [HOWTO: DuckDNS and Let's Encrypt](duckdns.md).
@@ -246,6 +247,7 @@ Restart the service after editing. Variables inside these files are **not** expa
 | `TC_SOCKET` | `tc` | Default `tcd` socket |
 | `TC_AUTHKEY` | `tc up` | Auth key, if `--authkey` isn't given |
 | `TC_DISCO_DEBUG=1` | `tcd` | Log every path-discovery message (for debugging NAT traversal) |
+| `TC_DUCKDNS_TOKEN` | `tc-control` | DuckDNS token for `-acme-dns duckdns`. Set it in `/etc/default/tc-control` (mode 600), not on the command line. |
 
 ## Relay map
 

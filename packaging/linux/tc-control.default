@@ -11,6 +11,10 @@
 #   -listen :443 -acme-domain vpn.example.com  automatic HTTPS from Let's Encrypt: the name must
 #                                              point at this server and port 443 be reachable
 #                                              (add -acme-http-listen :80 to use another -listen port)
+#   -acme-domain NAME.duckdns.org -acme-dns duckdns
+#                                              the same, checked through DuckDNS: no port needs to be open
+#                                              for Let's Encrypt; also set TC_DUCKDNS_TOKEN=... below
+#                                              (and chmod 600 this file)
 #   -tls-cert /etc/tailconnect/cert.pem -tls-key /etc/tailconnect/key.pem
 #                                              HTTPS with your own certificate (files must be
 #                                              readable by the service; see docs/installation.md#enable-https)
