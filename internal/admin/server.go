@@ -43,7 +43,8 @@ type Info struct {
 	BaseDomain string
 	ControlURL string
 	Version    string
-	Signup     string // sign-up mode (SignupOff, ...); "" = off
+	Signup     string        // sign-up mode (SignupOff, ...); "" = off
+	KeyExpiry  time.Duration // default key lifetime for machines (0 = never)
 }
 
 type Server struct {
@@ -76,6 +77,14 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/nodes", s.listNodes)
 	api.HandleFunc("DELETE /api/v1/nodes/{id}", s.deleteNode)
 	api.HandleFunc("POST /api/v1/nodes/{id}/rename", s.renameNode)
+	api.HandleFunc("POST /api/v1/nodes/{id}/approve", s.approveNode)
+	api.HandleFunc("POST /api/v1/nodes/{id}/expiry", s.setNodeExpiry)
+	api.HandleFunc("POST /api/v1/nodes/{id}/tags", s.setNodeTags)
+	api.HandleFunc("GET /api/v1/rules", s.listRules)
+	api.HandleFunc("POST /api/v1/rules", s.addRule)
+	api.HandleFunc("DELETE /api/v1/rules/{id}", s.deleteRule)
+	api.HandleFunc("GET /api/v1/me/settings", s.getSettings)
+	api.HandleFunc("POST /api/v1/me/settings", s.setSettings)
 	api.HandleFunc("POST /api/v1/nodes/{id}/shares", s.shareNode)
 	api.HandleFunc("POST /api/v1/nodes/{id}/share-links", s.createShareLink)
 	api.HandleFunc("GET /api/v1/shares", s.listShares)
@@ -190,16 +199,17 @@ func toAPIUser(u db.User, nodes int) apiUser {
 }
 
 type apiKey struct {
-	ID        int64     `json:"id"`
-	Prefix    string    `json:"prefix"`
-	User      string    `json:"user"`
-	Reusable  bool      `json:"reusable"`
-	Ephemeral bool      `json:"ephemeral"`
-	Uses      int       `json:"uses"`
-	Created   time.Time `json:"created"`
-	Expires   time.Time `json:"expires"`
-	Revoked   bool      `json:"revoked"`
-	Usable    bool      `json:"usable"`
+	ID          int64     `json:"id"`
+	Prefix      string    `json:"prefix"`
+	User        string    `json:"user"`
+	Reusable    bool      `json:"reusable"`
+	Ephemeral   bool      `json:"ephemeral"`
+	Preapproved bool      `json:"preapproved"`
+	Uses        int       `json:"uses"`
+	Created     time.Time `json:"created"`
+	Expires     time.Time `json:"expires"`
+	Revoked     bool      `json:"revoked"`
+	Usable      bool      `json:"usable"`
 }
 
 type apiNode struct {
@@ -214,6 +224,10 @@ type apiNode struct {
 	Endpoints []netip.AddrPort `json:"endpoints"`
 	NodeKey   string           `json:"nodeKey"`
 	Ephemeral bool             `json:"ephemeral"`
+	Approved  bool             `json:"approved"`
+	Tags      []string         `json:"tags"`
+	KeyExpiry *time.Time       `json:"keyExpiry,omitempty"` // absent = never expires
+	Expired   bool             `json:"expired"`
 	Created   time.Time        `json:"created"`
 	LastSeen  *time.Time       `json:"lastSeen,omitempty"`
 	Online    bool             `json:"online"`
@@ -225,7 +239,14 @@ func (s *Server) toAPINode(n db.Node) apiNode {
 	out := apiNode{
 		ID: n.ID, Name: n.GivenName, FQDN: n.GivenName + "." + db.TenantLabel(n.UserName) + "." + s.info.BaseDomain, User: n.UserName,
 		Hostname: n.Hostname, OS: hi.OS, IPv4: n.IPv4, IPv6: n.IPv6, Endpoints: n.Endpoints,
-		NodeKey: n.NodeKey, Ephemeral: n.Ephemeral, Created: n.CreatedAt,
+		NodeKey: n.NodeKey, Ephemeral: n.Ephemeral, Approved: n.Approved, Tags: n.Tags, Expired: n.Expired(s.now()), Created: n.CreatedAt,
+	}
+	if out.Tags == nil {
+		out.Tags = []string{}
+	}
+	if !n.ExpiresAt.IsZero() {
+		t := n.ExpiresAt
+		out.KeyExpiry = &t
 	}
 	if out.Endpoints == nil {
 		out.Endpoints = []netip.AddrPort{}
@@ -247,15 +268,19 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, "status", err)
 		return
 	}
-	online := 0
+	online, pendingMachines := 0, 0
 	for _, n := range nodes {
 		if s.toAPINode(n).Online {
 			online++
+		}
+		if !n.Approved {
+			pendingMachines++
 		}
 	}
 	out := map[string]any{
 		"machineKey": s.info.MachineKey, "baseDomain": s.info.BaseDomain, "controlURL": s.info.ControlURL,
 		"version": s.info.Version, "nodes": len(nodes), "online": online, "signup": s.info.Signup,
+		"pendingMachines": pendingMachines,
 	}
 	if p.user != nil {
 		incoming, err := s.db.ListShares(r.Context(), db.ShareFilter{RecipientID: p.user.ID})
@@ -365,7 +390,7 @@ func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
 
 func toAPIKey(k db.PreAuthKey, now time.Time) apiKey {
 	return apiKey{
-		ID: k.ID, Prefix: k.Prefix, User: k.UserName, Reusable: k.Reusable, Ephemeral: k.Ephemeral,
+		ID: k.ID, Prefix: k.Prefix, User: k.UserName, Reusable: k.Reusable, Ephemeral: k.Ephemeral, Preapproved: k.Preapproved,
 		Uses: k.Uses, Created: k.CreatedAt, Expires: k.ExpiresAt, Revoked: k.Revoked, Usable: k.Usable(now),
 	}
 }
@@ -375,10 +400,11 @@ const MaxKeyTTL = 90 * 24 * time.Hour
 
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		User      string `json:"user"`
-		Reusable  bool   `json:"reusable"`
-		Ephemeral bool   `json:"ephemeral"`
-		TTL       string `json:"ttl"` // Go duration, e.g. "24h"
+		User        string `json:"user"`
+		Reusable    bool   `json:"reusable"`
+		Ephemeral   bool   `json:"ephemeral"`
+		Preapproved bool   `json:"preapproved"`
+		TTL         string `json:"ttl"` // Go duration, e.g. "24h"
 	}
 	if !decode(w, r, &req) {
 		return
@@ -406,7 +432,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret, k, err := s.db.CreatePreAuthKey(r.Context(), db.CreatePreAuthKeyParams{
-		UserID: u.ID, Reusable: req.Reusable, Ephemeral: req.Ephemeral, TTL: ttl,
+		UserID: u.ID, Reusable: req.Reusable, Ephemeral: req.Ephemeral, Preapproved: req.Preapproved, TTL: ttl,
 	})
 	if s.dbError(w, "create key", err) {
 		return
@@ -541,4 +567,76 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
+	n, ok := s.ownNode(w, r)
+	if !ok || s.dbError(w, "approve node", s.db.ApproveNode(r.Context(), n.ID)) {
+		return
+	}
+	s.log.Info("machine approved", "node", n.GivenName, "user", n.UserName, "by", principalFrom(r.Context()).name())
+	s.writeNode(w, r, n.ID)
+}
+
+// setNodeExpiry sets a machine's key to never expire, or back to the
+// server's default lifetime from now.
+func (s *Server) setNodeExpiry(w http.ResponseWriter, r *http.Request) {
+	n, ok := s.ownNode(w, r)
+	if !ok {
+		return
+	}
+	var req struct{ Expiry string }
+	if !decode(w, r, &req) {
+		return
+	}
+	var at time.Time
+	switch req.Expiry {
+	case "never":
+	case "default":
+		if s.info.KeyExpiry > 0 {
+			at = s.now().Add(s.info.KeyExpiry)
+		}
+	default:
+		writeError(w, http.StatusBadRequest, `expiry must be "never" or "default"`)
+		return
+	}
+	if s.dbError(w, "set expiry", s.db.SetNodeExpiry(r.Context(), n.ID, at)) {
+		return
+	}
+	s.log.Info("machine key expiry set", "node", n.GivenName, "user", n.UserName, "expiry", req.Expiry, "by", principalFrom(r.Context()).name())
+	s.writeNode(w, r, n.ID)
+}
+
+func (s *Server) writeNode(w http.ResponseWriter, r *http.Request, id int64) {
+	n, err := s.db.GetNode(r.Context(), id)
+	if s.dbError(w, "node", err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.toAPINode(n))
+}
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	p := principalFrom(r.Context())
+	if p.user == nil {
+		writeError(w, http.StatusBadRequest, "signed in with the admin token: no account settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"requireMachineApproval": p.user.RequireMachineApproval})
+}
+
+func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
+	p := principalFrom(r.Context())
+	if p.user == nil {
+		writeError(w, http.StatusBadRequest, "signed in with the admin token: no account settings")
+		return
+	}
+	var req struct{ RequireMachineApproval bool }
+	if !decode(w, r, &req) {
+		return
+	}
+	if s.dbError(w, "settings", s.db.SetMachineApproval(r.Context(), p.user.Name, req.RequireMachineApproval)) {
+		return
+	}
+	s.log.Info("account settings", "login", p.user.Name, "require_machine_approval", req.RequireMachineApproval)
+	writeJSON(w, http.StatusOK, map[string]any{"requireMachineApproval": req.RequireMachineApproval})
 }

@@ -25,6 +25,8 @@ The coordination server: control API, built-in relay, STUN, web portal.
 | `-db` | see [below](#tc-control-admin-commands) | SQLite database. The packaged unit uses `/var/lib/tc-control/control.db`. |
 | `-listen` | `:7740` | Control API and built-in relay (TCP) |
 | `-admin-listen` | `127.0.0.1:7741` | Web portal and its API. `""` turns them off. Keep it on loopback, or use TLS if other people sign in to it ([how](installation.md#open-the-portal-to-other-people)). |
+| `-key-expiry` | `180d` | How long machines stay authorised after joining or re-authenticating: days (`90d`), a Go duration (`720h`), or `never`. Machines set to never expire, and machines that joined before this existed, are unaffected. |
+| `-ephemeral-timeout` | `30m` | Remove ephemeral machines that have been offline this long (`0` keeps them). |
 | `-signup` | `approval` | Who may create accounts in the portal: `off`, `approval` (pending until an operator approves), `invite` (needs an invite code) or `open`. A valid invite skips approval in every mode except `off`. |
 | `-stun-listen` | `:3478` | Built-in STUN server (UDP). `""` turns it off; devices then can't learn their public address, and NAT traversal suffers. |
 | `-domain` | `tc.internal` | MagicDNS suffix: devices are `<name>.<domain>`. Needs two or more labels of lowercase letters, digits and `-`. |
@@ -41,11 +43,13 @@ The coordination server: control API, built-in relay, STUN, web portal.
 ```
 tc-control users create NAME [-operator] [-password] | list | delete NAME
 tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
-tc-control users role NAME operator|tenant
+tc-control users role NAME operator|tenant | machine-approval NAME on|off
 tc-control invites create [-expiration 168h] | list | revoke ID
-tc-control keys create -user NAME [-reusable] [-ephemeral] [-expiration 24h]
+tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expiration 24h]
 tc-control keys list [-user NAME] | revoke ID
 tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
+tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
+tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
 tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
 tc-control shares accept ID | revoke ID
 tc-control admin-token
@@ -56,11 +60,12 @@ tc-control version
 |---|---|---|
 | `-db PATH` | all | Database. Default: `$TC_CONTROL_DB`, else `/var/lib/tc-control/control.db` if it exists, else `./control.db` |
 | `-json` | `list` commands | Machine-readable output |
-| `-user NAME` | `keys create` (required), `keys list`, `nodes list`, `shares list` | Account to create the key for, or to filter by |
+| `-user NAME` | `keys create`, `rules add` (required), `keys list`, `nodes list`, `shares list`, `rules list` | Account to create the key or rule for, or to filter by |
 | `-operator` | `users create` | Make the account an operator |
 | `-password` | `users create` | Also set a password (prompted twice on a terminal, else one line from stdin), as `users passwd` does |
 | `-reusable` | `keys create` | The key can register any number of devices until it expires |
-| `-ephemeral` | `keys create` | Devices joining with it are marked ephemeral |
+| `-ephemeral` | `keys create` | Devices joining with it are ephemeral: removed once offline for `-ephemeral-timeout` |
+| `-preapproved` | `keys create` | Devices joining with it skip the account's machine approval |
 | `-expiration` | `keys create`, `invites create`, `shares link` | Lifetime as a Go duration (`30m`, `24h`, `720h`); default `24h` for keys, `168h` for invites and share links |
 
 Account names are 1-32 lowercase letters, digits and inner `-` (they're part of machine names). Machine names for `rename` are a DNS label: lowercase letters, digits and `-`, up to 63 characters, unique within the account. Passwords are 10-256 characters.

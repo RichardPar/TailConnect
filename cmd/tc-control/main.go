@@ -25,6 +25,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,6 +34,7 @@ import (
 	"golang.org/x/term"
 	"time"
 
+	"tailconnect/internal/acl"
 	"tailconnect/internal/admin"
 	"tailconnect/internal/control"
 	"tailconnect/internal/db"
@@ -52,13 +54,15 @@ Usage:
   tc-control admin-token [-db PATH]
   tc-control users create NAME [-operator] [-password] | list | delete NAME
   tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
-  tc-control users role NAME operator|tenant
+  tc-control users role NAME operator|tenant | machine-approval NAME on|off
   tc-control invites create [-expiration 168h] | list | revoke ID
   tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
   tc-control shares accept ID | revoke ID
-  tc-control keys create -user NAME [-reusable] [-ephemeral] [-expiration 24h]
+  tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expiration 24h]
   tc-control keys list [-user NAME] | revoke ID
   tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
+  tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
+  tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
   tc-control version
 
 Every subcommand accepts -db PATH (default: $TC_CONTROL_DB, else
@@ -82,6 +86,8 @@ func main() {
 		err = cmdInvites(args)
 	case "shares":
 		err = cmdShares(args)
+	case "rules":
+		err = cmdRules(args)
 	case "users":
 		err = cmdUsers(args)
 	case "keys":
@@ -165,6 +171,8 @@ func cmdServe(args []string) error {
 	listen := fs.String("listen", ":7740", "client-facing control API address")
 	adminListen := fs.String("admin-listen", "127.0.0.1:7741", `web portal and API address ("" disables; other people need it reachable over TLS)`)
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
+	keyExpiry := fs.String("key-expiry", "180d", `how long machines stay authorised before they must re-authenticate ("never", or e.g. 90d, 720h)`)
+	ephemeralTimeout := fs.Duration("ephemeral-timeout", 30*time.Minute, "remove ephemeral machines offline this long (0 = keep them)")
 	signup := fs.String("signup", admin.SignupApproval, "who may create accounts in the web portal: off, approval (operator approves), invite (needs an invite code) or open")
 	magicDNS := fs.Bool("magic-dns", true, "clients resolve <node>.<domain> names in-tunnel and point the OS at them")
 	nameservers := fs.String("dns-nameservers", "", "comma-separated upstream resolvers for all other names; clients then send all DNS through MagicDNS (default: clients keep their own resolvers)")
@@ -188,6 +196,10 @@ func cmdServe(args []string) error {
 	}
 	if !admin.ValidSignupMode(*signup) {
 		return usageError("-signup must be off, approval, invite or open")
+	}
+	keyLife, err := parseLongDuration(*keyExpiry)
+	if err != nil {
+		return usageError("-key-expiry: " + err.Error())
 	}
 	*domain = strings.TrimSuffix(strings.ToLower(*domain), ".")
 	if err := control.ValidDomain(*domain); err != nil {
@@ -251,7 +263,10 @@ func cmdServe(args []string) error {
 		defer relaySrv.Close()
 	}
 
-	ctl, err := control.New(ctx, d, control.Config{BaseDomain: *domain, Relays: relays, DisableMagicDNS: !*magicDNS, Nameservers: upstream}, log)
+	ctl, err := control.New(ctx, d, control.Config{
+		BaseDomain: *domain, Relays: relays, DisableMagicDNS: !*magicDNS, Nameservers: upstream,
+		KeyExpiry: keyLife, EphemeralTimeout: *ephemeralTimeout,
+	}, log)
 	if err != nil {
 		return err
 	}
@@ -313,7 +328,7 @@ func cmdServe(args []string) error {
 				"signup", *signup)
 		}
 		adm := admin.New(d, admin.Info{
-			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, ControlURL: *publicURL, Version: version, Signup: *signup,
+			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, ControlURL: *publicURL, Version: version, Signup: *signup, KeyExpiry: keyLife,
 		}, log)
 		servers = append(servers, &http.Server{
 			Addr: *adminListen, Handler: adm.Handler(),
@@ -495,6 +510,14 @@ func cmdUsers(args []string) error {
 		} else {
 			fmt.Printf("%s is active\n", name)
 		}
+	case "machine-approval":
+		if fs.NArg() != 2 || (fs.Arg(1) != "on" && fs.Arg(1) != "off") {
+			return usageError("usage: tc-control users machine-approval NAME on|off")
+		}
+		if err := d.SetMachineApproval(ctx, fs.Arg(0), fs.Arg(1) == "on"); err != nil {
+			return err
+		}
+		fmt.Printf("new machines in %s %s\n", fs.Arg(0), map[string]string{"on": "need approval", "off": "are approved automatically"}[fs.Arg(1)])
 	case "role":
 		if fs.NArg() != 2 || (fs.Arg(1) != db.RoleOperator && fs.Arg(1) != db.RoleTenant) {
 			return usageError("usage: tc-control users role NAME operator|tenant")
@@ -642,6 +665,86 @@ func cmdShares(args []string) error {
 	return nil
 }
 
+func cmdRules(args []string) error {
+	sub, rest, err := subcommand(args, "rules")
+	if err != nil {
+		return err
+	}
+	fs, dbPath := flags("rules " + sub)
+	user := fs.String("user", "", "account (required for add)")
+	asJSON := fs.Bool("json", false, "output JSON")
+	parseArgs(fs, rest)
+	d, err := openDB(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	ctx := context.Background()
+	var uid int64
+	if *user != "" {
+		u, err := d.GetUser(ctx, *user)
+		if err != nil {
+			return err
+		}
+		uid = u.ID
+	}
+
+	switch sub {
+	case "list":
+		rules, err := d.ListRules(ctx, uid)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return printJSON(rules)
+		}
+		tw := table("ID", "ACCOUNT", "FROM", "TO", "PORTS")
+		for _, r := range rules {
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", r.ID, r.UserName, r.Src, r.Dst, r.Ports)
+		}
+		return tw.Flush()
+	case "add":
+		if uid == 0 || fs.NArg() < 2 || fs.NArg() > 3 {
+			return usageError("usage: tc-control rules add -user NAME FROM TO [PORTS]   (e.g. tag:staff tag:server tcp:22,443)")
+		}
+		src, dst, ports := strings.ToLower(fs.Arg(0)), strings.ToLower(fs.Arg(1)), "*"
+		if fs.NArg() == 3 {
+			ports = fs.Arg(2)
+		}
+		if err := acl.CheckSelector(src); err != nil {
+			return usageError("from: " + err.Error())
+		}
+		if err := acl.CheckSelector(dst); err != nil {
+			return usageError("to: " + err.Error())
+		}
+		access, err := acl.ParsePorts(ports)
+		if err != nil {
+			return usageError("ports: " + err.Error())
+		}
+		existing, _ := d.ListRules(ctx, uid)
+		r, err := d.AddRule(ctx, uid, src, dst, acl.FormatPorts(access))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("added rule %d: %s → %s on %s\n", r.ID, r.Src, r.Dst, r.Ports)
+		if len(existing) == 0 {
+			fmt.Fprintf(os.Stderr, "note: this is %s's first rule; from now on only what the rules allow is reachable\n", *user)
+		}
+	case "delete":
+		id, err := idArg(fs, "rules delete ID")
+		if err != nil {
+			return err
+		}
+		if err := d.DeleteRule(ctx, id, 0); err != nil {
+			return err
+		}
+		fmt.Printf("deleted rule %d\n", id)
+	default:
+		return usageError("unknown rules command " + strconv.Quote(sub))
+	}
+	return nil
+}
+
 func cmdInvites(args []string) error {
 	sub, rest, err := subcommand(args, "invites")
 	if err != nil {
@@ -716,6 +819,7 @@ func cmdKeys(args []string) error {
 	asJSON := fs.Bool("json", false, "output JSON")
 	reusable := fs.Bool("reusable", false, "allow the key to register more than one machine")
 	ephemeral := fs.Bool("ephemeral", false, "machines registered with this key are ephemeral")
+	preapproved := fs.Bool("preapproved", false, "machines registered with this key skip the account's machine approval")
 	expiration := fs.Duration("expiration", 24*time.Hour, "key lifetime")
 	parseArgs(fs, rest)
 	d, err := openDB(*dbPath)
@@ -735,7 +839,7 @@ func cmdKeys(args []string) error {
 			return err
 		}
 		secret, k, err := d.CreatePreAuthKey(ctx, db.CreatePreAuthKeyParams{
-			UserID: u.ID, Reusable: *reusable, Ephemeral: *ephemeral, TTL: *expiration,
+			UserID: u.ID, Reusable: *reusable, Ephemeral: *ephemeral, Preapproved: *preapproved, TTL: *expiration,
 		})
 		if err != nil {
 			return err
@@ -824,15 +928,90 @@ func cmdNodes(args []string) error {
 		if *asJSON {
 			return printJSON(nodes)
 		}
-		tw := table("ID", "NAME", "USER", "IPV4", "IPV6", "HOSTNAME", "LAST SEEN")
+		tw := table("ID", "NAME", "USER", "IPV4", "HOSTNAME", "LAST SEEN", "KEY EXPIRES", "STATUS")
+		now := time.Now()
 		for _, n := range nodes {
 			seen := "never"
 			if !n.LastSeen.IsZero() {
 				seen = time.Since(n.LastSeen).Truncate(time.Second).String() + " ago"
 			}
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", n.ID, n.GivenName, n.UserName, n.IPv4, n.IPv6, n.Hostname, seen)
+			expires := "never"
+			if !n.ExpiresAt.IsZero() {
+				expires = n.ExpiresAt.Local().Format("2006-01-02")
+			}
+			status := "ok"
+			switch {
+			case n.UserStatus != db.StatusActive:
+				status = "account " + n.UserStatus
+			case !n.Approved:
+				status = "needs approval"
+			case n.Expired(now):
+				status = "key expired"
+			}
+			if n.Ephemeral {
+				status += ", ephemeral"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n.ID, n.GivenName, n.UserName, n.IPv4, n.Hostname, seen, expires, status)
 		}
 		return tw.Flush()
+	case "tag":
+		if fs.NArg() != 2 {
+			return usageError(`usage: tc-control nodes tag ID TAG[,TAG...]   ("" removes all tags)`)
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil {
+			return usageError("bad node ID " + strconv.Quote(fs.Arg(0)))
+		}
+		tags := []string{}
+		for _, t := range strings.Split(fs.Arg(1), ",") {
+			t = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(t, "tag:")))
+			if t == "" {
+				continue
+			}
+			if !acl.ValidTag(t) {
+				return usageError("bad tag " + strconv.Quote(t) + ": use lowercase letters, digits and '-'")
+			}
+			tags = append(tags, t)
+		}
+		slices.Sort(tags)
+		tags = slices.Compact(tags)
+		if err := d.SetNodeTags(ctx, id, tags); err != nil {
+			return err
+		}
+		fmt.Printf("node %d tags: %s\n", id, strings.Join(tags, ","))
+	case "approve":
+		id, err := idArg(fs, "nodes approve ID")
+		if err != nil {
+			return err
+		}
+		if err := d.ApproveNode(ctx, id); err != nil {
+			return err
+		}
+		fmt.Printf("approved node %d\n", id)
+	case "expiry":
+		if fs.NArg() != 2 {
+			return usageError("usage: tc-control nodes expiry ID never|DURATION (e.g. 180d)")
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil {
+			return usageError("bad node ID " + strconv.Quote(fs.Arg(0)))
+		}
+		d2, err := parseLongDuration(fs.Arg(1))
+		if err != nil {
+			return usageError(err.Error())
+		}
+		var at time.Time
+		if d2 > 0 {
+			at = time.Now().Add(d2)
+		}
+		if err := d.SetNodeExpiry(ctx, id, at); err != nil {
+			return err
+		}
+		if at.IsZero() {
+			fmt.Printf("node %d's key never expires\n", id)
+		} else {
+			fmt.Printf("node %d's key expires %s\n", id, at.Local().Format(time.DateTime))
+		}
 	case "delete":
 		id, err := idArg(fs, "nodes delete ID")
 		if err != nil {
@@ -898,4 +1077,25 @@ func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// parseLongDuration accepts Go durations plus days ("180d"); "never" and
+// "0" mean no limit (0).
+func parseLongDuration(v string) (time.Duration, error) {
+	switch v {
+	case "never", "0", "":
+		return 0, nil
+	}
+	if days, ok := strings.CutSuffix(v, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("bad duration %q", v)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("bad duration %q (use e.g. 180d, 720h or never)", v)
+	}
+	return d, nil
 }

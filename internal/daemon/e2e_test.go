@@ -174,6 +174,13 @@ func ping(n *testNode, dst netip.Addr, msg string) (out string, err error) {
 // unless noSTUN) and returns the database, URL and a reusable auth key.
 func newControl(t testing.TB, noSTUN ...bool) (*db.DB, string, string) {
 	t.Helper()
+	return newControlWith(t, nil, len(noSTUN) > 0 && noSTUN[0])
+}
+
+// newControlWith is newControl with control settings adjusted by mod.
+func newControlWith(t testing.TB, mod func(*control.Config), noSTUNFlag bool) (*db.DB, string, string) {
+	t.Helper()
+	noSTUN := []bool{noSTUNFlag}
 	relays := control.EmbeddedRelayMap(0)
 	if len(noSTUN) == 0 || !noSTUN[0] {
 		pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
@@ -193,9 +200,11 @@ func newControl(t testing.TB, noSTUN ...bool) (*db.DB, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctl, err := control.New(context.Background(), cdb, control.Config{
-		BaseDomain: "e2e.internal", PollInterval: 50 * time.Millisecond, Relays: relays,
-	}, log)
+	cfg := control.Config{BaseDomain: "e2e.internal", PollInterval: 50 * time.Millisecond, Relays: relays}
+	if mod != nil {
+		mod(&cfg)
+	}
+	ctl, err := control.New(context.Background(), cdb, cfg, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,4 +668,151 @@ func nodeID(t *testing.T, cdb *db.DB, name, user string) int64 {
 	}
 	t.Fatalf("no node %s of %s", name, user)
 	return 0
+}
+
+func TestMachineApprovalFlow(t *testing.T) {
+	cdb, url, key := newControl(t)
+	a, b := newTestNode(t, "alpha"), newTestNode(t, "beta")
+	if err := a.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: key, Hostname: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alpha running", running(a, 0))
+	cdb.SetMachineApproval(context.Background(), "alice", true)
+	if err := b.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: key, Hostname: "beta"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "beta waits for approval", func() bool {
+		s := b.d.Status()
+		return s.State == localapi.StateRunning && len(s.Peers) == 0 && strings.Contains(s.Notice, "waiting for approval")
+	})
+	if len(a.d.Status().Peers) != 0 {
+		t.Fatal("alpha sees the unapproved machine")
+	}
+	if err := cdb.ApproveNode(context.Background(), nodeID(t, cdb, "beta", "alice")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both see each other after approval", func() bool {
+		return running(a, 1)() && running(b, 1)() && b.d.Status().Notice == ""
+	})
+}
+
+func TestKeyExpiryFlow(t *testing.T) {
+	_, url, key := newControlWith(t, func(c *control.Config) { c.KeyExpiry = 3 * time.Second }, false)
+	a, b := newTestNode(t, "alpha"), newTestNode(t, "beta")
+	for _, n := range []struct {
+		n    *testNode
+		host string
+	}{{a, "alpha"}, {b, "beta"}} {
+		if err := n.n.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: key, Hostname: n.host}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "both running", func() bool { return running(a, 1)() && running(b, 1)() })
+	if exp := a.d.Status().Self.KeyExpiry; exp == nil || time.Until(*exp) > 3*time.Second {
+		t.Fatalf("key expiry not reported: %v", exp)
+	}
+	waitFor(t, "keys expire and both are cut off", func() bool {
+		s := a.d.Status()
+		return len(s.Peers) == 0 && strings.Contains(s.Notice, "expired")
+	})
+	// Re-authenticating renews alpha; beta (still expired) stays out.
+	if err := a.d.Up(localapi.UpRequest{AuthKey: key}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alpha renewed", func() bool { s := a.d.Status(); return s.Notice == "" && s.State == localapi.StateRunning })
+	if err := b.d.Up(localapi.UpRequest{AuthKey: key}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both renewed and peered again", func() bool { return running(a, 1)() && running(b, 1)() })
+}
+
+func TestEphemeralCleanup(t *testing.T) {
+	cdb, url, _ := newControlWith(t, func(c *control.Config) { c.EphemeralTimeout = 2 * time.Second }, false)
+	u, _ := cdb.GetUser(context.Background(), "alice")
+	ek, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: u.ID, Ephemeral: true, TTL: time.Hour})
+	ci := newTestNode(t, "ci-runner")
+	if err := ci.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: ek, Hostname: "runner"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "runner running", running(ci, 0))
+	time.Sleep(2500 * time.Millisecond)
+	if n, _ := cdb.ListNodes(context.Background(), 0); len(n) != 1 {
+		t.Fatal("an online ephemeral machine was removed")
+	}
+	ci.d.Close() // the runner goes away without logging out
+	waitFor(t, "offline ephemeral machine removed", func() bool {
+		n, _ := cdb.ListNodes(context.Background(), 0)
+		return len(n) == 0
+	})
+}
+
+func TestAccessRules(t *testing.T) {
+	cdb, url, key := newControl(t)
+	laptop, server, printer := newTestNode(t, "laptop"), newTestNode(t, "server"), newTestNode(t, "printer")
+	for _, n := range []struct {
+		n    *testNode
+		host string
+	}{{laptop, "laptop"}, {server, "server"}, {printer, "printer"}} {
+		if err := n.n.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: key, Hostname: n.host}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitFor(t, "all three see each other", func() bool { return running(laptop, 2)() && running(server, 2)() && running(printer, 2)() })
+	ctx := context.Background()
+	cdb.SetNodeTags(ctx, nodeID(t, cdb, "laptop", "alice"), []string{"staff"})
+	cdb.SetNodeTags(ctx, nodeID(t, cdb, "server", "alice"), []string{"web"})
+	u, _ := cdb.GetUser(ctx, "alice")
+	rule, err := cdb.AddRule(ctx, u.ID, "tag:staff", "tag:web", "tcp:7000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "rules applied: the printer sees nobody, the others only each other", func() bool {
+		return running(printer, 0)() && running(laptop, 1)() && running(server, 1)()
+	})
+	ipLaptop, ipServer := selfIP(t, laptop), selfIP(t, server)
+	echo(t, server, ipServer)
+	echo(t, laptop, ipLaptop)
+	ln, err := server.tnet().ListenTCPAddrPort(netip.AddrPortFrom(ipServer, 7001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	tryDial := func(n *testNode, ap netip.AddrPort) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		c, err := n.tnet().DialContextTCPAddrPort(ctx, ap)
+		if err == nil {
+			c.Close()
+		}
+		return err
+	}
+
+	if got, err := ping(laptop, ipServer, "allowed"); err != nil || got != "pong:allowed" {
+		t.Fatalf("laptop → server tcp:7000 (allowed): %q %v", got, err)
+	}
+	if err := tryDial(laptop, netip.AddrPortFrom(ipServer, 7001)); err == nil {
+		t.Fatal("laptop → server tcp:7001 got through without a rule")
+	}
+	if err := tryDial(server, netip.AddrPortFrom(ipLaptop, 7000)); err == nil {
+		t.Fatal("server → laptop got through without a rule")
+	}
+	if st := server.d.Status(); st.Peers[0].NoInitiate != true || len(st.Peers[0].Inbound) != 1 {
+		t.Fatalf("server's view of the laptop: %+v", st.Peers[0])
+	}
+
+	// Deleting the last rule makes everything reachable again.
+	if err := cdb.DeleteRule(ctx, rule.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "all three see each other again", func() bool { return running(printer, 2)() && running(server, 2)() })
+	waitFor(t, "server → laptop allowed again", func() bool { return tryDial(server, netip.AddrPortFrom(ipLaptop, 7000)) == nil })
 }

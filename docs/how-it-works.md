@@ -9,6 +9,7 @@ TailConnect has a **control plane** and a **data plane**. The control server (`t
 - [The network map](#the-network-map)
 - [Tenants](#tenants)
 - [Sharing and the packet filter](#sharing-and-the-packet-filter)
+- [Access rules and the packet filter](#access-rules-and-the-packet-filter)
 - [Data plane](#data-plane)
 - [NAT traversal](#nat-traversal)
 - [Relays](#relays)
@@ -74,6 +75,16 @@ The filter sits on the **receiving** side, so the machines being protected enfor
 
 If two accounts share machines with each other, each may open connections to the other's shared machine, which gives a two-way link between those two machines only.
 
+## Access rules and the packet filter
+
+An account's rules (*from → to on ports*, with selectors `*`, `tag:NAME` or a machine name) are compiled into a policy in the server's snapshot. For machine N and each peer P of the same account, the server computes what P may open on N (the union of matching rules) and what N may open on P:
+
+- neither: P is left out of N's map (and N out of P's), and the relay won't carry packets between them;
+- P may open everything: P is an ordinary peer;
+- otherwise P is marked *no-initiate* with the list of allowed ports (`Inbound`).
+
+N's packet filter treats such a peer like a shared machine, except that new connections to an allowed port (TCP or UDP by destination port, ping for `icmp`) pass too. Replies to N's own connections always pass. A client that doesn't understand port lists still sees *no-initiate* and blocks everything new from that peer: it fails closed. An account without rules has no policy, so maps and the filter work exactly as without access rules. A stored rule that fails to compile makes the account deny everything rather than allow it.
+
 ## Data plane
 
 `tcd` runs **wireguard-go** on a TUN device (`tc0`). Each network map is applied to WireGuard as a diff, so existing sessions survive updates. Every peer gets a /32 and a /128 route on `tc0` (tagged `proto 124`). Handshakes are started by traffic, so idle peers cost nothing, which matters on battery.
@@ -130,7 +141,8 @@ With `-dns-nameservers` on the server, devices send everything to MagicDNS (reso
 
 - **Control server down.** Tunnels keep running on the last network map, and `tcd` reconnects with backoff. Devices that change networks meanwhile can still find each other through the relay, as long as the relay is up. The built-in relay is part of the control server, so for that case run a [separate relay](usage.md#relays).
 - **Device removed by its owner or an operator.** Its tunnel is torn down, it goes to the logged-out state, and it must join again with an auth key.
-- **Account suspended.** Its machines are cut off within a second but keep their keys and their stream to the server, so reactivation restores the network without touching them.
+- **Account suspended, machine unapproved, or key expired.** The machine is cut off within a second (an expiry takes effect at the moment it passes, though nothing in the database changes then: the server tracks the next expiry and rebuilds maps when it's reached). It keeps its keys and its stream to the server, so approval, reactivation or `tc up --authkey` restores it without anything else.
+- **Ephemeral machines** that have been offline for `-ephemeral-timeout` are removed by the server; machines with an open map stream never are.
 - **Server moved.** `tc up --server NEW` keeps the registration when the new URL serves the same server key.
 
 ## Security model
@@ -151,4 +163,4 @@ With `-dns-nameservers` on the server, devices send everything to MagicDNS (reso
 - **Local API.** `tc` talks to `tcd` over a Unix socket. The caller's UID (`SO_PEERCRED`) decides what it may do: status for anyone; up, down and logout for root.
 - **Least privilege.** `tc-control` runs as an unprivileged dynamic user. `tcd` runs as root, limited to `CAP_NET_ADMIN` and `CAP_NET_RAW`, with a read-only system except `/etc/resolv.conf`.
 
-Not yet: access rules within an account (every machine of an account can reach every other), device approval and key expiry. These are planned for milestone 9.
+- **Access rules** are enforced by the receiving machine's filter, like sharing, and by the relay; machines that may not talk aren't told about each other at all.

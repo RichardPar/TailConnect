@@ -5,6 +5,7 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 - [Concepts](#concepts)
 - [Common tasks](#common-tasks)
 - [Accounts and sign-up](#accounts-and-sign-up)
+- [Access rules](#access-rules)
 - [Sharing a machine](#sharing-a-machine)
 - [The web portal](#the-web-portal)
 - [Admin CLI](#admin-cli)
@@ -25,12 +26,14 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 | **Status** | `active`, `pending` (signed up, waiting for an operator's approval) or `suspended`. Pending and suspended accounts can't sign in, and their machines are cut off from the network until the account is active again. |
 | **Machine** (device, node) | A computer running `tcd`, belonging to one account. It gets an IPv4 address from `100.64.0.0/10` and a matching IPv6 address, for its lifetime. Its name, taken from its hostname, is unique within the account: two accounts can both have a `laptop`. |
 | **Name** | `machine.account.domain`, for example `laptop.alice.tc.internal`. Within an account, the short name (`laptop`) works too. |
-| **Auth key** | A `tc-auth-…` secret that lets a device join an account. It can be **single-use** or **reusable**, always **expires**, and can be **revoked**. Revoking a key or letting it expire stops new joins; machines that already joined stay. An **ephemeral** key labels its machines as temporary; removing them automatically comes in milestone 9. |
+| **Auth key** | A `tc-auth-…` secret that lets a device join an account. It can be **single-use** or **reusable**, always **expires**, and can be **revoked**. Revoking a key or letting it expire stops new joins; machines that already joined stay. An **ephemeral** key's machines are removed automatically once they've been offline for 30 minutes (CI runners, short-lived containers). A **pre-approved** key's machines skip the account's machine approval. |
+| **Key expiry** | Each machine's authorisation lasts 180 days by default (the server's `-key-expiry`). After that it's cut off, with a notice, until someone re-authenticates it with `sudo tc up --authkey KEY`, which renews it. The owner or an operator can set a machine to **never expire** (servers that must not drop off). Machines that joined before expiry existed never expire. |
+| **Machine approval** | An account can require approval for new machines (My account → *Require approval for new machines*). A new machine then stays cut off, with a notice, until the owner or an operator clicks **Approve**. |
 | **Share** | Permission for another account's machines to connect to one of your machines. It's **one-way**: the shared machine can only reply, never open connections back. A share by name is **pending** until the recipient accepts it; a **share link** is accepted by whoever redeems it first. |
 | **Invite** | A single-use `tc-invite-…` code from an operator that lets someone create an account without waiting for approval. |
 | **Admin token** | A `tc-admin-…` secret for scripts (the HTTP API) and as a break-glass operator sign-in. Creating a new one replaces the old one. |
-
-Within an account, every machine can reach every other machine. Finer-grained access rules within an account are planned for milestone 9.
+| **Tag** | A label on a machine, such as `server` or `db`, used by access rules (`tag:server`). |
+| **Access rule** | *from → to on ports*, within one account. An account with no rules lets every machine reach every other; once it has rules, only what they allow is reachable ([Access rules](#access-rules)). |
 
 ## Common tasks
 
@@ -43,10 +46,15 @@ Within an account, every machine can reach every other machine. Finer-grained ac
 | Share a machine with another account | Sharing → Share (by name) or Create link | `sudo tc-control shares create NODE_ID ACCOUNT` |
 | Accept a share | Sharing → Accept, or paste a link under "Shared with me" | `sudo tc-control shares accept ID` |
 | End a share | Sharing → Revoke (owner) or Remove (recipient) | `sudo tc-control shares revoke ID` |
+| Limit which machines reach which | Machines → Tags, then Access rules → Add rule | `… nodes tag 4 server`, `… rules add -user bob tag:staff tag:server tcp:22,443` |
 | Rename a machine | Machines → Rename | `sudo tc-control nodes rename 4 build-server` |
 | Remove a machine | Machines → Remove (or `sudo tc logout` on it) | `sudo tc-control nodes delete 4` |
 | Cut an account off | Accounts → Suspend | `sudo tc-control users suspend bob` |
 | Reset a forgotten password | Accounts → Reset password | `sudo tc-control users passwd bob` |
+| Approve a new machine | Machines → Approve | `sudo tc-control nodes approve 4` |
+| Require approval for new machines | My account | `sudo tc-control users machine-approval bob on` |
+| Keep a server from ever expiring | Machines → Never expire | `sudo tc-control nodes expiry 4 never` |
+| Renew an expired machine | | on the machine: `sudo tc up --authkey tc-auth-…` |
 | Stop a leaked key | Auth keys → Revoke | `sudo tc-control keys revoke 7` |
 
 Changes reach every connected machine within about a second.
@@ -87,6 +95,33 @@ Passwords are at least 10 characters. Changing a password, the role or the statu
 
 ---
 
+## Access rules
+
+By default every machine of an account can reach every other, on any port. Access rules narrow that down, for example: laptops may reach the servers on SSH and HTTPS, and nothing else.
+
+1. **Tag the machines** (Machines → Tags, or `tc-control nodes tag ID server,db`): `staff` for the laptops, `server` for the servers.
+2. **Add rules** (Access rules → Add rule, or `tc-control rules add`). Each rule is *from → to on ports*:
+
+| Field | Values |
+|---|---|
+| From, To | `*` (any of the account's machines), `tag:NAME`, or a machine name |
+| Ports | `*` (everything, including ping), or a comma-separated list of `22`, `8000-8100` (TCP and UDP), `tcp:443`, `udp:53`, `icmp` (ping) |
+
+![Access rules tab, operator view of the richard account: one rule, tag:staff → tag:web on icmp](images/portal-rules.png)
+
+How they behave:
+
+- **No rules = everything allowed.** The first rule switches the account to *only what the rules allow*; deleting the last rule switches back. The portal asks before either.
+- Rules only add permissions, and they're one-way: `tag:staff → tag:server on tcp:22` lets laptops open SSH to servers, not the reverse. Replies always flow back, so the SSH session works.
+- Machines that no rule lets talk in either direction don't see each other at all (not in `tc status`, no name, no relay).
+- In `tc status`, a limited peer shows what it may open on this machine: `rules: can open tcp:22,443 here`, or `rules: can't open connections here`.
+- Rules apply within the account. They don't change [shares](#sharing-a-machine): a machine shared with you is reachable as the share says.
+- Changes take effect on every machine within a second.
+
+Rules are enforced by each receiving machine's packet filter, the same one that makes sharing one-way ([how](how-it-works.md#access-rules-and-the-packet-filter)).
+
+---
+
 ## Sharing a machine
 
 Share a machine when someone in another account should be able to use it (a file server, a build machine, a printer host), without joining your network or seeing your other machines.
@@ -124,7 +159,7 @@ ssh -L 7741:127.0.0.1:7741 you@server      # then open http://localhost:7741
 
 To let other people use it (to sign up, manage their machines and share), make it reachable over HTTPS: see [Open the portal to other people](installation.md#open-the-portal-to-other-people). Sessions last 12 hours.
 
-**Machines** lists your machines (operators: everyone's, with an Account column), with online state (seen in the last 5 minutes), names, addresses, OS and last contact. **Rename** changes the machine's name; **Remove** disconnects it and deletes it from the network.
+**Machines** lists your machines (operators: everyone's, with an Account column), with online state (seen in the last 5 minutes), names, addresses, OS, last contact and key status (*expires in 5 months*, *never expires*, *expired*, or *needs approval* with an **Approve** button; the tab shows a count of machines waiting). **Never expire** / **Set expiry** switches a machine between never expiring and the server's normal lifetime from now. **Rename** changes the machine's name; **Remove** disconnects it and deletes it from the network.
 
 ![Operator view of the Machines tab: four machines across the richard and alice accounts](images/portal-machines.png)
 
@@ -136,7 +171,7 @@ A tenant sees only its own machines, and no Accounts tab:
 
 ![Auth keys tab for alice, with a newly generated key](images/portal-keys.png)
 
-**Sharing** is described [above](#sharing-a-machine). **My account** changes your password.
+**Access rules** and **Sharing** are described [above](#access-rules); operators can switch the Access rules tab to any account. **My account** turns machine approval on or off for your account and changes your password.
 
 **Accounts** (operators only) lists every account with its role, status and machine count. Pending sign-ups come first, with a count on the tab. From here you approve, suspend, reactivate, make operator or tenant, reset passwords and delete accounts (not your own, so you can't lock yourself out), and create and revoke invites.
 
@@ -153,11 +188,13 @@ A tenant sees only its own machines, and no Accounts tab:
 ```
 tc-control users create NAME [-operator] [-password] | list | delete NAME
 tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
-tc-control users role NAME operator|tenant
+tc-control users role NAME operator|tenant | machine-approval NAME on|off
 tc-control invites create [-expiration 168h] | list | revoke ID
-tc-control keys create -user NAME [-reusable] [-ephemeral] [-expiration 24h]
+tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expiration 24h]
 tc-control keys list [-user NAME] | revoke ID
 tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
+tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
+tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
 tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
 tc-control shares accept ID | revoke ID
 tc-control admin-token
@@ -193,12 +230,19 @@ curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://127.0.0.1:7741/api/v1/nod
 |---|---|---|
 | `GET /api/v1/status` | | version, domain, control URL, machine counts; for operators also account and pending counts |
 | `GET /api/v1/me` | | `{login, role, status, operator, token}` |
+| `GET /api/v1/me/settings`, `POST /api/v1/me/settings` | `{"requireMachineApproval": true}` | the account's machine approval setting |
 | `POST /api/v1/me/password` | `{"current", "new"}` | |
-| `GET /api/v1/nodes` | | `[{id, name, fqdn, user, hostname, os, ipv4, ipv6, endpoints, nodeKey, ephemeral, created, lastSeen, online}]` |
+| `GET /api/v1/nodes` | | `[{id, name, fqdn, user, hostname, os, ipv4, ipv6, endpoints, nodeKey, ephemeral, approved, keyExpiry, expired, created, lastSeen, online}]` (`keyExpiry` absent = never) |
 | `POST /api/v1/nodes/{id}/rename` | `{"name"}` | |
+| `POST /api/v1/nodes/{id}/approve` | | approves a machine waiting for approval |
+| `POST /api/v1/nodes/{id}/tags` | `{"tags": ["server", "db"]}` | replaces the machine's tags |
+| `GET /api/v1/rules` | | the account's rules `[{id, user, src, dst, ports, created}]`; operators: `?user=NAME`, or all with the admin token |
+| `POST /api/v1/rules` | `{"src", "dst", "ports", "user"}` | 201 the rule (ports normalised); `user` only for operators |
+| `DELETE /api/v1/rules/{id}` | | |
+| `POST /api/v1/nodes/{id}/expiry` | `{"expiry": "never" \| "default"}` | never expire, or the server's key lifetime from now |
 | `DELETE /api/v1/nodes/{id}` | | |
 | `GET /api/v1/keys` | | `[{id, prefix, user, reusable, ephemeral, uses, created, expires, revoked, usable}]` |
-| `POST /api/v1/keys` | `{"ttl": "24h", "reusable", "ephemeral", "user"}` | 201 `{key, info}`; `user` defaults to you (operators may name any account). TTL up to 2160h. |
+| `POST /api/v1/keys` | `{"ttl": "24h", "reusable", "ephemeral", "preapproved", "user"}` | 201 `{key, info}`; `user` defaults to you (operators may name any account). TTL up to 2160h. |
 | `DELETE /api/v1/keys/{id}` | | revokes |
 | `GET /api/v1/shares` | | `{outgoing: [...], incoming: [...]}`; each `{id, nodeId, machine, fqdn, owner, recipient, status, inEffect, link, linkPrefix, created, acceptedAt, expires}` |
 | `POST /api/v1/nodes/{id}/shares` | `{"recipient"}` | 201 the pending share |
@@ -256,9 +300,11 @@ MagicDNS: richard.home.internal (systemd-resolved, only .home.internal names)
 | You see | Meaning |
 |---|---|
 | `State: Running` | Connected to the server and the tunnel is up. `Starting` means connecting; a `Warning:` line says why if it takes a while. The tunnel keeps working on its last map even while the server is unreachable. |
-| `Notice: …` | A message from the server, for example that the account is suspended |
+| `Notice: …` | A message from the server: the account is suspended, the machine waits for approval, or its key has expired. The machine has no peers until that's resolved; then it recovers by itself (or after `tc up --authkey`, for an expired key). |
+| `Warning: this machine's key expires …` | Shown in the last 14 days before key expiry. Renew with `sudo tc up --authkey KEY`. |
 | `relay: 1` | This machine's home relay region |
 | `alicebox.alice`, `alice` | Another account's machine (name, then owner), in this network because of a share |
+| `rules: can open tcp:22 here` / `rules: can't open connections here` | The account's access rules limit what that peer may open on this machine; replies to this machine's own connections always pass |
 | `shared with you` / `has access to this machine` | You can connect to it, and it can only reply / it can connect to this machine (this machine is shared with its account) |
 | `active` / `idle` | Whether a WireGuard handshake with that peer completed in the last 3 minutes. Idle peers cost nothing and connect on the first packet. |
 | `direct ADDR (N ms)` | Packets go straight to ADDR, often the peer's NAT-mapped public address, with the measured round-trip time |

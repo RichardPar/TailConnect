@@ -108,13 +108,20 @@ type Node struct {
 	// because of a share (it is shared with us, or we are shared with it).
 	Shared bool `json:",omitempty"`
 	// NoInitiate: the machine may only reply to connections this machine
-	// starts; tcd's packet filter drops anything else from it. Set for
-	// machines shared with our tenant (sharing is one-way).
+	// starts, apart from what Inbound allows; tcd's packet filter drops
+	// anything else from it. Set for machines shared with our tenant
+	// (sharing is one-way) and for peers the account's access rules limit.
 	NoInitiate bool `json:",omitempty"`
-	Hostinfo   Hostinfo
-	Created    time.Time
-	LastSeen   *time.Time `json:",omitempty"`
-	KeyExpiry  *time.Time `json:",omitempty"`
+	// Inbound (with NoInitiate) lists what the peer may still open
+	// connections to on this machine, from the account's access rules.
+	// Empty: nothing.
+	Inbound []PortRange `json:",omitempty"`
+	// Tags are the machine's access-rule tags (e.g. "server").
+	Tags      []string `json:",omitempty"`
+	Hostinfo  Hostinfo
+	Created   time.Time
+	LastSeen  *time.Time `json:",omitempty"`
+	KeyExpiry *time.Time `json:",omitempty"`
 }
 
 // DNSConfig tells clients how to resolve names. With MagicDNS on, each
@@ -153,6 +160,15 @@ type RelayNode struct {
 	// and STUNPort (0 = the region has no STUN server).
 	HostName string `json:",omitempty"`
 	STUNPort int    `json:",omitempty"`
+}
+
+// PortRange is a protocol and port range a peer may open connections to.
+// Proto is "tcp", "udp", "icmp" (ping; ports unused) or "" for both TCP
+// and UDP.
+type PortRange struct {
+	Proto string `json:",omitempty"`
+	First uint16 `json:",omitempty"`
+	Last  uint16 `json:",omitempty"`
 }
 
 // ErrorResponse is the body of any non-2xx response.

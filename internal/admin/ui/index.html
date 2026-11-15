@@ -59,8 +59,9 @@
   <header class="top">
     <div class="brand">TailConnect</div>
     <nav class="tabs" role="tablist">
-      <button role="tab" data-tab="nodes" class="active">Machines</button>
+      <button role="tab" data-tab="nodes" class="active">Machines <span id="machine-badge" class="count" hidden></span></button>
       <button role="tab" data-tab="keys">Auth keys</button>
+      <button role="tab" data-tab="rules">Access rules</button>
       <button role="tab" data-tab="sharing">Sharing <span id="share-badge" class="count" hidden></span></button>
       <button role="tab" data-tab="users" class="op-only" hidden>Accounts <span id="pending-badge" class="count" hidden></span></button>
       <button role="tab" data-tab="account">My account</button>
@@ -76,7 +77,7 @@
       <div class="card">
         <div class="card-head"><h2>Machines</h2><span class="muted" id="nodes-updated"></span></div>
         <div class="table-wrap"><table>
-          <thead><tr><th></th><th>Name</th><th class="op-only">Account</th><th>Addresses</th><th>OS</th><th>Last seen</th><th></th></tr></thead>
+          <thead><tr><th></th><th>Name</th><th class="op-only">Account</th><th>Addresses</th><th>OS</th><th>Last seen</th><th>Key</th><th></th></tr></thead>
           <tbody id="nodes-body"></tbody>
         </table></div>
         <p class="empty" id="nodes-empty" hidden>No machines yet. Generate an auth key, then run <code>sudo tc up --server … --authkey …</code> on a device.</p>
@@ -100,6 +101,7 @@
           </label>
           <label class="check"><input type="checkbox" id="key-reusable"> Reusable</label>
           <label class="check"><input type="checkbox" id="key-ephemeral"> Ephemeral</label>
+          <label class="check" title="Machines joining with this key skip your account's machine approval"><input type="checkbox" id="key-preapproved"> Pre-approved</label>
           <button type="submit" class="primary">Generate key</button>
         </form>
         <div id="new-key" class="new-key" hidden>
@@ -110,6 +112,26 @@
           <thead><tr><th>ID</th><th>Key</th><th class="op-only">Account</th><th>Type</th><th>Uses</th><th>Expires</th><th>Status</th><th></th></tr></thead>
           <tbody id="keys-body"></tbody>
         </table></div>
+      </div>
+    </section>
+
+    <section data-panel="rules" hidden>
+      <div class="card">
+        <div class="card-head"><h2>Access rules</h2>
+          <label class="op-only muted">Account <select id="rules-account"></select></label></div>
+        <p class="muted intro" id="rules-mode"></p>
+        <form id="rule-form" class="inline-form">
+          <label>From <input id="rule-src" list="rule-selectors" placeholder="tag:staff" spellcheck="false" autocapitalize="none" required size="16"></label>
+          <label>To <input id="rule-dst" list="rule-selectors" placeholder="tag:server" spellcheck="false" autocapitalize="none" required size="16"></label>
+          <label>Ports <input id="rule-ports" placeholder="* or tcp:22,443" spellcheck="false" size="16"></label>
+          <button type="submit" class="primary">Add rule</button>
+          <datalist id="rule-selectors"></datalist>
+        </form>
+        <div class="table-wrap"><table>
+          <thead><tr><th>From</th><th>To</th><th>Ports</th><th>Added</th><th></th></tr></thead>
+          <tbody id="rules-body"></tbody>
+        </table></div>
+        <p class="sub">From and To: <code>*</code> (any of the account's machines), <code>tag:NAME</code>, or a machine name. Ports: <code>*</code> (everything, including ping), or a list of <code>22</code>, <code>8000-8100</code>, <code>tcp:443</code>, <code>udp:53</code>, <code>icmp</code>. Replies always flow back. Rules don't affect shared machines.</p>
       </div>
     </section>
 
@@ -198,6 +220,11 @@
       <div class="card narrow">
         <div class="card-head"><h2>My account</h2></div>
         <p id="account-info" class="muted"></p>
+        <form id="settings-form" class="stack">
+          <h3>Machines</h3>
+          <label class="check"><input type="checkbox" id="require-approval"> Require approval for new machines</label>
+          <p class="sub">New devices joining your account stay cut off until you approve them on the Machines tab. Auth keys marked <i>Pre-approved</i> skip this.</p>
+        </form>
         <form id="password-form" class="stack">
           <h3>Change password</h3>
           <label class="field">Current password <input id="pw-current" type="password" autocomplete="current-password" required></label>

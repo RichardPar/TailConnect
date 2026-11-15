@@ -20,6 +20,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"tailconnect/internal/acl"
 	"tailconnect/internal/key"
 	"tailconnect/internal/localapi"
 )
@@ -190,6 +191,12 @@ func cmdStatus(c *localapi.Client, args []string) error {
 	if st.Notice != "" {
 		fmt.Println("Notice:", st.Notice)
 	}
+	if st.Self != nil && st.Self.KeyExpiry != nil {
+		if left := time.Until(*st.Self.KeyExpiry); left > 0 && left < 14*24*time.Hour {
+			fmt.Printf("Warning: this machine's key expires %s (in %s); renew with: sudo tc up --authkey KEY\n",
+				st.Self.KeyExpiry.Local().Format("2006-01-02 15:04"), humanDays(left))
+		}
+	}
 	if d := st.DNS; d != nil {
 		how := d.HostConfig
 		switch {
@@ -219,12 +226,15 @@ func cmdStatus(c *localapi.Client, args []string) error {
 			state = "active"
 		}
 		detail := state
-		if p.Shared {
-			if p.NoInitiate {
-				detail = "shared with you; " + state
-			} else {
-				detail = "has access to this machine; " + state
-			}
+		switch {
+		case p.Shared && p.NoInitiate:
+			detail = "shared with you; " + state
+		case p.Shared:
+			detail = "has access to this machine; " + state
+		case p.NoInitiate && len(p.Inbound) == 0:
+			detail = "rules: can't open connections here; " + state
+		case p.NoInitiate:
+			detail = "rules: can open " + acl.FormatPorts(acl.Access{Ranges: p.Inbound}) + " here; " + state
 		}
 		switch {
 		case p.CurrentEndpoint.IsValid():
@@ -331,4 +341,11 @@ func bytesStr(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func humanDays(d time.Duration) string {
+	if d < 48*time.Hour {
+		return d.Round(time.Hour).String()
+	}
+	return fmt.Sprintf("%d days", int(d.Hours()/24))
 }

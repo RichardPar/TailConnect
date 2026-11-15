@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
+
+	"tailconnect/internal/protocol"
 )
 
 // fakeTUN returns queued packets from Read and records Writes.
@@ -241,5 +243,36 @@ func TestFragmentsAndOff(t *testing.T) {
 	h.w.SetRestricted(nil)
 	if !h.recv(tcp(shared, me, 40000, 22, syn)) {
 		t.Fatal("filter still active after SetRestricted(nil)")
+	}
+}
+
+func TestAllowedPorts(t *testing.T) {
+	h := newHarness(t)
+	h.w.SetPolicies(map[netip.Addr][]protocol.PortRange{
+		shared: {{Proto: "tcp", First: 443, Last: 443}, {First: 8000, Last: 8100}, {Proto: "icmp"}},
+		shrd6:  nil,
+	})
+	if !h.recv(tcp(shared, me, 40000, 443, syn)) {
+		t.Fatal("tcp:443 not allowed")
+	}
+	if h.recv(udp(shared, me, 40000, 443)) {
+		t.Fatal("udp:443 allowed by a tcp-only rule")
+	}
+	if !h.recv(udp(shared, me, 40000, 8050)) || !h.recv(tcp(shared, me, 40000, 8100, syn)) {
+		t.Fatal("8000-8100 (tcp and udp) not allowed")
+	}
+	if h.recv(tcp(shared, me, 40000, 22, syn)) {
+		t.Fatal("port 22 allowed without a rule")
+	}
+	if !h.recv(icmp(shared, me, 8, 1)) {
+		t.Fatal("ping not allowed by an icmp rule")
+	}
+	if h.recv(tcp(shrd6, me6, 40000, 443, syn)) {
+		t.Fatal("a peer with no allowed ports got in")
+	}
+	// Replies to our own connections still pass, on any port.
+	h.send(tcp(me, shared, 50000, 22, syn))
+	if !h.recv(tcp(shared, me, 22, 50000, synack)) {
+		t.Fatal("reply to our connection dropped")
 	}
 }

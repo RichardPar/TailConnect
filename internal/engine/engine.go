@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"net/netip"
 	"slices"
@@ -104,7 +105,7 @@ type Engine struct {
 	peers      map[key.NodePublic]peerState
 	lastRouter RouterConfig
 	lastOSDNS  dns.OSConfig
-	restricted []netip.Addr // peers that may only reply (one-way shares)
+	restricted map[netip.Addr][]protocol.PortRange // peers limited by shares or access rules
 	dnsErr     string
 	dnsDomain  string // this machine's own domain (tenant), for status
 	dnsBase    string // the domain routed to MagicDNS
@@ -212,7 +213,7 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 	e.sawMap = true
 	want := map[key.NodePublic]bool{}
 	var routes []netip.Prefix
-	var restricted []netip.Addr
+	restricted := map[netip.Addr][]protocol.PortRange{}
 	for _, p := range nm.Peers {
 		if p.NodeKey.IsZero() || p.NodeKey.Equal(e.pub) {
 			continue
@@ -220,7 +221,7 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 		want[p.NodeKey] = true
 		if p.NoInitiate {
 			for _, a := range p.Addresses {
-				restricted = append(restricted, a.Addr())
+				restricted[a.Addr()] = p.Inbound
 			}
 		}
 		allowed := slices.Clone(p.Addresses)
@@ -259,13 +260,19 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 	// Change the filter around the peer update so no packet slips through:
 	// restrictions for new shared machines apply before they are added, and
 	// restrictions for removed ones are lifted only after they are gone.
-	e.filter.SetRestricted(append(slices.Clone(restricted), e.restricted...))
+	transition := maps.Clone(restricted)
+	for a, r := range e.restricted {
+		if _, ok := transition[a]; !ok {
+			transition[a] = r // a peer on its way out keeps its restriction until removed
+		}
+	}
+	e.filter.SetPolicies(transition)
 	if b.Len() > 0 {
 		if err := e.dev.IpcSet(b.String()); err != nil {
 			return fmt.Errorf("engine: apply peers: %w", err)
 		}
 	}
-	e.filter.SetRestricted(restricted)
+	e.filter.SetPolicies(restricted)
 	e.restricted = restricted
 	for _, k := range kick {
 		time.AfterFunc(rand.N(maxKickJitter), func() { e.kickHandshake(k) })

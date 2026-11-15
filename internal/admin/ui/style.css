@@ -129,3 +129,4 @@ td.actions button { margin-left: 4px; }
 .card.narrow { max-width: 520px; }
 .stack { display: grid; gap: 10px; }
 h3 { font-size: 14px; margin: 8px 0 0; font-weight: 600; }
+.tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; }

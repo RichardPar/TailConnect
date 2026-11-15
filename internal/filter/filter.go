@@ -4,8 +4,9 @@
 //
 // The filter sits between WireGuard and the TUN device. Packets we send to
 // a restricted peer create flow entries; packets from a restricted peer are
-// delivered only if they belong to one of those flows (or are ICMP errors,
-// which path-MTU discovery needs). Peers' source addresses can be trusted:
+// delivered only if they belong to one of those flows, open a connection
+// the peer is allowed (access rules: e.g. TCP port 443), or are ICMP errors
+// (path-MTU discovery needs them). Peers' source addresses can be trusted:
 // WireGuard only accepts packets from a peer with that peer's own tunnel
 // addresses as the source.
 package filter
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
+
+	"tailconnect/internal/protocol"
 )
 
 // Idle timeouts for flows, refreshed by traffic in either direction.
@@ -50,7 +53,9 @@ type TUN struct {
 	tun.Device
 	now func() time.Time
 
-	restricted atomic.Pointer[map[netip.Addr]bool] // nil = filter off
+	// restricted maps each restricted peer address to what it may still open
+	// here (empty: nothing). nil = filter off.
+	restricted atomic.Pointer[map[netip.Addr][]protocol.PortRange]
 
 	mu     sync.Mutex
 	flows  map[flowKey]time.Time // expiry
@@ -66,13 +71,23 @@ func Wrap(dev tun.Device) *TUN {
 
 // SetRestricted sets the tunnel addresses of peers that may only reply.
 func (t *TUN) SetRestricted(addrs []netip.Addr) {
-	if len(addrs) == 0 {
+	m := make(map[netip.Addr][]protocol.PortRange, len(addrs))
+	for _, a := range addrs {
+		m[a] = nil
+	}
+	t.SetPolicies(m)
+}
+
+// SetPolicies sets the restricted peers: each address may reply to our
+// connections and open only the listed ports here.
+func (t *TUN) SetPolicies(p map[netip.Addr][]protocol.PortRange) {
+	if len(p) == 0 {
 		t.restricted.Store(nil)
 		return
 	}
-	m := make(map[netip.Addr]bool, len(addrs))
-	for _, a := range addrs {
-		m[a.Unmap()] = true
+	m := make(map[netip.Addr][]protocol.PortRange, len(p))
+	for a, r := range p {
+		m[a.Unmap()] = r
 	}
 	t.restricted.Store(&m)
 }
@@ -93,7 +108,11 @@ func (t *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	for i := 0; i < n; i++ {
 		b := bufs[i][offset : offset+sizes[i]]
 		// Cheap address check first: most packets go to unrestricted peers.
-		if dst, ok := dstAddr(b); !ok || !(*rp)[dst] {
+		dst, ok := dstAddr(b)
+		if !ok {
+			continue
+		}
+		if _, restricted := (*rp)[dst]; !restricted {
 			continue
 		}
 		pk, ok := parse(b)
@@ -130,7 +149,8 @@ func (t *TUN) Write(bufs [][]byte, offset int) (int, error) {
 	for i, b := range bufs {
 		pkt := b[offset:]
 		src, isIP := srcAddr(pkt)
-		if !isIP || !(*rp)[src] {
+		allowedPorts, restricted := (*rp)[src]
+		if !isIP || !restricted {
 			if keep != nil {
 				keep = append(keep, b)
 			}
@@ -142,7 +162,7 @@ func (t *TUN) Write(bufs [][]byte, offset int) (int, error) {
 		}
 		// From a restricted peer: unparseable packets (fragments, extension
 		// headers) are refused, the rest must belong to one of our flows.
-		if pk, ok := parse(pkt); ok && t.allowInboundLocked(pk, now) {
+		if pk, ok := parse(pkt); ok && (permits(allowedPorts, pk) || t.allowInboundLocked(pk, now)) {
 			if keep != nil {
 				keep = append(keep, b)
 			}
@@ -339,4 +359,22 @@ func parse(b []byte) (packet, bool) {
 		p.sport = binary.BigEndian.Uint16(l4[4:6]) // echo identifier
 	}
 	return p, true
+}
+
+// permits reports whether a restricted peer may open this connection here.
+func permits(ranges []protocol.PortRange, p packet) bool {
+	for _, r := range ranges {
+		switch {
+		case r.Proto == "icmp":
+			if p.echoRequest() {
+				return true
+			}
+		case p.proto == protoTCP && (r.Proto == "" || r.Proto == "tcp"),
+			p.proto == protoUDP && (r.Proto == "" || r.Proto == "udp"):
+			if p.dport >= r.First && p.dport <= r.Last {
+				return true
+			}
+		}
+	}
+	return false
 }

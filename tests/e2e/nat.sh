@@ -249,6 +249,19 @@ wait_for 5 "share gone" bash -c "! ip netns exec c tc --socket /run/tc-c.sock st
 ip netns exec c ping -c2 -W1 "$IPA" >/dev/null 2>&1 && fail "gamma still reaches alpha after revoking"
 ok "revoked: gamma can no longer reach alpha"
 
+echo "== access rules within an account"
+tc-control nodes tag 1 staff >/dev/null
+tc-control nodes tag 2 web >/dev/null
+RULE=$(tc-control rules add -user alice tag:staff tag:web icmp 2>/dev/null | grep -o 'rule [0-9]*' | cut -d' ' -f2)
+wait_for 5 "rule applied" bash -c "ip netns exec b tc --socket /run/tc-b.sock status | grep -q 'alpha.*rules: can open icmp here'"
+tca status | grep -q "beta.*rules: can't open connections here" || { tca status; fail "alpha's view of beta"; }
+ip netns exec a ping -c2 -W1 "$IPB" >/dev/null || fail "alpha → beta ping (allowed by tag:staff → tag:web on icmp)"
+ip netns exec b ping -c2 -W1 "$IPA" >/dev/null 2>&1 && fail "beta → alpha ping got through without a rule"
+ok "tag:staff → tag:web on icmp: alpha pings beta, beta can't ping alpha"
+tc-control rules delete "$RULE" >/dev/null
+wait_for 10 "rules removed" ip netns exec b ping -c1 -W1 "$IPA"
+ok "last rule deleted: everything reachable again"
+
 echo "== direct path dies: fall back to relay, then recover"
 # Drop all UDP between the two NATs (both still reach control and the relay).
 ip netns exec ra nft -f - <<-EOF

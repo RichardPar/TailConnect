@@ -30,6 +30,7 @@ import (
 
 	"golang.org/x/net/http2"
 
+	"tailconnect/internal/acl"
 	"tailconnect/internal/db"
 	"tailconnect/internal/ipam"
 	"tailconnect/internal/key"
@@ -53,6 +54,12 @@ type Config struct {
 	// PollInterval is how often the database generation is checked for
 	// changes made by other processes (default 1s).
 	PollInterval time.Duration
+	// KeyExpiry is how long a machine stays authorised after joining or
+	// re-authenticating (0 = keys never expire).
+	KeyExpiry time.Duration
+	// EphemeralTimeout: ephemeral machines offline this long are removed
+	// (0 = keep them).
+	EphemeralTimeout time.Duration
 }
 
 type Server struct {
@@ -78,6 +85,9 @@ type Server struct {
 	tenantOf map[key.NodePublic]int64
 	// sharedWith maps a machine's node key to the tenants it is shared with.
 	sharedWith map[key.NodePublic]map[int64]bool
+	// Access rules: each machine's selector identity and each account's policy.
+	machineOf map[key.NodePublic]acl.Machine
+	policies  map[int64]*acl.Policy
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
@@ -258,6 +268,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Hostinfo:   string(hi),
 		AuthKey:    req.AuthKey,
 		Alloc:      s.ipam.Next,
+		KeyExpiry:  s.cfg.KeyExpiry,
 	})
 	switch {
 	case errors.Is(err, db.ErrInvalidAuthKey):
@@ -465,6 +476,7 @@ func (s *Server) toProtocol(n db.Node) (protocol.Node, error) {
 		Addresses: []netip.Prefix{netip.PrefixFrom(n.IPv4, 32), netip.PrefixFrom(n.IPv6, 128)},
 		Endpoints: n.Endpoints,
 		HomeRelay: n.HomeRelay,
+		Tags:      n.Tags,
 		Hostinfo:  hi,
 		Created:   n.CreatedAt,
 	}
@@ -515,7 +527,8 @@ func (s *Server) checkGeneration() {
 	changed := g != s.lastGen
 	s.lastGen = g
 	s.genMu.Unlock()
-	if changed {
+	// A key expiring changes maps without any database change.
+	if changed || s.snapshotStale() {
 		s.refreshPolicy()
 		s.bus.notify()
 	}
@@ -532,8 +545,10 @@ func (s *Server) refreshPolicy() {
 		return
 	}
 	m := make(map[key.NodePublic]int64, len(snap.keys))
+	mo := make(map[key.NodePublic]acl.Machine, len(snap.keys))
 	for nk, id := range snap.keys {
 		m[nk] = snap.nodes[id].db.UserID
+		mo[nk] = snap.nodes[id].acl
 	}
 	sw := map[key.NodePublic]map[int64]bool{}
 	for id, tenants := range snap.sharedTo {
@@ -547,7 +562,7 @@ func (s *Server) refreshPolicy() {
 		}
 	}
 	s.policyMu.Lock()
-	s.tenantOf, s.sharedWith = m, sw
+	s.tenantOf, s.sharedWith, s.machineOf, s.policies = m, sw, mo, snap.policies
 	s.policyMu.Unlock()
 }
 
@@ -563,7 +578,11 @@ func (s *Server) RelayAllowed(a, b key.NodePublic) bool {
 	if !ok1 || !ok2 {
 		return false
 	}
-	return ta == tb || s.sharedWith[a][tb] || s.sharedWith[b][ta]
+	if ta == tb {
+		// Within an account, the access rules decide (nil: no rules).
+		return s.policies[ta].Connected(s.machineOf[a], s.machineOf[b])
+	}
+	return s.sharedWith[a][tb] || s.sharedWith[b][ta]
 }
 
 // watchGeneration notices changes made outside this process (admin CLI) or
@@ -571,13 +590,50 @@ func (s *Server) RelayAllowed(a, b key.NodePublic) bool {
 func (s *Server) watchGeneration() {
 	t := time.NewTicker(s.cfg.PollInterval)
 	defer t.Stop()
+	var lastReap time.Time
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-t.C:
+		case now := <-t.C:
 			s.checkGeneration()
+			if s.cfg.EphemeralTimeout > 0 && now.Sub(lastReap) >= reapInterval(s.cfg.EphemeralTimeout) {
+				lastReap = now
+				s.reapEphemeral()
+			}
 		}
+	}
+}
+
+// reapInterval checks for stale ephemeral machines a few times per timeout.
+func reapInterval(timeout time.Duration) time.Duration {
+	return max(min(timeout/4, time.Minute), time.Second)
+}
+
+// reapEphemeral removes ephemeral machines that have been offline (no map
+// stream, not seen) for longer than EphemeralTimeout.
+func (s *Server) reapEphemeral() {
+	stale, err := s.db.StaleEphemeralNodes(s.ctx, time.Now().Add(-s.cfg.EphemeralTimeout))
+	if err != nil {
+		if s.ctx.Err() == nil {
+			s.log.Warn("ephemeral cleanup", "err", err)
+		}
+		return
+	}
+	removed := 0
+	for _, n := range stale {
+		if s.Online(n.ID) {
+			continue
+		}
+		if err := s.db.DeleteNode(s.ctx, n.ID); err != nil {
+			s.log.Warn("ephemeral cleanup", "node", n.GivenName, "err", err)
+			continue
+		}
+		s.log.Info("removed ephemeral machine", "node", n.GivenName, "user", n.UserName, "last_seen", n.LastSeen)
+		removed++
+	}
+	if removed > 0 {
+		s.checkGeneration()
 	}
 }
 

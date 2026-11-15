@@ -217,6 +217,42 @@ CREATE TRIGGER nodes_move_unshare AFTER UPDATE OF user_id ON nodes
 	WHEN OLD.user_id IS NOT NEW.user_id
 	BEGIN DELETE FROM shares WHERE node_id = NEW.id; END;
 `,
+	// 7: machine lifecycle. Accounts can require approval for new machines
+	// (pre-approved auth keys skip it); machines record whether they're
+	// approved. Approval changes affect maps, so the trigger is rebuilt.
+	`
+ALTER TABLE users ADD COLUMN require_machine_approval INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE preauth_keys ADD COLUMN preapproved INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN approved INTEGER NOT NULL DEFAULT 1;
+DROP TRIGGER nodes_gen_upd;
+CREATE TRIGGER nodes_gen_upd AFTER UPDATE ON nodes
+	WHEN OLD.node_key IS NOT NEW.node_key OR OLD.disco_key IS NOT NEW.disco_key
+	  OR OLD.given_name IS NOT NEW.given_name OR OLD.endpoints IS NOT NEW.endpoints
+	  OR OLD.hostinfo IS NOT NEW.hostinfo OR OLD.user_id IS NOT NEW.user_id
+	  OR OLD.ipv4 IS NOT NEW.ipv4 OR OLD.ipv6 IS NOT NEW.ipv6 OR OLD.expires_at IS NOT NEW.expires_at
+	  OR OLD.approved IS NOT NEW.approved
+	BEGIN UPDATE generation SET value = value + 1; END;
+`,
+	// 8: access rules within an account: machine tags and per-account
+	// rules ("from → to on ports"). Both affect maps.
+	`
+ALTER TABLE nodes ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+CREATE TRIGGER nodes_gen_tags AFTER UPDATE OF tags ON nodes
+	WHEN OLD.tags IS NOT NEW.tags
+	BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TABLE acl_rules (
+	id         INTEGER PRIMARY KEY,
+	user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	src        TEXT NOT NULL,
+	dst        TEXT NOT NULL,
+	ports      TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+CREATE INDEX acl_rules_user ON acl_rules(user_id);
+CREATE TRIGGER acl_gen_ins AFTER INSERT ON acl_rules BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER acl_gen_del AFTER DELETE ON acl_rules BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER acl_gen_upd AFTER UPDATE ON acl_rules BEGIN UPDATE generation SET value = value + 1; END;
+`,
 }
 
 // Generation returns a counter that increases whenever nodes or users change
@@ -307,3 +343,7 @@ func isUniqueViolation(err error) bool {
 	}
 	return se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE || se.Code() == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY
 }
+
+// SQLForTest exposes the database handle to other packages' tests, for
+// setting up states the API doesn't offer directly. Not for production use.
+func (d *DB) SQLForTest() *sql.DB { return d.sql }

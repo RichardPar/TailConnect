@@ -35,6 +35,9 @@ journalctl -u tc-control -e        # server log (on the server)
 | `tls: failed to verify certificate: x509: certificate signed by unknown authority` | The server's certificate isn't trusted. Use a public CA, or add your CA to the system trust store and restart `tcd` ([details](installation.md#enable-https)). |
 | `register: control: 403 account is not active (pending approval or suspended)` | The auth key's account is waiting for approval or suspended. An operator approves or reactivates it (Accounts tab, or `tc-control users activate NAME`). |
 | `Notice: this machine's account is suspended or awaiting approval` (status) | Same cause, for a machine that already joined: it has no peers until the account is active again, then recovers by itself. |
+| `Notice: this machine is waiting for approval …` (status) | The account requires approval for new machines. The owner or an operator approves it (Machines → Approve, or `tc-control nodes approve ID`); it then connects by itself. |
+| `Notice: this machine's key has expired …` (status) | Its authorisation ran out (`-key-expiry`, 180 days by default). Run `sudo tc up --authkey KEY` on it with a key of its account. To stop a server expiring, set it to never expire (Machines → Never expire, or `tc-control nodes expiry ID never`). |
+| An ephemeral machine disappeared | Ephemeral machines are removed after 30 minutes offline (`-ephemeral-timeout`). Join long-lived machines with a normal key. |
 | `Logged out … Note: this machine was removed from the network` | The machine was removed (by its owner or an operator). Rejoin with `sudo tc up --authkey …`. |
 | `Warning: control unreachable: …` (status, while running) | The device lost contact with the server and is retrying. Tunnels keep working on the last map. Fix the server or the network; the device reconnects by itself. |
 | `create TUN tc0 (are you root?)` (tcd log) | See [tcd won't start](#tcd-wont-start) |
@@ -100,6 +103,12 @@ dig @100.100.100.100 peer.your-domain            # ask the resolver directly
 - **A renamed device still resolves to its old name.** Answers are cached for up to 5 minutes. Run `resolvectl flush-caches`.
 - **`laptop.home.internal` stopped working after upgrading to 0.6.** Names now include the account: `laptop.richard.home.internal`. Short names (`laptop`) still work.
 - **Another account's machine doesn't resolve.** By design, unless it's shared with you: then it's `machine.owner` (for example `nas.alice`).
+
+## Access rules
+
+- **A machine can't reach another of the same account.** If the account has any rules, only what they allow works. Check `tc-control rules list -user NAME` (or the Access rules tab) and the machines' tags (`nodes list --json`, or the Machines tab). `tc status` on the receiving machine shows what each peer may open there.
+- **A machine disappeared from `tc status` after adding a rule.** Machines that no rule lets talk in either direction aren't peers at all. Add a rule, or delete the last rule to allow everything again.
+- **The connection works one way only.** Rules are one-way: `tag:a → tag:b` lets a open connections to b. Add the reverse rule if b must open connections to a too.
 
 ## Sharing
 

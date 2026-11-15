@@ -31,7 +31,10 @@ type User struct {
 	Role         string
 	PasswordHash string `json:"-"` // "" = no password set (cannot sign in to the web portal)
 	SessionEpoch int64  `json:"-"` // bumped to invalidate web sessions
-	CreatedAt    time.Time
+	// RequireMachineApproval: new machines joining this account are cut off
+	// until the owner or an operator approves them.
+	RequireMachineApproval bool
+	CreatedAt              time.Time
 }
 
 func (u User) Active() bool      { return u.Status == StatusActive }
@@ -110,12 +113,12 @@ func validStatus(s string) bool {
 }
 func validRole(r string) bool { return r == RoleTenant || r == RoleOperator }
 
-const userCols = `id, name, status, role, password_hash, session_epoch, created_at`
+const userCols = `id, name, status, role, password_hash, session_epoch, require_machine_approval, created_at`
 
 func scanUser(r rowScanner) (User, error) {
 	var u User
 	var created int64
-	err := r.Scan(&u.ID, &u.Name, &u.Status, &u.Role, &u.PasswordHash, &u.SessionEpoch, &created)
+	err := r.Scan(&u.ID, &u.Name, &u.Status, &u.Role, &u.PasswordHash, &u.SessionEpoch, &u.RequireMachineApproval, &created)
 	u.CreatedAt = fromUnix(created)
 	return u, err
 }
@@ -187,6 +190,18 @@ func (d *DB) SetUserRole(ctx context.Context, name, role string) error {
 		return fmt.Errorf("%w: role %q", ErrInvalid, role)
 	}
 	return d.updateUser(ctx, name, `role = ?`, role)
+}
+
+// SetMachineApproval turns approval of new machines on or off for an account.
+func (d *DB) SetMachineApproval(ctx context.Context, name string, on bool) error {
+	res, err := d.sql.ExecContext(ctx, `UPDATE users SET require_machine_approval = ? WHERE name = ?`, on, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("user %q: %w", name, ErrNotFound)
+	}
+	return nil
 }
 
 // DeleteUser removes a user along with their nodes and auth keys.

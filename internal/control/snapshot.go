@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
+	"tailconnect/internal/acl"
 	"tailconnect/internal/db"
 	"tailconnect/internal/key"
 	"tailconnect/internal/protocol"
@@ -27,35 +29,58 @@ type snapshot struct {
 	// each machine is shared with.
 	sharedIn map[int64][]int64
 	sharedTo map[int64][]int64
-	keys     map[key.NodePublic]int64 // node key → machine ID (active accounts only)
+	keys     map[key.NodePublic]int64 // node key → machine ID (usable machines only)
+	// Access rules per account (nil = no rules: everything allowed).
+	policies map[int64]*acl.Policy
+	// built is when the snapshot was made, and stale when it stops being
+	// exact without a database change: the next key expiry (zero = never).
+	built, stale time.Time
 }
 
 type snapNode struct {
 	db    db.Node
 	proto protocol.Node // LastSeen cleared: maps don't carry it
 
+	acl acl.Machine
+
 	// The node's JSON as a peer, encoded at most once per snapshot for each
-	// way it can appear: own account, shared (no-initiate), shared (may
-	// initiate). Encoding is most of the cost of a map, and a node appears
-	// in many maps per generation.
-	encOnce [3]sync.Once
-	enc     [3][]byte
+	// way it appears (see peerView). Encoding is most of the cost of a map,
+	// and a node appears in many maps per generation, in only a few ways.
+	encMu sync.Mutex
+	enc   map[string][]byte
 }
 
-const (
-	peerOwn = iota
-	peerSharedNoInitiate
-	peerSharedInitiate
-)
+// peerView is how a peer appears in one machine's map: whether it's
+// another account's machine (shared), and what it may open there.
+type peerView struct {
+	shared     bool
+	noInitiate bool
+	inbound    []protocol.PortRange // with noInitiate: still allowed
+}
 
-func (n *snapNode) peerJSON(variant int) []byte {
-	n.encOnce[variant].Do(func() {
-		pn := n.proto
-		pn.Shared = variant != peerOwn
-		pn.NoInitiate = variant == peerSharedNoInitiate
-		n.enc[variant], _ = json.Marshal(pn)
-	})
-	return n.enc[variant]
+func (v peerView) key() string {
+	return fmt.Sprintf("%t/%t/%s", v.shared, v.noInitiate, acl.FormatPorts(acl.Access{Ranges: v.inbound}))
+}
+
+func (v peerView) apply(pn *protocol.Node) {
+	pn.Shared, pn.NoInitiate, pn.Inbound = v.shared, v.noInitiate, v.inbound
+}
+
+func (n *snapNode) peerJSON(v peerView) []byte {
+	k := v.key()
+	n.encMu.Lock()
+	defer n.encMu.Unlock()
+	if b, ok := n.enc[k]; ok {
+		return b
+	}
+	pn := n.proto
+	v.apply(&pn)
+	b, _ := json.Marshal(pn)
+	if n.enc == nil {
+		n.enc = map[string][]byte{}
+	}
+	n.enc[k] = b
+	return b
 }
 
 // currentSnapshot returns the snapshot for the database's current
@@ -68,7 +93,7 @@ func (s *Server) currentSnapshot(ctx context.Context) (*snapshot, error) {
 	}
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
-	if s.snap != nil && s.snap.gen == gen {
+	if s.snap != nil && s.snap.gen == gen && (s.snap.stale.IsZero() || time.Now().Before(s.snap.stale)) {
 		return s.snap, nil
 	}
 	// Read the generation before the data: a change racing with the build
@@ -90,9 +115,29 @@ func (s *Server) buildSnapshot(ctx context.Context, gen int64) (*snapshot, error
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now()
 	snap := &snapshot{
-		gen: gen, nodes: make(map[int64]*snapNode, len(nodes)), byUser: map[int64][]int64{},
+		gen: gen, built: now, nodes: make(map[int64]*snapNode, len(nodes)), byUser: map[int64][]int64{},
 		sharedIn: map[int64][]int64{}, sharedTo: map[int64][]int64{}, keys: make(map[key.NodePublic]int64, len(nodes)),
+		policies: map[int64]*acl.Policy{},
+	}
+	rules, err := s.db.ListRules(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	byAccount := map[int64][]acl.Rule{}
+	for _, r := range rules {
+		byAccount[r.UserID] = append(byAccount[r.UserID], acl.Rule{ID: r.ID, Src: r.Src, Dst: r.Dst, Ports: r.Ports})
+	}
+	for uid, rs := range byAccount {
+		p, err := acl.Compile(rs)
+		if err != nil {
+			// Rules are validated when saved; if one is broken anyway,
+			// fail closed for that account rather than open.
+			s.log.Error("access rules don't compile; denying all traffic in the account", "user_id", uid, "err", err)
+			p = acl.DenyAll()
+		}
+		snap.policies[uid] = p
 	}
 	for _, n := range nodes {
 		pn, err := s.toProtocol(n)
@@ -100,17 +145,20 @@ func (s *Server) buildSnapshot(ctx context.Context, gen int64) (*snapshot, error
 			return nil, err
 		}
 		pn.LastSeen = nil
-		snap.nodes[n.ID] = &snapNode{db: n, proto: pn}
+		snap.nodes[n.ID] = &snapNode{db: n, proto: pn, acl: acl.Machine{ID: n.ID, Name: n.GivenName, Tags: n.Tags}}
 		snap.byUser[n.UserID] = append(snap.byUser[n.UserID], n.ID)
-		if n.UserStatus == db.StatusActive {
+		if n.Usable(now) {
 			snap.keys[pn.NodeKey] = n.ID
+			if !n.ExpiresAt.IsZero() && (snap.stale.IsZero() || n.ExpiresAt.Before(snap.stale)) {
+				snap.stale = n.ExpiresAt // a key expiring changes maps
+			}
 		}
 	}
 	for _, ids := range snap.byUser {
 		slices.Sort(ids)
 	}
 	for _, sh := range shares {
-		if sh.InEffect() && snap.nodes[sh.NodeID] != nil {
+		if sh.InEffect() && snap.nodes[sh.NodeID] != nil && snap.nodes[sh.NodeID].db.Usable(now) {
 			snap.sharedIn[sh.RecipientID] = append(snap.sharedIn[sh.RecipientID], sh.NodeID)
 			snap.sharedTo[sh.NodeID] = append(snap.sharedTo[sh.NodeID], sh.RecipientID)
 		}
@@ -123,7 +171,7 @@ func (s *Server) buildSnapshot(ctx context.Context, gen int64) (*snapshot, error
 type mapPlan struct {
 	resp  protocol.MapResponse
 	peers []*snapNode
-	how   []int // peerOwn, peerSharedNoInitiate or peerSharedInitiate
+	views []peerView
 }
 
 // planMap selects node id's peers. Tenants are isolated: a machine sees its
@@ -144,13 +192,11 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 		return nil, fmt.Errorf("node %d: %w", id, db.ErrNotFound)
 	}
 	self := sn.db
-	if self.UserStatus != db.StatusActive {
-		// Keep the stream (so reactivation restores the map at once), but
-		// cut the device off: no peers, relays or DNS.
-		return &mapPlan{resp: protocol.MapResponse{
-			Self:   sn.proto,
-			Notice: "this machine's account is suspended or awaiting approval; ask the server's operator",
-		}}, nil
+	if notice := cutOffNotice(self, snap.built); notice != "" {
+		// Keep the stream (so approval, reactivation or re-authentication
+		// restores the map at once), but cut the device off: no peers,
+		// relays or DNS.
+		return &mapPlan{resp: protocol.MapResponse{Self: sn.proto, Notice: notice}}, nil
 	}
 
 	sharedTo := map[int64]bool{} // accounts self is shared with
@@ -180,22 +226,29 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 			Relays: s.cfg.Relays,
 		},
 		peers: make([]*snapNode, 0, len(peerIDs)),
-		how:   make([]int, 0, len(peerIDs)),
+		views: make([]peerView, 0, len(peerIDs)),
 	}
 	for _, pid := range peerIDs {
 		p := snap.nodes[pid]
-		if pid == id || p.db.UserStatus != db.StatusActive {
-			continue // suspended accounts' machines drop out of everyone's map
+		if pid == id || !p.db.Usable(snap.built) {
+			continue // cut-off machines drop out of everyone's map
 		}
-		how := peerOwn
+		var view peerView
 		if p.db.UserID != self.UserID {
-			how = peerSharedNoInitiate
-			if sharedTo[p.db.UserID] {
-				how = peerSharedInitiate
+			// Another account's machine, here through a share: it may open
+			// connections only if self is shared with its account.
+			view = peerView{shared: true, noInitiate: !sharedTo[p.db.UserID]}
+		} else if policy := snap.policies[self.UserID]; policy != nil {
+			in := policy.Allowed(p.acl, sn.acl)
+			if in.None() && policy.Allowed(sn.acl, p.acl).None() {
+				continue // the rules don't let them talk at all: not peers
+			}
+			if !in.All {
+				view = peerView{noInitiate: true, inbound: in.Ranges}
 			}
 		}
 		plan.peers = append(plan.peers, p)
-		plan.how = append(plan.how, how)
+		plan.views = append(plan.views, view)
 	}
 	return plan, nil
 }
@@ -210,8 +263,7 @@ func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, 
 	resp.Peers = make([]protocol.Node, len(plan.peers))
 	for i, p := range plan.peers {
 		pn := p.proto // a copy: the flags are per map
-		pn.Shared = plan.how[i] != peerOwn
-		pn.NoInitiate = plan.how[i] == peerSharedNoInitiate
+		plan.views[i].apply(&pn)
 		resp.Peers[i] = pn
 	}
 	return resp, nil
@@ -241,7 +293,7 @@ func (s *Server) BuildMapJSON(ctx context.Context, id int64) ([]byte, error) {
 	size := len(head)
 	encs := make([][]byte, len(plan.peers))
 	for i, p := range plan.peers {
-		encs[i] = p.peerJSON(plan.how[i])
+		encs[i] = p.peerJSON(plan.views[i])
 		size += len(encs[i]) + 1
 	}
 	out := make([]byte, 0, size)
@@ -256,4 +308,26 @@ func (s *Server) BuildMapJSON(ctx context.Context, id int64) ([]byte, error) {
 	out = append(out, ']')
 	out = append(out, head[at+len(peersPlaceholder):]...)
 	return out, nil
+}
+
+// cutOffNotice explains why machine n is cut off from the network at time
+// now, or is "" if it isn't.
+func cutOffNotice(n db.Node, now time.Time) string {
+	switch {
+	case n.UserStatus != db.StatusActive:
+		return "this machine's account is suspended or awaiting approval; ask the server's operator"
+	case !n.Approved:
+		return "this machine is waiting for approval by its account's owner or an operator (web portal: Machines)"
+	case n.Expired(now):
+		return "this machine's key has expired; re-authenticate with: sudo tc up --authkey KEY"
+	}
+	return ""
+}
+
+// snapshotStale reports whether the current snapshot has passed the moment
+// it stops being exact (a key expired), so maps must be rebuilt.
+func (s *Server) snapshotStale() bool {
+	s.snapMu.Lock()
+	defer s.snapMu.Unlock()
+	return s.snap != nil && !s.snap.stale.IsZero() && !time.Now().Before(s.snap.stale)
 }

@@ -30,9 +30,20 @@ type Node struct {
 	Endpoints  []netip.AddrPort
 	HomeRelay  int
 	Ephemeral  bool
+	Approved   bool     // false: the account requires approval and nobody has given it yet
+	Tags       []string // access-rule tags
 	CreatedAt  time.Time
 	LastSeen   time.Time // zero = never
-	ExpiresAt  time.Time // zero = never
+	ExpiresAt  time.Time // key expiry; zero = never
+}
+
+// Expired reports whether the machine's key has expired at time now.
+func (n Node) Expired(now time.Time) bool { return !n.ExpiresAt.IsZero() && !now.Before(n.ExpiresAt) }
+
+// Usable reports whether the machine may be part of the network at time
+// now: its account is active, it's approved and its key hasn't expired.
+func (n Node) Usable(now time.Time) bool {
+	return n.UserStatus == StatusActive && n.Approved && !n.Expired(now)
 }
 
 // AllocFunc picks addresses for a new node given the set of IPv4s in use.
@@ -46,6 +57,10 @@ type RegisterParams struct {
 	Hostinfo   string // JSON
 	AuthKey    string
 	Alloc      AllocFunc
+	// KeyExpiry is how long a new or re-authenticated machine stays
+	// authorised (0 = never). Re-authenticating renews it, except for
+	// machines set to never expire.
+	KeyExpiry time.Duration
 }
 
 type RegisterResult struct {
@@ -55,12 +70,35 @@ type RegisterResult struct {
 }
 
 // applyAuthKey consumes key (if any) and moves node id to the key's user.
-func applyAuthKey(ctx context.Context, tx *sql.Tx, id int64, key string, now time.Time) error {
+// It renews the machine's key expiry (unless it's set to never expire) and
+// works out approval: kept within the same account (a pre-approved key
+// approves), recomputed when moving to another account.
+func applyAuthKey(ctx context.Context, tx *sql.Tx, id int64, key string, now time.Time, keyExpiry time.Duration) error {
 	if key == "" {
 		return nil
 	}
 	k, err := consumePreAuthKey(ctx, tx, key, now)
 	if err != nil {
+		return err
+	}
+	var curUser int64
+	var curApproved bool
+	var curExpires sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT user_id, approved, expires_at FROM nodes WHERE id = ?`, id).
+		Scan(&curUser, &curApproved, &curExpires); err != nil {
+		return err
+	}
+	approved := curApproved || k.Preapproved
+	if curUser != k.UserID {
+		if approved, err = approvedOnJoin(ctx, tx, k); err != nil {
+			return err
+		}
+	}
+	expires := curExpires // NULL = never expires: kept
+	if curExpires.Valid {
+		expires = expiryAt(now, keyExpiry)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET approved = ?, expires_at = ? WHERE id = ?`, approved, expires, id); err != nil {
 		return err
 	}
 	// Moving to another tenant keeps the name unless it is taken there.
@@ -107,7 +145,7 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 			p.DiscoKey, p.Hostname, p.Hostinfo, unix(now), existing.ID); err != nil {
 			return RegisterResult{}, err
 		}
-		if err := applyAuthKey(ctx, tx, existing.ID, p.AuthKey, now); err != nil {
+		if err := applyAuthKey(ctx, tx, existing.ID, p.AuthKey, now, p.KeyExpiry); err != nil {
 			return RegisterResult{}, err
 		}
 		n, err := getNodeTx(ctx, tx, existing.ID)
@@ -130,7 +168,7 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 		if err != nil {
 			return RegisterResult{}, err
 		}
-		if err := applyAuthKey(ctx, tx, existing.ID, p.AuthKey, now); err != nil {
+		if err := applyAuthKey(ctx, tx, existing.ID, p.AuthKey, now, p.KeyExpiry); err != nil {
 			return RegisterResult{}, err
 		}
 		n, err := getNodeTx(ctx, tx, existing.ID)
@@ -163,12 +201,16 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 	if err != nil {
 		return RegisterResult{}, err
 	}
+	approved, err := approvedOnJoin(ctx, tx, k)
+	if err != nil {
+		return RegisterResult{}, err
+	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO nodes(user_id, machine_key, node_key, disco_key, hostname, given_name, hostinfo,
-		                  ipv4, ipv6, ephemeral, preauth_key_id, created_at, last_seen)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                  ipv4, ipv6, ephemeral, preauth_key_id, created_at, last_seen, approved, expires_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		k.UserID, p.MachineKey, p.NodeKey, p.DiscoKey, p.Hostname, name, p.Hostinfo,
-		v4.String(), v6.String(), k.Ephemeral, k.ID, unix(now), unix(now))
+		v4.String(), v6.String(), k.Ephemeral, k.ID, unix(now), unix(now), approved, expiryAt(now, p.KeyExpiry))
 	if isUniqueViolation(err) {
 		return RegisterResult{}, fmt.Errorf("node key: %w", ErrExists)
 	}
@@ -217,16 +259,16 @@ func (d *DB) TouchNode(ctx context.Context, id int64) error {
 
 const nodeSelect = `
 	SELECT n.id, n.user_id, u.name, u.status, n.machine_key, n.node_key, n.disco_key, n.hostname, n.given_name,
-	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.created_at, n.last_seen, n.expires_at
+	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.approved, n.tags, n.created_at, n.last_seen, n.expires_at
 	FROM nodes n JOIN users u ON u.id = n.user_id`
 
 func scanNode(r rowScanner) (Node, error) {
 	var n Node
-	var v4, v6, eps string
+	var v4, v6, eps, tags string
 	var created int64
 	var lastSeen, expires sql.NullInt64
 	err := r.Scan(&n.ID, &n.UserID, &n.UserName, &n.UserStatus, &n.MachineKey, &n.NodeKey, &n.DiscoKey, &n.Hostname,
-		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &created, &lastSeen, &expires)
+		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &n.Approved, &tags, &created, &lastSeen, &expires)
 	if err != nil {
 		return Node{}, err
 	}
@@ -238,6 +280,9 @@ func scanNode(r rowScanner) (Node, error) {
 	}
 	if err := json.Unmarshal([]byte(eps), &n.Endpoints); err != nil {
 		return Node{}, fmt.Errorf("node %d: bad endpoints: %w", n.ID, err)
+	}
+	if err := json.Unmarshal([]byte(tags), &n.Tags); err != nil {
+		return Node{}, fmt.Errorf("node %d: bad tags: %w", n.ID, err)
 	}
 	n.CreatedAt = fromUnix(created)
 	n.LastSeen = fromNullUnix(lastSeen)
@@ -399,4 +444,84 @@ func truncate(s string, n int) string {
 		return s[:n]
 	}
 	return s
+}
+
+// approvedOnJoin reports whether a machine joining with key k starts out
+// approved: unless its account requires approval and k isn't pre-approved.
+func approvedOnJoin(ctx context.Context, tx *sql.Tx, k PreAuthKey) (bool, error) {
+	var require bool
+	if err := tx.QueryRowContext(ctx, `SELECT require_machine_approval FROM users WHERE id = ?`, k.UserID).Scan(&require); err != nil {
+		return false, err
+	}
+	return !require || k.Preapproved, nil
+}
+
+// expiryAt is the key expiry for a machine authorised at now (NULL = never).
+func expiryAt(now time.Time, d time.Duration) sql.NullInt64 {
+	if d <= 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: unix(now.Add(d)), Valid: true}
+}
+
+// ApproveNode approves a machine waiting for approval.
+func (d *DB) ApproveNode(ctx context.Context, id int64) error {
+	res, err := d.sql.ExecContext(ctx, `UPDATE nodes SET approved = 1 WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("node %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// SetNodeExpiry sets when a machine's key expires (zero = never).
+func (d *DB) SetNodeExpiry(ctx context.Context, id int64, at time.Time) error {
+	var v sql.NullInt64
+	if !at.IsZero() {
+		v = sql.NullInt64{Int64: unix(at), Valid: true}
+	}
+	res, err := d.sql.ExecContext(ctx, `UPDATE nodes SET expires_at = ? WHERE id = ?`, v, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("node %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// StaleEphemeralNodes lists ephemeral machines not seen since before.
+func (d *DB) StaleEphemeralNodes(ctx context.Context, before time.Time) ([]Node, error) {
+	rows, err := d.sql.QueryContext(ctx, nodeSelect+` WHERE n.ephemeral = 1 AND COALESCE(n.last_seen, n.created_at) < ? ORDER BY n.id`, unix(before))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// SetNodeTags replaces a machine's access-rule tags (validated by the caller).
+func (d *DB) SetNodeTags(ctx context.Context, id int64, tags []string) error {
+	if tags == nil {
+		tags = []string{}
+	}
+	b, _ := json.Marshal(tags)
+	res, err := d.sql.ExecContext(ctx, `UPDATE nodes SET tags = ? WHERE id = ?`, string(b), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("node %d: %w", id, ErrNotFound)
+	}
+	return nil
 }

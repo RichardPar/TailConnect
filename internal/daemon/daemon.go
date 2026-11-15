@@ -398,7 +398,7 @@ func peerStatus(n protocol.Node) localapi.PeerStatus {
 	return localapi.PeerStatus{
 		Name: n.Name, HostName: n.Hostinfo.Hostname, User: n.User, OS: n.Hostinfo.OS,
 		Addresses: n.Addresses, NodeKey: n.NodeKey, Endpoints: n.Endpoints,
-		Shared: n.Shared, NoInitiate: n.NoInitiate,
+		Shared: n.Shared, NoInitiate: n.NoInitiate, Inbound: n.Inbound, Tags: n.Tags, KeyExpiry: n.KeyExpiry,
 	}
 }
 

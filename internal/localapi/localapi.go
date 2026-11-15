@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"tailconnect/internal/key"
+	"tailconnect/internal/protocol"
 )
 
 // Daemon states.
@@ -88,6 +89,11 @@ type PeerStatus struct {
 	// NoInitiate: it may only reply to connections this machine opens.
 	Shared     bool `json:",omitempty"`
 	NoInitiate bool `json:",omitempty"`
+	// Inbound (with NoInitiate) is what the peer may still open here.
+	Inbound []protocol.PortRange `json:",omitempty"`
+	Tags    []string             `json:",omitempty"`
+	// KeyExpiry is when the machine must re-authenticate (nil = never).
+	KeyExpiry *time.Time `json:",omitempty"`
 }
 
 // Backend is implemented by the daemon.

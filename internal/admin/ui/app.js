@@ -161,6 +161,7 @@ async function enterApp() {
   $("who-role").textContent = me.operator ? "operator" : "tenant";
   document.querySelectorAll(".op-only").forEach((e) => (e.hidden = !me.operator));
   $("password-form").hidden = me.token;
+  $("settings-form").hidden = me.token;
   $("token-account").hidden = !me.token;
   $("account-info").textContent = me.token
     ? "Signed in with the admin token."
@@ -191,6 +192,10 @@ async function loadStatus() {
   stats.push(stat(s.baseDomain, "MagicDNS domain", true), stat(s.version || "dev", "server version", true));
   $("stats").replaceChildren(...stats);
   document.querySelectorAll(".control-url").forEach((e) => (e.textContent = s.controlURL || "URL"));
+  const mb = $("machine-badge");
+  mb.hidden = !s.pendingMachines;
+  mb.textContent = s.pendingMachines || "";
+  mb.title = "machines waiting for approval";
   const sb = $("share-badge");
   sb.hidden = !s.pendingShares;
   sb.textContent = s.pendingShares || "";
@@ -210,12 +215,18 @@ async function loadNodes() {
     ...nodes.map((n) =>
       el("tr", {},
         el("td", {}, el("span", { class: "dot" + (n.online ? " on" : ""), title: n.online ? "online" : "offline" })),
-        el("td", {}, el("div", {}, n.name), el("div", { class: "sub" }, n.fqdn), n.ephemeral && el("span", { class: "badge" }, "ephemeral")),
+        el("td", {}, el("div", {}, n.name), el("div", { class: "sub" }, n.fqdn),
+          n.ephemeral && el("span", { class: "badge" }, "ephemeral"),
+          n.tags.length > 0 && el("div", { class: "tags" }, n.tags.map((t) => el("span", { class: "badge" }, "tag:" + t)))),
         me.operator && el("td", {}, n.user),
         el("td", { class: "mono" }, el("div", {}, n.ipv4), el("div", { class: "sub" }, n.ipv6)),
         el("td", {}, n.os || "–", el("div", { class: "sub" }, n.hostname)),
         el("td", { title: n.lastSeen ? fmtDate(n.lastSeen) : "" }, ago(n.lastSeen)),
+        el("td", {}, keyCell(n)),
         el("td", { class: "actions" },
+          !n.approved && el("button", { class: "primary small", onclick: () => approveNode(n) }, "Approve"),
+          el("button", { class: "ghost", onclick: () => toggleExpiry(n) }, n.keyExpiry ? "Never expire" : "Set expiry"),
+          el("button", { class: "ghost", onclick: () => editTags(n) }, "Tags"),
           el("button", { class: "ghost", onclick: () => renameNode(n) }, "Rename"),
           el("button", { class: "danger", onclick: () => deleteNode(n) }, "Remove"),
         ),
@@ -223,6 +234,47 @@ async function loadNodes() {
     ),
   );
   $("nodes-updated").textContent = "updated " + new Date().toLocaleTimeString();
+}
+
+// keyCell shows approval and key expiry.
+function keyCell(n) {
+  if (!n.approved) return el("span", { class: "badge warn" }, "needs approval");
+  if (n.expired) return el("span", { class: "badge bad" }, "expired");
+  if (!n.keyExpiry) return el("span", { class: "sub" }, "never expires");
+  const days = Math.round((new Date(n.keyExpiry) - Date.now()) / 86400000);
+  const label = days > 60 ? `${Math.round(days / 30)} months` : `${days} days`;
+  return el("span", { class: days <= 14 ? "badge warn" : "sub", title: fmtDate(n.keyExpiry) }, "expires in " + label);
+}
+
+async function approveNode(n) {
+  try {
+    await api("POST", `/api/v1/nodes/${n.id}/approve`, {});
+    toast(`Approved ${n.name}`);
+    refresh();
+  } catch (e) { handleErr(e); }
+}
+
+async function toggleExpiry(n) {
+  const never = !!n.keyExpiry;
+  const q = never
+    ? `Let ${n.name}'s key never expire? Use this for servers that must not drop off.`
+    : `Give ${n.name} the server's normal key lifetime, starting now? It will need re-authenticating when it expires.`;
+  if (!confirm(q)) return;
+  try {
+    await api("POST", `/api/v1/nodes/${n.id}/expiry`, { expiry: never ? "never" : "default" });
+    toast(never ? `${n.name}'s key never expires` : `${n.name}'s key expiry set`);
+    refresh();
+  } catch (e) { handleErr(e); }
+}
+
+async function editTags(n) {
+  const v = prompt(`Tags for ${n.name}, separated by commas (used by access rules, e.g. server, db):`, n.tags.join(", "));
+  if (v === null) return;
+  try {
+    const r = await api("POST", `/api/v1/nodes/${n.id}/tags`, { tags: v.split(",") });
+    toast(r.tags.length ? `${n.name}: ${r.tags.map((t) => "tag:" + t).join(", ")}` : `Removed ${n.name}'s tags`);
+    refresh();
+  } catch (e) { handleErr(e); }
 }
 
 async function renameNode(n) {
@@ -262,7 +314,7 @@ async function loadKeys() {
         el("td", {}, k.id),
         el("td", { class: "mono" }, k.prefix + "…"),
         me.operator && el("td", {}, k.user),
-        el("td", {}, k.reusable ? "reusable" : "one-off", k.ephemeral && el("div", { class: "sub" }, "ephemeral")),
+        el("td", {}, k.reusable ? "reusable" : "one-off", k.ephemeral && el("div", { class: "sub" }, "ephemeral"), k.preapproved && el("div", { class: "sub" }, "pre-approved")),
         el("td", {}, k.uses),
         el("td", { title: fmtDate(k.expires) }, fmtDate(k.expires)),
         el("td", {}, el("span", { class: "badge " + status[1] }, status[0])),
@@ -283,7 +335,7 @@ async function revokeKey(k) {
 
 $("key-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  const body = { ttl: $("key-ttl").value, reusable: $("key-reusable").checked, ephemeral: $("key-ephemeral").checked };
+  const body = { ttl: $("key-ttl").value, reusable: $("key-reusable").checked, ephemeral: $("key-ephemeral").checked, preapproved: $("key-preapproved").checked };
   if (me.operator) {
     if (!$("key-user").value) return toast("Create an account first", true);
     body.user = $("key-user").value;
@@ -292,6 +344,62 @@ $("key-form").addEventListener("submit", async (ev) => {
     const r = await api("POST", "/api/v1/keys", body);
     $("new-key-value").textContent = r.key;
     $("new-key").hidden = false;
+    refresh();
+  } catch (e) { handleErr(e); }
+});
+
+// ---- access rules ----
+
+async function loadRules() {
+  let account = "";
+  if (me.operator) {
+    const users = await api("GET", "/api/v1/users");
+    const sel = $("rules-account");
+    const prev = sel.value || (me.token ? (users[0] || {}).name : me.login);
+    sel.replaceChildren(...users.map((u) => el("option", { value: u.name }, u.name)));
+    if (users.some((u) => u.name === prev)) sel.value = prev;
+    account = sel.value;
+  }
+  const q = account ? `?user=${encodeURIComponent(account)}` : "";
+  const [rules, nodes] = await Promise.all([api("GET", "/api/v1/rules" + q), api("GET", "/api/v1/nodes")]);
+  const mine = nodes.filter((n) => !account || n.user === account);
+  const tags = [...new Set(mine.flatMap((n) => n.tags))].sort();
+  $("rule-selectors").replaceChildren(
+    el("option", { value: "*" }), ...tags.map((t) => el("option", { value: "tag:" + t })), ...mine.map((n) => el("option", { value: n.name })));
+  $("rules-mode").textContent = rules.length === 0
+    ? "No rules: every machine of the account can reach every other, on any port. Add a rule to switch to allowing only what the rules say."
+    : "Only what these rules allow is reachable between the account's machines (plus replies). Everything else is blocked.";
+  $("rules-body").replaceChildren(...rules.map((r) =>
+    el("tr", {},
+      el("td", { class: "mono" }, r.src),
+      el("td", { class: "mono" }, r.dst),
+      el("td", { class: "mono" }, r.ports),
+      el("td", {}, fmtDate(r.created)),
+      el("td", { class: "actions" }, el("button", { class: "danger", onclick: () => deleteRule(r, rules.length) }, "Delete")))));
+}
+
+async function deleteRule(r, count) {
+  const extra = count === 1 ? " It's the last rule: everything becomes reachable again." : "";
+  if (!confirm(`Delete the rule ${r.src} → ${r.dst} on ${r.ports}?${extra}`)) return;
+  try {
+    await api("DELETE", `/api/v1/rules/${r.id}`);
+    toast("Rule deleted");
+    refresh();
+  } catch (e) { handleErr(e); }
+}
+
+$("rules-account").addEventListener("change", () => refresh());
+
+$("rule-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const body = { src: $("rule-src").value, dst: $("rule-dst").value, ports: $("rule-ports").value || "*" };
+  if (me.operator) body.user = $("rules-account").value;
+  try {
+    const first = $("rules-body").children.length === 0;
+    if (first && !confirm("This is the account's first rule: from now on only what the rules allow is reachable. Continue?")) return;
+    const r = await api("POST", "/api/v1/rules", body);
+    $("rule-src").value = $("rule-dst").value = $("rule-ports").value = "";
+    toast(`Added ${r.src} → ${r.dst} on ${r.ports}`);
     refresh();
   } catch (e) { handleErr(e); }
 });
@@ -507,6 +615,19 @@ $("invite-form").addEventListener("submit", async (ev) => {
 
 // ---- my account ----
 
+async function loadAccount() {
+  if (me.token) return;
+  const st = await api("GET", "/api/v1/me/settings");
+  $("require-approval").checked = st.requireMachineApproval;
+}
+
+$("require-approval").addEventListener("change", async () => {
+  try {
+    const st = await api("POST", "/api/v1/me/settings", { requireMachineApproval: $("require-approval").checked });
+    toast(st.requireMachineApproval ? "New machines now need your approval" : "New machines are approved automatically");
+  } catch (e) { handleErr(e); }
+});
+
 $("password-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   if ($("pw-new").value !== $("pw-new2").value) return toast("The new passwords don't match", true);
@@ -536,6 +657,8 @@ async function refresh() {
     if (currentTab === "nodes") await loadNodes();
     else if (currentTab === "keys") await loadKeys();
     else if (currentTab === "sharing") await loadSharing();
+    else if (currentTab === "rules") await loadRules();
+    else if (currentTab === "account") await loadAccount();
     else if (currentTab === "users") { await loadUsers(); await loadInvites(); }
   } catch (e) { handleErr(e); }
 }

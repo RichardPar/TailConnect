@@ -24,10 +24,12 @@ type PreAuthKey struct {
 	UserName  string
 	Reusable  bool
 	Ephemeral bool
-	Uses      int
-	CreatedAt time.Time
-	ExpiresAt time.Time
-	Revoked   bool
+	// Preapproved: machines joining with it skip the account's machine approval.
+	Preapproved bool
+	Uses        int
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+	Revoked     bool
 }
 
 // Usable reports whether the key could still register a new node at time now.
@@ -36,10 +38,11 @@ func (k PreAuthKey) Usable(now time.Time) bool {
 }
 
 type CreatePreAuthKeyParams struct {
-	UserID    int64
-	Reusable  bool
-	Ephemeral bool
-	TTL       time.Duration
+	UserID      int64
+	Reusable    bool
+	Ephemeral   bool
+	Preapproved bool
+	TTL         time.Duration
 }
 
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -61,17 +64,18 @@ func (d *DB) CreatePreAuthKey(ctx context.Context, p CreatePreAuthKeyParams) (st
 	secret := AuthKeyPrefix + strings.ToLower(b32.EncodeToString(raw[:]))
 	now := d.now()
 	k := PreAuthKey{
-		Prefix:    secret[:len(AuthKeyPrefix)+8],
-		UserID:    p.UserID,
-		Reusable:  p.Reusable,
-		Ephemeral: p.Ephemeral,
-		CreatedAt: fromUnix(unix(now)),
-		ExpiresAt: fromUnix(unix(now.Add(p.TTL))),
+		Prefix:      secret[:len(AuthKeyPrefix)+8],
+		UserID:      p.UserID,
+		Reusable:    p.Reusable,
+		Ephemeral:   p.Ephemeral,
+		Preapproved: p.Preapproved,
+		CreatedAt:   fromUnix(unix(now)),
+		ExpiresAt:   fromUnix(unix(now.Add(p.TTL))),
 	}
 	res, err := d.sql.ExecContext(ctx, `
-		INSERT INTO preauth_keys(hash, prefix, user_id, reusable, ephemeral, created_at, expires_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?)`,
-		hashAuthKey(secret), k.Prefix, k.UserID, k.Reusable, k.Ephemeral, unix(k.CreatedAt), unix(k.ExpiresAt))
+		INSERT INTO preauth_keys(hash, prefix, user_id, reusable, ephemeral, preapproved, created_at, expires_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		hashAuthKey(secret), k.Prefix, k.UserID, k.Reusable, k.Ephemeral, k.Preapproved, unix(k.CreatedAt), unix(k.ExpiresAt))
 	if err != nil {
 		return "", PreAuthKey{}, err
 	}
@@ -82,14 +86,14 @@ func (d *DB) CreatePreAuthKey(ctx context.Context, p CreatePreAuthKeyParams) (st
 	return secret, k, nil
 }
 
-const preauthCols = `k.id, k.prefix, k.user_id, u.name, k.reusable, k.ephemeral, k.uses, k.created_at, k.expires_at, k.revoked`
+const preauthCols = `k.id, k.prefix, k.user_id, u.name, k.reusable, k.ephemeral, k.preapproved, k.uses, k.created_at, k.expires_at, k.revoked`
 
 type rowScanner interface{ Scan(...any) error }
 
 func scanPreAuthKey(r rowScanner) (PreAuthKey, error) {
 	var k PreAuthKey
 	var created, expires int64
-	err := r.Scan(&k.ID, &k.Prefix, &k.UserID, &k.UserName, &k.Reusable, &k.Ephemeral, &k.Uses, &created, &expires, &k.Revoked)
+	err := r.Scan(&k.ID, &k.Prefix, &k.UserID, &k.UserName, &k.Reusable, &k.Ephemeral, &k.Preapproved, &k.Uses, &created, &expires, &k.Revoked)
 	k.CreatedAt, k.ExpiresAt = fromUnix(created), fromUnix(expires)
 	return k, err
 }

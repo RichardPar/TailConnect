@@ -335,3 +335,95 @@ func TestSharingAPI(t *testing.T) {
 		t.Fatalf("leave: %d", code)
 	}
 }
+
+func TestLifecycleAPI(t *testing.T) {
+	f := newFx(t)
+	f.srv.info.KeyExpiry = 180 * 24 * time.Hour
+	acme := f.account("acme", db.RoleTenant)
+	globex := f.account("globex", db.RoleTenant)
+
+	// Require approval for new machines in acme.
+	if code, m, _ := f.do(acme, "POST", "/api/v1/me/settings", map[string]bool{"requireMachineApproval": true}, nil); code != 200 || m["requireMachineApproval"] != true {
+		t.Fatalf("settings: %d %v", code, m)
+	}
+	if _, m, _ := f.do(acme, "GET", "/api/v1/me/settings", nil, nil); m["requireMachineApproval"] != true {
+		t.Fatalf("settings read back: %v", m)
+	}
+	id := f.machine("acme", "laptop")
+	if _, m, _ := f.do(acme, "GET", "/api/v1/status", nil, nil); m["pendingMachines"].(float64) != 1 {
+		t.Fatalf("pending machines badge: %v", m["pendingMachines"])
+	}
+	// Only acme (or an operator) can approve it.
+	if code, _, _ := f.do(globex, "POST", fmt.Sprintf("/api/v1/nodes/%d/approve", id), map[string]string{}, nil); code != 404 {
+		t.Fatalf("approve by another account: %d", code)
+	}
+	if code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/approve", id), map[string]string{}, nil); code != 200 || m["approved"] != true {
+		t.Fatalf("approve: %d %v", code, m)
+	}
+	// Expiry: never, then back to the default lifetime.
+	if code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/expiry", id), map[string]string{"expiry": "never"}, nil); code != 200 || m["keyExpiry"] != nil {
+		t.Fatalf("expiry never: %d %v", code, m)
+	}
+	code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/expiry", id), map[string]string{"expiry": "default"}, nil)
+	if code != 200 || m["keyExpiry"] == nil {
+		t.Fatalf("expiry default: %d %v", code, m)
+	}
+	exp, _ := time.Parse(time.RFC3339, m["keyExpiry"].(string))
+	if d := time.Until(exp); d < 179*24*time.Hour || d > 181*24*time.Hour {
+		t.Fatalf("default expiry %v away, want ~180 days", d)
+	}
+	if code, _, _ := f.do(globex, "POST", fmt.Sprintf("/api/v1/nodes/%d/expiry", id), map[string]string{"expiry": "never"}, nil); code != 404 {
+		t.Fatalf("expiry by another account: %d", code)
+	}
+	// Pre-approved keys.
+	if code, m, _ := f.do(acme, "POST", "/api/v1/keys", map[string]any{"ttl": "1h", "preapproved": true}, nil); code != 201 || m["info"].(map[string]any)["preapproved"] != true {
+		t.Fatalf("pre-approved key: %d %v", code, m)
+	}
+}
+
+func TestRulesAPI(t *testing.T) {
+	f := newFx(t)
+	acme := f.account("acme", db.RoleTenant)
+	globex := f.account("globex", db.RoleTenant)
+	id := f.machine("acme", "server")
+	if code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/tags", id), map[string]any{"tags": []string{"Web", "tag:db", "web"}}, nil); code != 200 || fmt.Sprint(m["tags"]) != "[db web]" {
+		t.Fatalf("tags: %d %v", code, m)
+	}
+	if code, _, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/tags", id), map[string]any{"tags": []string{"bad tag"}}, nil); code != 400 {
+		t.Fatalf("bad tag: %d", code)
+	}
+	if code, _, _ := f.do(globex, "POST", fmt.Sprintf("/api/v1/nodes/%d/tags", id), map[string]any{"tags": []string{"x"}}, nil); code != 404 {
+		t.Fatalf("tagging another account's machine: %d", code)
+	}
+	code, m, _ := f.do(acme, "POST", "/api/v1/rules", map[string]string{"src": "tag:staff", "dst": "tag:web", "ports": "tcp:443, 22"}, nil)
+	if code != 201 || m["ports"] != "tcp:443,22" || m["user"] != "acme" {
+		t.Fatalf("add rule: %d %v", code, m)
+	}
+	rid := int(m["id"].(float64))
+	for _, bad := range []map[string]string{{"src": "tag:", "dst": "*"}, {"src": "*", "dst": "*", "ports": "99999"}} {
+		if code, _, _ := f.do(acme, "POST", "/api/v1/rules", bad, nil); code != 400 {
+			t.Errorf("bad rule %v: %d", bad, code)
+		}
+	}
+	// Tenants see and edit only their own rules, even if they name another account.
+	if _, _, raw := f.do(globex, "GET", "/api/v1/rules", nil, nil); contains(raw, "tag:staff") {
+		t.Fatalf("globex sees acme's rules: %s", raw)
+	}
+	if code, m, _ := f.do(globex, "POST", "/api/v1/rules", map[string]string{"src": "*", "dst": "*", "user": "acme"}, nil); code != 201 || m["user"] != "globex" {
+		t.Fatalf("tenant naming another account: %d %v", code, m)
+	}
+	if code, _, _ := f.do(globex, "DELETE", fmt.Sprintf("/api/v1/rules/%d", rid), nil, nil); code != 404 {
+		t.Fatalf("deleting another account's rule: %d", code)
+	}
+	// Operators work on any account.
+	f.login()
+	if _, _, raw := f.do(f.c, "GET", "/api/v1/rules?user=acme", nil, nil); !contains(raw, "tag:staff") {
+		t.Fatalf("operator listing acme's rules: %s", raw)
+	}
+	if code, _, _ := f.do(f.c, "POST", "/api/v1/rules", map[string]string{"src": "*", "dst": "*"}, nil); code != 400 {
+		t.Fatalf("admin token without an account: %d", code)
+	}
+	if code, _, _ := f.do(acme, "DELETE", fmt.Sprintf("/api/v1/rules/%d", rid), nil, nil); code != 204 {
+		t.Fatalf("delete own rule: %d", code)
+	}
+}
