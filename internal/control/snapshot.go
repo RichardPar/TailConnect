@@ -57,14 +57,22 @@ type peerView struct {
 	shared     bool
 	noInitiate bool
 	inbound    []protocol.PortRange // with noInitiate: still allowed
+	// noExit hides the peer's exit node role: this machine may not send it
+	// everything (another account's machine, or access rules limit what
+	// it may open there), so the exit node's packet filter would drop
+	// internet traffic from it.
+	noExit bool
 }
 
 func (v peerView) key() string {
-	return fmt.Sprintf("%t/%t/%s", v.shared, v.noInitiate, acl.FormatPorts(acl.Access{Ranges: v.inbound}))
+	return fmt.Sprintf("%t/%t/%t/%s", v.shared, v.noInitiate, v.noExit, acl.FormatPorts(acl.Access{Ranges: v.inbound}))
 }
 
 func (v peerView) apply(pn *protocol.Node) {
 	pn.Shared, pn.NoInitiate, pn.Inbound = v.shared, v.noInitiate, v.inbound
+	if v.noExit {
+		pn.ExitNode = false
+	}
 }
 
 func (n *snapNode) peerJSON(v peerView) []byte {
@@ -231,15 +239,16 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 		if p.db.UserID != self.UserID {
 			// Another account's machine, here through a share: it may open
 			// connections only if self is shared with its account.
-			view = peerView{shared: true, noInitiate: !sharedTo[p.db.UserID]}
+			view = peerView{shared: true, noInitiate: !sharedTo[p.db.UserID], noExit: true}
 		} else if policy := snap.policies[self.UserID]; policy != nil {
-			in := policy.Allowed(p.acl, sn.acl)
-			if in.None() && policy.Allowed(sn.acl, p.acl).None() {
+			in, out := policy.Allowed(p.acl, sn.acl), policy.Allowed(sn.acl, p.acl)
+			if in.None() && out.None() {
 				continue // the rules don't let them talk at all: not peers
 			}
 			if !in.All {
 				view = peerView{noInitiate: true, inbound: in.Ranges}
 			}
+			view.noExit = !out.All
 		}
 		plan.peers = append(plan.peers, p)
 		plan.views = append(plan.views, view)

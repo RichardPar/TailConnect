@@ -72,3 +72,59 @@ func TestAccessRulesInMaps(t *testing.T) {
 		t.Fatalf("after * → *: %+v", p)
 	}
 }
+
+// TestExitNodesInMaps: an exit node shows as one to its own account's
+// machines that may send it anything, never to other accounts' machines
+// through a share, and Self tells the exit node itself.
+func TestExitNodesInMaps(t *testing.T) {
+	bs := newBenchServer(t, 2, 2, true) // tenant0: m0 (shared with tenant1), m1; tenant1: m0 (shared with tenant0), m1
+	ctx := context.Background()
+	exit, lap, other := bs.ids[0], bs.ids[1], bs.ids[3]
+	peer := func(id, of int64) (protocol.Node, protocol.Node) {
+		t.Helper()
+		m, err := bs.srv.BuildMap(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := json.Marshal(m)
+		if got, _ := bs.srv.BuildMapJSON(ctx, id); !bytes.Equal(got, want) {
+			t.Fatalf("node %d: BuildMapJSON differs\n got: %s\nwant: %s", id, got, want)
+		}
+		for _, p := range m.Peers {
+			if int64(p.ID) == of {
+				return m.Self, p
+			}
+		}
+		t.Fatalf("node %d doesn't see node %d", id, of)
+		return protocol.Node{}, protocol.Node{}
+	}
+	if _, p := peer(lap, exit); p.ExitNode {
+		t.Fatal("exit node role on by default")
+	}
+	if err := bs.db.SetNodeExitNode(ctx, exit, true); err != nil {
+		t.Fatal(err)
+	}
+	if self, _ := peer(exit, lap); !self.ExitNode {
+		t.Fatal("the exit node isn't told it is one")
+	}
+	if _, p := peer(lap, exit); !p.ExitNode {
+		t.Fatal("its own account doesn't see the exit node")
+	}
+	if _, p := peer(other, exit); !p.Shared || p.ExitNode {
+		t.Fatalf("another account sees a shared exit node as one: %+v", p)
+	}
+
+	// Rules that let the exit node open connections to the laptop but not
+	// the other way: the laptop can't use it.
+	u, _ := bs.db.GetUser(ctx, "tenant0")
+	bs.db.SetNodeTags(ctx, exit, []string{"gw"})
+	bs.db.SetNodeTags(ctx, lap, []string{"lap"})
+	bs.db.AddRule(ctx, u.ID, "tag:gw", "tag:lap", "*")
+	if _, p := peer(lap, exit); p.ExitNode {
+		t.Fatal("exit node offered to a machine the rules don't let send to it")
+	}
+	bs.db.AddRule(ctx, u.ID, "tag:lap", "tag:gw", "*")
+	if _, p := peer(lap, exit); !p.ExitNode {
+		t.Fatal("exit node hidden although the rules allow everything")
+	}
+}

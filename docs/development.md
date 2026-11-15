@@ -30,6 +30,7 @@ These build the binaries, then run them in private network namespaces with real 
 | Script | What it checks |
 |---|---|
 | `tests/e2e/lan.sh` | Two devices on a bridged LAN: join, ping, routes, relay failover and recovery (via blackhole routes), admin removal, logout |
+| `tests/e2e/exit.sh` | Exit nodes: a client, an exit node with an uplink to a fake internet that has no route back to the tunnel, and the server. Off by default and refused until turned on; forwarding, NAT and policy routing when on; LAN and WireGuard stay direct; fallback when the exit node is turned off; clean-up of rules and sysctls on stop. |
 | `tests/e2e/nat.sh` | Two devices behind separate NAT routers (OpenWrt-style firewalls): STUN, hole punching on the first packet, relay fallback when UDP is cut, recovery. Then MagicDNS through glibc (short names, reverse lookups, NXDOMAIN, forwarding to a fake upstream); a second account's machine on another network behind site b's router (isolation, then a one-way share and its revocation); and `resolv.conf` restored on stop. |
 
 Debugging options for `nat.sh`:

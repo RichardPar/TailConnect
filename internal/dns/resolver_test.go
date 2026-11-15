@@ -206,6 +206,23 @@ func TestForwardTruncates(t *testing.T) {
 	}
 }
 
+// TestHostUpstream: the host's resolvers are asked for at each query, so a
+// network change takes effect without a new config, and with none known
+// queries are refused.
+func TestHostUpstream(t *testing.T) {
+	var host []netip.AddrPort
+	r := NewResolver(nil)
+	r.SetConfig(Config{Domain: "tc.internal", HostUpstream: func() []netip.AddrPort { return host }})
+	q := mkQuery(t, "example.com.", dnsmessage.TypeTXT, false)
+	if m := parse(t, r.Query(context.Background(), q)); m.RCode != dnsmessage.RCodeRefused {
+		t.Fatalf("no host resolvers: rcode %v, want REFUSED", m.RCode)
+	}
+	host = []netip.AddrPort{fakeUpstream(t, 1)}
+	if m := parse(t, r.Query(context.Background(), q)); m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 1 {
+		t.Fatalf("after the network change: rcode=%v answers=%d", m.RCode, len(m.Answers))
+	}
+}
+
 func TestForwardAllDead(t *testing.T) {
 	r := testResolver(deadUpstream(t))
 	m := parse(t, r.Query(context.Background(), mkQuery(t, "example.com.", dnsmessage.TypeA, false)))

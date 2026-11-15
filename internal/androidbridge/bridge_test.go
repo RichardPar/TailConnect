@@ -127,3 +127,22 @@ func TestRequestTUN(t *testing.T) {
 		t.Fatalf("got %+v", m)
 	}
 }
+
+// TestNetworkKeepsDNS: a network report without usable DNS servers keeps
+// the last known ones, so MagicDNS can still forward.
+func TestNetworkKeepsDNS(t *testing.T) {
+	b := &Bridge{logf: t.Logf}
+	lan := netip.MustParseAddr("192.168.10.254")
+	b.updateNetwork(Network{DNS: []netip.Addr{lan}})
+	addrs := []netip.Prefix{netip.MustParsePrefix("10.1.2.3/24")}
+	b.updateNetwork(Network{DNS: []netip.Addr{netip.MustParseAddr("100.100.100.100")}, Addresses: addrs})
+	n := b.Network()
+	if len(n.DNS) != 1 || n.DNS[0] != lan || len(n.Addresses) != 1 {
+		t.Fatalf("after a report with only MagicDNS: %+v", n)
+	}
+	mobile := netip.MustParseAddr("10.0.0.53")
+	b.updateNetwork(Network{DNS: []netip.Addr{mobile}})
+	if n := b.Network(); len(n.DNS) != 1 || n.DNS[0] != mobile {
+		t.Fatalf("after a real change: %+v", n)
+	}
+}

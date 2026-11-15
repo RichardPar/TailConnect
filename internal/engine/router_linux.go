@@ -20,6 +20,7 @@ type linuxRouter struct {
 	link   netlink.Link
 	logf   func(string, ...any)
 	v6Fail bool // IPv6 is disabled on this host; skip v6 config
+	fwd    forwarder
 }
 
 // NewOSRouter configures addresses and routes on the named interface via netlink.
@@ -28,7 +29,11 @@ func NewOSRouter(ifname string, logf func(string, ...any)) (Router, error) {
 	if err != nil {
 		return nil, fmt.Errorf("router: find %s: %w", ifname, err)
 	}
-	return &linuxRouter{link: link, logf: logf}, nil
+	r := &linuxRouter{link: link, logf: logf, fwd: forwarder{ifname: ifname, logf: logf}}
+	if err := r.clearExitRoutes(); err != nil { // left by a tcd that crashed
+		logf("router: %v", err)
+	}
+	return r, nil
 }
 
 func ipNet(p netip.Prefix) *net.IPNet {
@@ -112,7 +117,11 @@ func (r *linuxRouter) Set(cfg RouterConfig) error {
 		}
 		wantR[p] = true
 	}
-	return r.removeRoutes(func(p netip.Prefix) bool { return !wantR[p] })
+	if err := r.removeRoutes(func(p netip.Prefix) bool { return !wantR[p] }); err != nil {
+		return err
+	}
+	r.fwd.set(cfg.Forward)
+	return r.setExitRoutes(cfg.ExitNode, src4, src6)
 }
 
 func (r *linuxRouter) removeRoutes(match func(netip.Prefix) bool) error {
@@ -141,5 +150,6 @@ func (r *linuxRouter) removeRoutes(match func(netip.Prefix) bool) error {
 // Close removes our routes. (Closing the TUN device removes the interface,
 // and with it any remaining addresses and routes.)
 func (r *linuxRouter) Close() error {
-	return r.removeRoutes(func(netip.Prefix) bool { return true })
+	r.fwd.set(false)
+	return errors.Join(r.clearExitRoutes(), r.removeRoutes(func(netip.Prefix) bool { return true }))
 }

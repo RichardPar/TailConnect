@@ -95,6 +95,8 @@ You still tap Connect, and approve the VPN, on the device.
 - Android only lets apps create VPN interfaces through its VPN service, so the app creates the interface and passes it to the client.
 - **Only TailConnect traffic uses the VPN:** the tunnel's address ranges (`100.64.0.0/10` and `fd7c:7c0e:a1e0::/48`). Everything else, such as browsing and streaming from the internet, goes out as usual. The app's own traffic (WireGuard, the control server) is kept out of its VPN.
 - **DNS:** while connected, the VPN's DNS server is MagicDNS (`100.100.100.100`), with your account's domain as a search domain, so short names work. Android sends it every lookup; it answers TailConnect names and passes everything else to the DNS servers of the network you're on (Wi-Fi or mobile data).
+- **Network changes:** when you switch between Wi-Fi and mobile data, the app tells the client the new network's DNS servers, and lookups use them from the next query. If Android briefly reports a network without DNS servers while switching, the previous ones are kept.
+- **Exit nodes:** the app can't use an [exit node](usage.md#exit-nodes) yet, or be one. It always uses the device's own internet connection.
 - **Paths:** the app tells the client the device's addresses on the current network, since Android doesn't let apps read them directly. Devices on the same Wi-Fi then connect directly over it.
 
 ## Troubleshooting
@@ -108,5 +110,6 @@ You still tap Connect, and approve the VPN, on the device.
 | Connects, but no devices are listed | The account has no other machines, or [access rules](usage.md#access-rules) hide them. Check in the web portal. |
 | Devices show **Relay** on the same Wi-Fi | The Wi-Fi may isolate its clients (common on guest networks). It still works, more slowly. |
 | Names don't resolve in an app | Check that the key icon is showing. Some apps cache DNS; restart the app. |
+| TailConnect devices work, but no websites load | DNS: the client has no DNS servers for the current network. **Show log** says `dns: no upstream resolvers known`. Toggle Wi-Fi off and on so Android reports the network again, or update the app (versions from before 15 Nov 2026 kept stale DNS servers after a network change). |
 | "INSTALL_FAILED_UPDATE_INCOMPATIBLE" when installing | The installed app was signed with another key. Uninstall it first (the device then joins again), or build with the original keystore. |
 | Anything else | Tap **Show log**, or run `adb logcat -s TailConnect` with the device on USB. |

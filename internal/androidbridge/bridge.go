@@ -24,9 +24,12 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
+
+	"tailconnect/internal/protocol"
 )
 
 // Message is one protocol message (fields by type, see the package doc).
@@ -92,6 +95,24 @@ func (b *Bridge) SetNetwork(n Network) {
 	b.mu.Lock()
 	b.net = n
 	b.mu.Unlock()
+}
+
+// updateNetwork records a network change the app reported. A report without
+// usable DNS servers (Android sends some while a network is changing, and
+// MagicDNS's own address is no use as an upstream) keeps the last known
+// servers: with none, MagicDNS would refuse every name outside the tunnel.
+func (b *Bridge) updateNetwork(n Network) {
+	n.DNS = slices.DeleteFunc(n.DNS, func(a netip.Addr) bool {
+		a = a.Unmap()
+		return !a.IsValid() || a == protocol.MagicDNSAddr || a == protocol.MagicDNSAddr6
+	})
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(n.DNS) == 0 && len(b.net.DNS) > 0 {
+		b.logf("android: network update without DNS servers; keeping %v", b.net.DNS)
+		n.DNS = b.net.DNS
+	}
+	b.net = n
 }
 
 // Network returns what the app last reported.
@@ -168,9 +189,7 @@ func (b *Bridge) read(c *net.UnixConn) {
 			}
 			switch m.Type {
 			case "network":
-				b.mu.Lock()
-				b.net = Network{DNS: m.DNS, Addresses: m.Addresses}
-				b.mu.Unlock()
+				b.updateNetwork(Network{DNS: m.DNS, Addresses: m.Addresses})
 			case "tun-reply":
 				fd := -1
 				if m.OK && len(fds) > 0 {

@@ -427,3 +427,33 @@ func TestRulesAPI(t *testing.T) {
 		t.Fatalf("delete own rule: %d", code)
 	}
 }
+
+func TestExitNodeAPI(t *testing.T) {
+	f := newFx(t)
+	acme := f.account("acme", db.RoleTenant)
+	globex := f.account("globex", db.RoleTenant)
+	phone := f.machine("acme", "phone") // no OS reported
+	u, _ := f.db.GetUser(context.Background(), "acme")
+	k, _, _ := f.db.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: u.ID, TTL: 3600e9})
+	res, err := f.db.RegisterNode(context.Background(), db.RegisterParams{
+		MachineKey: "m-gw", NodeKey: "n-gw", Hostname: "gw", Hostinfo: `{"OS":"linux"}`, AuthKey: k, Alloc: ipam.Default().Next,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := res.Node.ID
+	path := func(id int64) string { return fmt.Sprintf("/api/v1/nodes/%d/exit-node", id) }
+
+	if code, m, _ := f.do(acme, "POST", path(gw), map[string]bool{"enabled": true}, nil); code != 200 || m["exitNode"] != true {
+		t.Fatalf("enable on Linux: %d %v", code, m)
+	}
+	if code, m, _ := f.do(acme, "POST", path(phone), map[string]bool{"enabled": true}, nil); code != 400 || !strings.Contains(fmt.Sprint(m["error"]), "only Linux") {
+		t.Fatalf("enable on a non-Linux machine: %d %v", code, m)
+	}
+	if code, _, _ := f.do(globex, "POST", path(gw), map[string]bool{"enabled": false}, nil); code != 404 {
+		t.Fatalf("another account's machine: %d", code)
+	}
+	if code, m, _ := f.do(acme, "POST", path(gw), map[string]bool{"enabled": false}, nil); code != 200 || m["exitNode"] != false {
+		t.Fatalf("disable: %d %v", code, m)
+	}
+}

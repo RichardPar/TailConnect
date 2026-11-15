@@ -67,7 +67,7 @@ The machines of your account. An operator sees every account's machines, with an
 | Column | Meaning |
 |---|---|
 | ● | Green: online (in contact within the last 5 minutes) |
-| Name | The machine's name, its full MagicDNS name, its tags, and *ephemeral* if it joined with an ephemeral key |
+| Name | The machine's name, its full MagicDNS name, its tags, *ephemeral* if it joined with an ephemeral key, and *exit node* if it is one |
 | Addresses | Its IPv4 and IPv6 tunnel addresses |
 | OS | Its operating system, and the device's own hostname |
 | Last seen | When it last contacted the server |
@@ -79,6 +79,7 @@ The machines of your account. An operator sees every account's machines, with an
 | **Approve** | Lets a machine that's waiting for approval join (see [My account](#my-account)). The tab shows how many are waiting. |
 | **Never expire** / **Set expiry** | Lets the machine's key never expire, for example for servers that must not drop off; or gives it the server's normal key lifetime from now (`-key-expiry`, 180 days by default). |
 | **Tags** | Sets the machine's tags, separated by commas (for example `server, db`), for [access rules](#access-rules). |
+| **Exit node: off** / **Exit node: on** | Lets the machines in its account send their internet traffic through this machine, or stops it. Off for every machine until turned on; Linux machines only. Each machine then chooses whether to use it with `tc up --exit-node NAME` (see [Exit nodes](usage.md#exit-nodes)). |
 | **Rename** | Changes its MagicDNS name. |
 | **Remove** | Disconnects it and deletes it from the network. It needs a new auth key to join again. |
 

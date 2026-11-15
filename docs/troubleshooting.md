@@ -44,6 +44,9 @@ journalctl -u tc-control -e        # server log (on the server)
 | An ephemeral machine disappeared | Ephemeral machines are removed after 30 minutes offline (`-ephemeral-timeout`). Join long-lived machines with a normal key. |
 | `Logged out … Note: this machine was removed from the network` | The machine was removed (by its owner or an operator). Rejoin with `sudo tc up --authkey …`. |
 | `Warning: control unreachable: …` (status, while running) | The device lost contact with the server and is retrying. Tunnels keep working on the last map. Fix the server or the network; the device reconnects by itself. |
+| `--exit-node: NAME is not an exit node (turn it on in the web portal: Machines)` | The machine's exit node role is off. Turn it on (Machines → Exit node, or `tc-control nodes exit-node ID on`), then run `tc up --exit-node NAME` again. |
+| `invalid argument: NAME runs android; only Linux machines can be exit nodes` | Only Linux machines can forward traffic for others. Pick a Linux machine. |
+| `Warning: exit node NAME not in use (…); internet traffic goes direct` (status) | See [Exit nodes](#exit-nodes) |
 | `create TUN tc0 (are you root?)` (tcd log) | See [tcd won't start](#tcd-wont-start) |
 
 ## tcd won't start
@@ -121,6 +124,32 @@ dig @100.100.100.100 peer.your-domain            # ask the resolver directly
   - If it's listed but unreachable, go through [A peer is missing or unreachable](#a-peer-is-missing-or-unreachable); the owner's host firewall must allow incoming traffic on `tc0`.
 - **The shared machine can't reach my machines.** That's the design: sharing is one-way, and your machines' packet filter drops connections it opens (`FilterDropped` in `tc status --json` counts them). For a connection the other way, share one of your machines with its account too.
 - **A share link says "invalid, expired or already-used".** Links work once and expire (7 days by default). Ask the owner for a new one. You can't redeem a link to your own machine.
+
+## Exit nodes
+
+```sh
+tc status | grep -i exit                 # on both machines
+ip rule | grep -E '527[012]'             # on the machine using the exit node: three rules
+ip route show table 124                  # … and its default routes into tc0
+cat /proc/sys/net/ipv4/ip_forward        # on the exit node: 1
+sudo nft list table ip tailconnect-exit  # … and its NAT table
+```
+
+- **Status says `exit node NAME not in use`.** The reason is in brackets:
+  - *not an exit node*: its role is off, or was turned off. Turn it on in the portal.
+  - *no such machine in this network*: a typo, or the machine is offline long enough to have left the map, removed, or in another account. Exit nodes serve their own account only.
+  - *this client can't use exit nodes*: userspace mode (`-tun userspace`) or Android.
+  - *this machine is itself an exit node*: an exit node can't use another one.
+  Meanwhile the machine uses its own internet connection; it switches back by itself when the problem goes away.
+- **The exit node isn't listed as one in `tc status`, although it's on.** Access rules may stop this machine opening connections to it: it can only use an exit node it may send everything to. Add a rule such as `tag:laptop → tag:gw *`.
+- **The exit node is in use, but websites don't load.**
+  - On the exit node, `tc status` must say `this machine forwards internet traffic`. A `Warning: … can't forward traffic` line gives the reason (e.g. nftables missing from the kernel).
+  - Another firewall's forward chain may drop the traffic: ufw (`sudo ufw route allow in on tc0`), Docker (`sudo iptables -I DOCKER-USER -i tc0 -j ACCEPT`), or firewalld.
+  - The exit node itself must have working internet access.
+- **Names stop resolving while using an exit node.** DNS still goes to the machine's own resolvers. If those are only reachable through a network you left (a VPN, a work network), set public nameservers with `-dns-nameservers` on the server.
+- **IPv6 sites fail but IPv4 works.** The exit node has no IPv6 connectivity, or couldn't turn on IPv6 forwarding (its log says `IPv6 forwarding unavailable`). Clients still send IPv6 to it; most apps fall back to IPv4 after a delay.
+- **The local network is unreachable while using an exit node.** It shouldn't be: anything the machine has a more specific route for stays direct. Check `ip route` has the LAN route in the main table.
+- **After a crash, internet is broken on a machine that used an exit node.** `sudo systemctl restart tcd` (or `sudo ip rule del pref 5272`) removes the leftover rules; `tcd` also cleans up at every start.
 
 ## Web portal and accounts
 

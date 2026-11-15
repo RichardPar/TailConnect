@@ -1,14 +1,18 @@
 package magicsock
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	"golang.zx2c4.com/wireguard/conn"
+
+	"tailconnect/internal/netmark"
 )
 
 // batchSize is how many packets WireGuard hands magicsock per call, and
@@ -37,12 +41,20 @@ type socks struct {
 // the same for both).
 func listenSocks(port uint16) (*socks, uint16, error) {
 	s := &socks{}
-	pc4, err4 := net.ListenUDP("udp4", &net.UDPAddr{Port: int(port)})
+	lc := netmark.ListenConfig()
+	listen := func(network string, port uint16) (*net.UDPConn, error) {
+		pc, err := lc.ListenPacket(context.Background(), network, net.JoinHostPort("", strconv.Itoa(int(port))))
+		if err != nil {
+			return nil, err
+		}
+		return pc.(*net.UDPConn), nil
+	}
+	pc4, err4 := listen("udp4", port)
 	if err4 == nil {
 		s.v4 = &sock{pc: pc4, bc: ipv4.NewPacketConn(pc4)}
 		port = uint16(pc4.LocalAddr().(*net.UDPAddr).Port)
 	}
-	if pc6, err6 := net.ListenUDP("udp6", &net.UDPAddr{Port: int(port)}); err6 == nil {
+	if pc6, err6 := listen("udp6", port); err6 == nil {
 		s.v6 = &sock{pc: pc6, bc: ipv6.NewPacketConn(pc6)}
 		if s.v4 == nil {
 			port = uint16(pc6.LocalAddr().(*net.UDPAddr).Port)

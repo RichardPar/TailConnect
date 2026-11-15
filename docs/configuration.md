@@ -63,6 +63,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 | Tags | Machines → Tags | `nodes tag ID TAG[,TAG…]` |
 | Key never expires, or normal lifetime | Machines → Never expire / Set expiry | `nodes expiry ID never\|DURATION` |
 | Approve | Machines → Approve | `nodes approve ID` |
+| Exit node (off by default; Linux only) | Machines → Exit node: off / on | `nodes exit-node ID on\|off` |
 | Remove | Machines → Remove | `nodes delete ID` |
 | Share with another account | Sharing | `shares create ID ACCOUNT`, `shares link ID`, `shares accept ID`, `shares revoke ID` |
 
@@ -81,6 +82,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 |---|---|---|
 | Server, auth key, name | `sudo tc up --server URL --authkey KEY --hostname NAME` | name: the OS hostname |
 | Pin the server key | `tc up --server-key mkey:…` | fetched (trust on first use, or checked by HTTPS) |
+| Send internet traffic through an [exit node](usage.md#exit-nodes) | `sudo tc up --exit-node NAME`; `--exit-node ""` stops | none; remembered in `state.json` |
 | DNS integration | `-dns auto\|systemd-resolved\|file\|off` | `auto` |
 | WireGuard port | `-port` | `41641` |
 | Interface name | `-tun` (or `userspace`) | `tc0` |
@@ -129,6 +131,7 @@ tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expi
 tc-control keys list [-user NAME] | revoke ID
 tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
 tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
+tc-control nodes exit-node ID on|off
 tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
 tc-control relays create NAME | list | delete NAME
 tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
@@ -171,7 +174,7 @@ The client daemon. It runs as root, or with `CAP_NET_ADMIN`.
 
 | Command | Flags |
 |---|---|
-| `tc up` | `--server URL`, `--authkey KEY` (or `$TC_AUTHKEY`), `--hostname NAME`, `--server-key mkey:…` |
+| `tc up` | `--server URL`, `--authkey KEY` (or `$TC_AUTHKEY`), `--hostname NAME`, `--server-key mkey:…`, `--exit-node NAME` (`""` = none; omitted = unchanged) |
 | `tc down` | |
 | `tc status` | `--json` |
 | `tc ip [PEER]` | `-4`, `-6` |
@@ -284,4 +287,6 @@ Restart the service after editing. Variables inside these files are **not** expa
 |---|---|
 | `100.64.0.0/10` | Device IPv4 addresses (the shared CGNAT range) |
 | `fd7c:7c0e:a1e0::/48` | Device IPv6 addresses. Each device's IPv6 address ends in its IPv4 address: `100.64.0.2` ↔ `fd7c:7c0e:a1e0::6440:2`. |
+| Routing table `124`, rules `5270`-`5272`, firewall mark `0x7c0000/0xff0000` | Used by `tcd` while the machine uses an [exit node](how-it-works.md#exit-nodes) |
+| nftables table `tailconnect-exit` (`ip` and `ip6`) | NAT and forwarding on an exit node |
 | `100.100.100.0/24` | Reserved for in-tunnel services. `100.100.100.100` is MagicDNS (and `fd7c:7c0e:a1e0::6464:6464` over IPv6). |

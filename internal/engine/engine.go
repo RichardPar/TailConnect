@@ -11,6 +11,7 @@ package engine
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"math/rand/v2"
@@ -51,11 +52,29 @@ const maxKickJitter = time.Second
 type RouterConfig struct {
 	LocalAddrs []netip.Prefix // this node's tunnel addresses
 	Routes     []netip.Prefix // destinations to send into the tunnel
+	// ExitNode sends all other traffic (the default routes) into the
+	// tunnel too, to the exit node, except tcd's own (package netmark).
+	ExitNode bool
+	// Forward makes this machine an exit node: it forwards and NATs
+	// traffic from the tunnel to the internet.
+	Forward bool
 }
 
 func (c RouterConfig) equal(o RouterConfig) bool {
-	return slices.Equal(c.LocalAddrs, o.LocalAddrs) && slices.Equal(c.Routes, o.Routes)
+	return slices.Equal(c.LocalAddrs, o.LocalAddrs) && slices.Equal(c.Routes, o.Routes) &&
+		c.ExitNode == o.ExitNode && c.Forward == o.Forward
 }
+
+// ExitRouter is implemented by routers that can use exit nodes and be one
+// (Linux, with a kernel TUN). Others ignore RouterConfig.ExitNode and Forward.
+type ExitRouter interface {
+	SupportsExitNodes() bool
+	// ForwardError says why forwarding failed, if it did.
+	ForwardError() string
+}
+
+// exitAll is what an exit node's peer entry adds: every destination.
+var exitAll = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}
 
 // Router applies addresses and routes to the OS.
 type Router interface {
@@ -111,6 +130,14 @@ type Engine struct {
 	dnsBase    string // the domain routed to MagicDNS
 	sawMap     bool
 	closed     bool
+
+	lastMap   *protocol.MapResponse // the map applied last, and the local prefixes with it
+	lastLocal []netip.Prefix
+
+	exitPref   string // the exit node chosen on this machine ("" = none)
+	exitUsing  string // the exit node in use (its name), if any
+	exitErr    string // why exitPref isn't in use
+	exitServes bool   // this machine is an exit node for its account
 }
 
 // New brings up a WireGuard device with the node's private key.
@@ -200,9 +227,14 @@ func (e *Engine) Endpoints() []netip.AddrPort { return e.magic.Endpoints() }
 func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.reconfigLocked(nm, local)
+}
+
+func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) error {
 	if e.closed {
 		return fmt.Errorf("engine closed")
 	}
+	e.lastMap, e.lastLocal = nm, local
 
 	// magicsock must know the peers before WireGuard parses their endpoints.
 	e.magic.SetNetworkMap(nm.Peers, nm.Relays, local)
@@ -214,6 +246,23 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 	want := map[key.NodePublic]bool{}
 	var routes []netip.Prefix
 	restricted := map[netip.Addr][]protocol.PortRange{}
+	exitRouter, canExit := e.router.(ExitRouter)
+	canExit = canExit && exitRouter.SupportsExitNodes()
+	e.exitUsing, e.exitErr = "", ""
+	var exitKey key.NodePublic
+	if e.exitPref != "" {
+		switch exit, err := FindExitNode(nm, e.exitPref); {
+		case !canExit:
+			e.exitErr = "this client can't use exit nodes (only Linux with a kernel TUN can)"
+		case err != nil:
+			e.exitErr = err.Error()
+		default:
+			exitKey, e.exitUsing = exit.NodeKey, exit.Name
+		}
+		if e.exitErr != "" {
+			e.logf("exit node %q not used: %s; internet traffic goes direct", e.exitPref, e.exitErr)
+		}
+	}
 	for _, p := range nm.Peers {
 		if p.NodeKey.IsZero() || p.NodeKey.Equal(e.pub) {
 			continue
@@ -225,8 +274,11 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 			}
 		}
 		allowed := slices.Clone(p.Addresses)
-		slices.SortFunc(allowed, comparePrefix)
 		routes = append(routes, allowed...)
+		if p.NodeKey == exitKey {
+			allowed = append(allowed, exitAll...)
+		}
+		slices.SortFunc(allowed, comparePrefix)
 
 		old, exists := e.peers[p.NodeKey]
 		if exists && slices.Equal(old.allowed, allowed) {
@@ -285,7 +337,8 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 	slices.SortFunc(routes, comparePrefix)
 	self := slices.Clone(nm.Self.Addresses)
 	slices.SortFunc(self, comparePrefix)
-	rc := RouterConfig{LocalAddrs: self, Routes: routes}
+	e.exitServes = canExit && nm.Self.ExitNode
+	rc := RouterConfig{LocalAddrs: self, Routes: routes, ExitNode: !exitKey.IsZero(), Forward: e.exitServes}
 	if !rc.equal(e.lastRouter) {
 		if err := e.router.Set(rc); err != nil {
 			return fmt.Errorf("engine: router: %w", err)
@@ -294,6 +347,82 @@ func (e *Engine) Reconfig(nm *protocol.MapResponse, local []netip.Prefix) error 
 	}
 	e.reconfigDNSLocked(nm, magicDNS)
 	return nil
+}
+
+// ErrNoSuchMachine: FindExitNode found no machine of that name.
+var ErrNoSuchMachine = errors.New("no such machine in this network")
+
+// FindExitNode finds the exit node pref names in nm: a peer's short name,
+// MagicDNS name, hostname or tunnel address. It must have its exit node
+// role turned on.
+func FindExitNode(nm *protocol.MapResponse, pref string) (protocol.Node, error) {
+	pref = strings.TrimSuffix(strings.ToLower(pref), ".")
+	if nm.Self.ExitNode && matchesNode(nm.Self, pref) {
+		return protocol.Node{}, fmt.Errorf("%s is this machine", pref)
+	}
+	for _, p := range nm.Peers {
+		if !matchesNode(p, pref) {
+			continue
+		}
+		if !p.ExitNode {
+			return protocol.Node{}, fmt.Errorf("%s is not an exit node (turn it on in the web portal: Machines)", pref)
+		}
+		if nm.Self.ExitNode {
+			return protocol.Node{}, errors.New("this machine is itself an exit node, so it can't use one")
+		}
+		return p, nil
+	}
+	return protocol.Node{}, fmt.Errorf("%s: %w", pref, ErrNoSuchMachine)
+}
+
+func matchesNode(n protocol.Node, pref string) bool {
+	name := strings.ToLower(n.Name)
+	if name == pref || strings.ToLower(n.Hostinfo.Hostname) == pref {
+		return true
+	}
+	if short, _, ok := strings.Cut(name, "."); ok && short == pref {
+		return true
+	}
+	for _, a := range n.Addresses {
+		if a.Addr().String() == pref {
+			return true
+		}
+	}
+	return false
+}
+
+// SetExitNode chooses the exit node for this machine's internet traffic
+// ("" = none), applying it to the current map at once if there is one.
+func (e *Engine) SetExitNode(pref string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if pref == e.exitPref {
+		return nil
+	}
+	e.exitPref = pref
+	if e.lastMap == nil {
+		return nil
+	}
+	return e.reconfigLocked(e.lastMap, e.lastLocal)
+}
+
+// ExitStatus describes exit nodes on this machine.
+type ExitStatus struct {
+	Chosen       string // the exit node chosen ("" = none)
+	Using        string // MagicDNS name of the exit node carrying internet traffic ("" = none)
+	Error        string // why Chosen isn't in use
+	Serving      bool   // this machine is an exit node
+	ServingError string // why it isn't forwarding although it should
+}
+
+func (e *Engine) ExitStatus() ExitStatus {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := ExitStatus{Chosen: e.exitPref, Using: e.exitUsing, Error: e.exitErr, Serving: e.exitServes}
+	if r, ok := e.router.(ExitRouter); ok && e.exitServes {
+		st.ServingError = r.ForwardError()
+	}
+	return st
 }
 
 // reconfigDNSLocked updates the in-tunnel resolver and then the host's DNS
@@ -358,15 +487,12 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 		for _, p := range nm.Peers {
 			add(p)
 		}
-		upstream := nm.DNS.Nameservers
-		if len(upstream) == 0 && !e.osDNS.SupportsSplitDNS() {
-			upstream = e.osDNS.HostResolvers() // everything comes to us; pass it on
-		}
-		for _, a := range upstream {
-			if a == protocol.MagicDNSAddr || a == protocol.MagicDNSAddr6 {
-				continue // never forward to ourselves
-			}
-			cfg.Upstream = append(cfg.Upstream, netip.AddrPortFrom(a, 53))
+		cfg.Upstream = upstreams(nm.DNS.Nameservers)
+		if len(nm.DNS.Nameservers) == 0 && !e.osDNS.SupportsSplitDNS() {
+			// Everything comes to us; pass it on to the host's resolvers,
+			// looked up at each query as they change with the network.
+			osDNS := e.osDNS
+			cfg.HostUpstream = func() []netip.AddrPort { return upstreams(osDNS.HostResolvers()) }
 		}
 		e.dnsBase = strings.TrimSuffix(strings.ToLower(cfg.Domain), ".")
 		e.dnsDomain = e.dnsBase
@@ -378,6 +504,20 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 	}
 	e.resolver.SetConfig(cfg)
 	e.dnsTUN.SetEnabled(on)
+}
+
+// upstreams turns resolver addresses into port-53 upstreams, leaving out
+// MagicDNS itself: forwarding to ourselves would loop.
+func upstreams(addrs []netip.Addr) []netip.AddrPort {
+	var out []netip.AddrPort
+	for _, a := range addrs {
+		a = a.Unmap()
+		if !a.IsValid() || a == protocol.MagicDNSAddr || a == protocol.MagicDNSAddr6 {
+			continue
+		}
+		out = append(out, netip.AddrPortFrom(a, 53))
+	}
+	return out
 }
 
 func orAll(d []string) any {

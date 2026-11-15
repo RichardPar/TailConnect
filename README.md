@@ -6,6 +6,7 @@ A self-hosted mesh VPN built on WireGuard, for Linux, Windows and Android. One s
 - encrypted control channel, WireGuard mesh, and NAT traversal with relay fallback;
 - MagicDNS;
 - multi-tenant accounts with one-way sharing, and access rules;
+- exit nodes;
 - machine approval and key expiry;
 - automatic HTTPS, and metrics.
 
@@ -27,6 +28,7 @@ Windows is next (see [Roadmap](#roadmap)).
 - **One-way sharing:** an account can share a single machine with another account. The other account's machines can then connect to it, but it can't connect back.
 - **Direct WireGuard paths** between devices, found by STUN and hole punching through NAT. When no direct path exists, traffic goes through the built-in relay, still end-to-end encrypted. Switching between the two takes about 3 seconds.
 - **MagicDNS:** every machine is reachable as `name.account.your-domain`, or just `name`. Split DNS through systemd-resolved, with a `resolv.conf` fallback.
+- **Exit nodes:** turn on a Linux machine as an exit node, and other machines in its account can send all their internet traffic through it (`tc up --exit-node NAME`). Off for every machine until turned on.
 - **Access rules** within an account: tag machines, then allow *from → to on ports* (for example, laptops may reach the servers on SSH only).
 - **Machine lifecycle:** keys that expire after 180 days (or never, per machine), optional approval of new machines, and automatic removal of ephemeral machines.
 - **Pre-auth keys** for joining devices: single-use or reusable, ephemeral or pre-approved, with an expiry and revocation.

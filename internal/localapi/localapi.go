@@ -32,6 +32,9 @@ type UpRequest struct {
 	AuthKey    string            `json:",omitempty"` // required to register a new machine
 	Hostname   string            `json:",omitempty"` // default: OS hostname
 	ServerKey  key.MachinePublic `json:",omitempty"` // pin explicitly instead of fetching /key
+	// ExitNode chooses the exit node for this machine's internet traffic:
+	// a machine's name or tunnel address, "" for none. nil = unchanged.
+	ExitNode *string `json:",omitempty"`
 }
 
 type Status struct {
@@ -49,7 +52,8 @@ type Status struct {
 	DNS            *DNSStatus `json:",omitempty"`
 	// FilterDropped counts packets refused because a shared machine tried to
 	// open a connection to this one.
-	FilterDropped int64 `json:",omitempty"`
+	FilterDropped int64       `json:",omitempty"`
+	ExitNode      *ExitStatus `json:",omitempty"`
 	Self          *PeerStatus
 	Peers         []PeerStatus
 }
@@ -64,6 +68,16 @@ type DNSStatus struct {
 	HostConfig string
 	SplitDNS   bool   // only MagicDNS names go to the resolver
 	Error      string `json:",omitempty"` // last failure configuring the OS
+}
+
+// ExitStatus describes exit nodes on this machine (nil in Status when it
+// neither uses nor is one).
+type ExitStatus struct {
+	Chosen       string `json:",omitempty"` // the exit node chosen with tc up --exit-node
+	Using        string `json:",omitempty"` // MagicDNS name of the exit node in use
+	Error        string `json:",omitempty"` // why Chosen isn't in use: internet traffic goes direct
+	Serving      bool   `json:",omitempty"` // this machine is an exit node
+	ServingError string `json:",omitempty"` // why it isn't forwarding although it should
 }
 
 type PeerStatus struct {
@@ -92,6 +106,8 @@ type PeerStatus struct {
 	// Inbound (with NoInitiate) is what the peer may still open here.
 	Inbound []protocol.PortRange `json:",omitempty"`
 	Tags    []string             `json:",omitempty"`
+	// ExitNode: this machine may send its internet traffic through the peer.
+	ExitNode bool `json:",omitempty"`
 	// KeyExpiry is when the machine must re-authenticate (nil = never).
 	KeyExpiry *time.Time `json:",omitempty"`
 }

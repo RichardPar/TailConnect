@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 
 	"tailconnect/internal/key"
+	"tailconnect/internal/netmark"
 )
 
 // RecvFunc is called for each packet received from the relay. pkt is only
@@ -70,8 +71,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		opts.Logf = func(string, ...any) {}
 	}
 	if opts.Dial == nil {
-		d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-		opts.Dial = d.DialContext
+		opts.Dial = netmark.Dialer(10*time.Second, 30*time.Second).DialContext
 	}
 	c := &Client{opts: opts, u: u, sendq: make(chan queued, 256), done: make(chan struct{})}
 	c.ctx, c.cancel = context.WithCancel(context.Background())

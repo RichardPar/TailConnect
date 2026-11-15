@@ -83,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/nodes/{id}/approve", s.approveNode)
 	api.HandleFunc("POST /api/v1/nodes/{id}/expiry", s.setNodeExpiry)
 	api.HandleFunc("POST /api/v1/nodes/{id}/tags", s.setNodeTags)
+	api.HandleFunc("POST /api/v1/nodes/{id}/exit-node", s.setNodeExitNode)
 	api.HandleFunc("GET /api/v1/rules", s.listRules)
 	api.HandleFunc("POST /api/v1/rules", s.addRule)
 	api.HandleFunc("DELETE /api/v1/rules/{id}", s.deleteRule)
@@ -229,6 +230,7 @@ type apiNode struct {
 	Ephemeral bool             `json:"ephemeral"`
 	Approved  bool             `json:"approved"`
 	Tags      []string         `json:"tags"`
+	ExitNode  bool             `json:"exitNode"`
 	KeyExpiry *time.Time       `json:"keyExpiry,omitempty"` // absent = never expires
 	Expired   bool             `json:"expired"`
 	Created   time.Time        `json:"created"`
@@ -291,7 +293,7 @@ func (s *Server) toAPINode(n db.Node) apiNode {
 	out := apiNode{
 		ID: n.ID, Name: n.GivenName, FQDN: s.fqdn(n), User: n.UserName,
 		Hostname: n.Hostname, OS: hi.OS, IPv4: n.IPv4, IPv6: n.IPv6, Endpoints: n.Endpoints,
-		NodeKey: n.NodeKey, Ephemeral: n.Ephemeral, Approved: n.Approved, Tags: n.Tags, Expired: n.Expired(s.now()), Created: n.CreatedAt,
+		NodeKey: n.NodeKey, Ephemeral: n.Ephemeral, Approved: n.Approved, Tags: n.Tags, ExitNode: n.ExitNode, Expired: n.Expired(s.now()), Created: n.CreatedAt,
 	}
 	if out.Tags == nil {
 		out.Tags = []string{}
@@ -677,6 +679,31 @@ func (s *Server) setNodeExpiry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("machine key expiry set", "node", n.GivenName, "user", n.UserName, "expiry", req.Expiry, "by", principalFrom(r.Context()).name())
+	s.writeNode(w, r, n.ID)
+}
+
+// setNodeExitNode lets a machine carry its account's internet traffic, or
+// stops it. Only Linux clients can forward traffic, so only they can be
+// made exit nodes (turning it off always works).
+func (s *Server) setNodeExitNode(w http.ResponseWriter, r *http.Request) {
+	n, ok := s.ownNode(w, r)
+	if !ok {
+		return
+	}
+	var req struct{ Enabled bool }
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Enabled {
+		if err := db.CanBeExitNode(n); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if s.dbError(w, "set exit node", s.db.SetNodeExitNode(r.Context(), n.ID, req.Enabled)) {
+		return
+	}
+	s.log.Info("machine exit node", "node", n.GivenName, "user", n.UserName, "enabled", req.Enabled, "by", principalFrom(r.Context()).name())
 	s.writeNode(w, r, n.ID)
 }
 

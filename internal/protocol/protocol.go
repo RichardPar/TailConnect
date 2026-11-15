@@ -157,7 +157,12 @@ type Node struct {
 	// Empty: nothing.
 	Inbound []PortRange `json:",omitempty"`
 	// Tags are the machine's access-rule tags (e.g. "server").
-	Tags      []string `json:",omitempty"`
+	Tags []string `json:",omitempty"`
+	// ExitNode: the machine forwards internet traffic for its account's
+	// machines, which may choose to send theirs through it. On Self, it
+	// tells the machine to forward (and NAT) its peers' traffic. Only set on
+	// peers of the same account that this machine may send anything to.
+	ExitNode  bool `json:",omitempty"`
 	Hostinfo  Hostinfo
 	Created   time.Time
 	LastSeen  *time.Time `json:",omitempty"`

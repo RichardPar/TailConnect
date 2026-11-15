@@ -509,6 +509,7 @@ func (s *Server) toProtocol(n db.Node) (protocol.Node, error) {
 		Endpoints: n.Endpoints,
 		HomeRelay: n.HomeRelay,
 		Tags:      n.Tags,
+		ExitNode:  n.ExitNode,
 		Hostinfo:  hi,
 		Created:   n.CreatedAt,
 	}

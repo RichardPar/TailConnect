@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -45,8 +46,13 @@ type Config struct {
 	// ReversePrefixes are the address ranges whose reverse (PTR) lookups are
 	// answered locally (the tunnel's address pools).
 	ReversePrefixes []netip.Prefix
-	// Upstream resolvers for every other name. Empty: such queries are refused.
+	// Upstream resolvers for every other name. Empty: HostUpstream is asked.
 	Upstream []netip.AddrPort
+	// HostUpstream (if set) returns the host's own resolvers, asked at each
+	// forwarded query when Upstream is empty, so a network change (Android
+	// reports one whenever Wi-Fi or mobile data changes) takes effect at
+	// once rather than at the next network map. Neither: queries are refused.
+	HostUpstream func() []netip.AddrPort
 }
 
 type Resolver struct {
@@ -54,6 +60,8 @@ type Resolver struct {
 	sem  chan struct{}
 	// dial is used to reach upstream resolvers (tests override it).
 	dial func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	warnedNoUpstream atomic.Bool // logged once until upstreams are known again
 
 	mu     sync.RWMutex
 	cfg    Config
@@ -141,13 +149,20 @@ func (r *Resolver) query(ctx context.Context, q []byte, tcp bool) []byte {
 	if local {
 		answers, rcode = r.answerLocked(qn, name)
 	}
-	upstream := r.cfg.Upstream
+	upstream, hostUpstream := r.cfg.Upstream, r.cfg.HostUpstream
 	r.mu.RUnlock()
 
 	if !local {
+		if len(upstream) == 0 && hostUpstream != nil {
+			upstream = hostUpstream()
+		}
 		if len(upstream) == 0 {
+			if r.warnedNoUpstream.CompareAndSwap(false, true) {
+				r.logf("dns: no upstream resolvers known; refusing names outside MagicDNS (like %s)", qn.Name)
+			}
 			return errorReply(h, questions, dnsmessage.RCodeRefused, edns)
 		}
+		r.warnedNoUpstream.Store(false)
 		return r.forward(ctx, h, questions, q, upstream, size, edns, tcp)
 	}
 	return buildReply(h, questions, answers, rcode, edns, size)

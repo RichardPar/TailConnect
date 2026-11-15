@@ -1,7 +1,7 @@
 // Command tc is the TailConnect command-line client. It controls the local
 // tcd daemon.
 //
-//	tc up [--server URL] [--authkey KEY] [--hostname NAME]
+//	tc up [--server URL] [--authkey KEY] [--hostname NAME] [--exit-node NAME]
 //	tc down
 //	tc status [--json]
 //	tc ip [-4|-6] [PEER]
@@ -31,6 +31,7 @@ const usage = `tc: TailConnect client
 
 Usage:
   tc up [--server URL] [--authkey KEY] [--hostname NAME] [--server-key mkey:...]
+        [--exit-node NAME]   send internet traffic through exit node NAME ("" = stop)
   tc down
   tc status [--json]
   tc ip [-4|-6] [PEER]
@@ -108,9 +109,15 @@ func cmdUp(c *localapi.Client, args []string) error {
 	hostname := fs.String("hostname", "", "name for this machine (default: OS hostname)")
 	serverKey := fs.String("server-key", "", "pin the server's machine key (mkey:...) instead of fetching it")
 	timeout := fs.Duration("timeout", 20*time.Second, "how long to wait for the tunnel to come up")
+	exitNode := fs.String("exit-node", "", `send all internet traffic through this exit node (name or tunnel IP); "" stops (default: unchanged, off on a new machine)`)
 	fs.Parse(args)
 
 	req := localapi.UpRequest{ControlURL: *server, AuthKey: *authKey, Hostname: *hostname}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "exit-node" {
+			req.ExitNode = exitNode
+		}
+	})
 	if *serverKey != "" {
 		k, err := key.ParsePublic[key.MachineKind](*serverKey)
 		if err != nil {
@@ -139,6 +146,12 @@ func cmdUp(c *localapi.Client, args []string) error {
 				fmt.Printf("Connected as %s (%s)\n", st.Self.Name, addrList(st.Self.Addresses))
 			} else {
 				fmt.Println("Connected.")
+			}
+			if req.ExitNode != nil {
+				printExitNode(&st)
+				if *req.ExitNode == "" {
+					fmt.Println("Internet traffic goes direct (no exit node).")
+				}
 			}
 			return nil
 		case st.State == localapi.StateNeedsLogin || st.State == localapi.StateStopped:
@@ -197,6 +210,7 @@ func cmdStatus(c *localapi.Client, args []string) error {
 				st.Self.KeyExpiry.Local().Format("2006-01-02 15:04"), humanDays(left))
 		}
 	}
+	printExitNode(&st)
 	if d := st.DNS; d != nil {
 		how := d.HostConfig
 		switch {
@@ -247,12 +261,40 @@ func cmdStatus(c *localapi.Client, args []string) error {
 		case len(p.Endpoints) == 0:
 			detail += "; no endpoints reported"
 		}
+		if p.ExitNode {
+			detail = "exit node; " + detail
+			if st.ExitNode != nil && st.ExitNode.Using == p.Name {
+				detail = "exit node (in use); " + strings.TrimPrefix(detail, "exit node; ")
+			}
+		}
 		if p.RxBytes+p.TxBytes > 0 {
 			detail += fmt.Sprintf("; rx %s tx %s", bytesStr(p.RxBytes), bytesStr(p.TxBytes))
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", first4(p.Addresses), shortName(p.Name, &st), p.User, p.OS, detail)
 	}
 	return tw.Flush()
+}
+
+// printExitNode says which exit node carries this machine's internet
+// traffic, and whether it is one.
+func printExitNode(st *localapi.Status) {
+	e := st.ExitNode
+	if e == nil {
+		return
+	}
+	switch {
+	case e.Using != "":
+		fmt.Printf("Exit node: internet traffic goes through %s\n", shortName(e.Using, st))
+	case e.Chosen != "":
+		fmt.Printf("Warning: exit node %s not in use (%s); internet traffic goes direct\n", e.Chosen, orDefault(e.Error, "not connected yet"))
+	}
+	if e.Serving {
+		if e.ServingError != "" {
+			fmt.Println("Warning: this machine should be an exit node but can't forward traffic:", e.ServingError)
+		} else {
+			fmt.Println("Exit node: this machine forwards internet traffic for its account")
+		}
+	}
 }
 
 func cmdIP(c *localapi.Client, args []string) error {

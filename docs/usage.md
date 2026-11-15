@@ -7,6 +7,7 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 - [Accounts and sign-up](#accounts-and-sign-up)
 - [Access rules](#access-rules)
 - [Sharing a machine](#sharing-a-machine)
+- [Exit nodes](#exit-nodes)
 - [The web portal](#the-web-portal)
 - [Admin CLI](#admin-cli)
 - [Admin HTTP API](#admin-http-api)
@@ -54,6 +55,8 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 | Reset a forgotten password | Accounts → Reset password | `sudo tc-control users passwd bob` |
 | Approve a new machine | Machines → Approve | `sudo tc-control nodes approve 4` |
 | Require approval for new machines | My account | `sudo tc-control users machine-approval bob on` |
+| Make a machine an exit node | Machines → **Exit node: off** (Linux machines) | `sudo tc-control nodes exit-node 4 on` |
+| Send a machine's internet traffic through an exit node | | on the machine: `sudo tc up --exit-node NAME` (`--exit-node ""` stops) |
 | Keep a server from ever expiring | Machines → Never expire | `sudo tc-control nodes expiry 4 never` |
 | Renew an expired machine | | on the machine: `sudo tc up --authkey tc-auth-…` |
 | Stop a leaked key | Auth keys → Revoke | `sudo tc-control keys revoke 7` |
@@ -150,6 +153,37 @@ The one-way rule is enforced by the packet filter on each recipient machine, so 
 
 ---
 
+## Exit nodes
+
+An exit node is a machine in your account that other machines in your account can send **all** their internet traffic through, for example to browse from a café as if from home. Websites then see the exit node's public address.
+
+Every machine's exit node role is **off** until you turn it on, and each machine chooses for itself whether to use one.
+
+1. **Turn it on.** In the portal's Machines tab, click **Exit node: off** on a Linux machine (or run `tc-control nodes exit-node ID on`). Within a second, that machine enables IP forwarding and NAT for traffic from the tunnel. Its `tc status` says `Exit node: this machine forwards internet traffic for its account`.
+2. **Use it.** On another Linux machine: `sudo tc up --exit-node NAME` (a short name, MagicDNS name, hostname or tunnel IP). `tc status` shows `Exit node: internet traffic goes through NAME`, and lists it as `exit node (in use)`.
+3. **Stop using it.** `sudo tc up --exit-node ""`. The choice is remembered across restarts and reboots until changed.
+
+What goes where while a machine uses an exit node:
+
+| Traffic | Path |
+|---|---|
+| Internet (IPv4 and IPv6) | through the tunnel to the exit node, then out from there |
+| The local network (anything the machine has a more specific route for, e.g. `192.168.1.0/24`) | direct, as before |
+| Other machines in the network | through the tunnel, as before |
+| tcd's own WireGuard, relay and control connections | direct (they carry the tunnel) |
+| DNS | unchanged: the machine's usual resolvers |
+
+Details:
+
+- Only **Linux** machines with a kernel TUN can be exit nodes or use one; the portal shows the button only for Linux machines. Userspace mode and the Android app can't yet.
+- Exit nodes serve **their own account only**. A machine shared with another account is never an exit node for it. If access rules limit what a machine may open on the exit node, it can't use it.
+- If the exit node goes away (turned off, removed, offline long enough to leave the map), the machine **falls back to its own internet connection** and `tc status` warns: `exit node NAME not in use (…); internet traffic goes direct`. It returns to the exit node by itself when it's back.
+- When it stops being an exit node, or `tcd` stops, the machine restores its previous forwarding settings and removes its NAT table.
+- Another firewall on the exit node whose forward chain drops traffic (ufw's default, Docker's) must allow forwarding from the tunnel interface, for example `sudo ufw route allow in on tc0`.
+- [How it works](how-it-works.md#exit-nodes).
+
+---
+
 ## The web portal
 
 The portal is where you manage the network in a browser, at port 7741 on the server: for example `http://192.168.1.10:7741`, or `https://vpn.example.com:7741` with HTTPS.
@@ -183,6 +217,7 @@ tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expi
 tc-control keys list [-user NAME] | revoke ID
 tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
 tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
+tc-control nodes exit-node ID on|off
 tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
 tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
 tc-control shares accept ID | revoke ID
@@ -221,10 +256,11 @@ curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://SERVER:7741/api/v1/nodes
 | `GET /api/v1/me` | | `{login, role, status, operator, token}` |
 | `GET /api/v1/me/settings`, `POST /api/v1/me/settings` | `{"requireMachineApproval": true}` | the account's machine approval setting |
 | `POST /api/v1/me/password` | `{"current", "new"}` | |
-| `GET /api/v1/nodes` | | `[{id, name, fqdn, user, hostname, os, ipv4, ipv6, endpoints, nodeKey, ephemeral, approved, keyExpiry, expired, created, lastSeen, online}]` (`keyExpiry` absent = never) |
+| `GET /api/v1/nodes` | | `[{id, name, fqdn, user, hostname, os, ipv4, ipv6, endpoints, nodeKey, ephemeral, approved, tags, exitNode, keyExpiry, expired, created, lastSeen, online, traffic}]` (`keyExpiry` absent = never) |
 | `POST /api/v1/nodes/{id}/rename` | `{"name"}` | |
 | `POST /api/v1/nodes/{id}/approve` | | approves a machine waiting for approval |
 | `POST /api/v1/nodes/{id}/tags` | `{"tags": ["server", "db"]}` | replaces the machine's tags |
+| `POST /api/v1/nodes/{id}/exit-node` | `{"enabled": true}` | turns the machine's [exit node](#exit-nodes) role on or off; turning it on is refused (400) for machines that don't run Linux |
 | `GET /api/v1/rules` | | the account's rules `[{id, user, src, dst, ports, created}]`; operators: `?user=NAME`, or all with the admin token |
 | `POST /api/v1/rules` | `{"src", "dst", "ports", "user"}` | 201 the rule (ports normalised); `user` only for operators |
 | `DELETE /api/v1/rules/{id}` | | |
@@ -263,6 +299,7 @@ Write requests must send `Content-Type: application/json`. Another account's mac
 | Command | What it does |
 |---|---|
 | `tc up --server URL --authkey KEY [--hostname NAME] [--server-key mkey:…]` | Join an account the first time. |
+| `tc up --exit-node NAME` | Send all internet traffic through exit node NAME; `--exit-node ""` stops ([exit nodes](#exit-nodes)). Without the flag the choice is unchanged; a new machine uses none. |
 | `tc up` | Reconnect after `tc down`. Also: `--server NEW` after the server moves; `--authkey` to re-register, e.g. after the machine was removed (a key of another account moves the machine there). |
 | `tc down` | Disconnect. The tunnel, routes and DNS settings are removed and the machine stays registered; it stays down across reboots until `tc up`. |
 | `tc status [--json]` | This machine, its peers, and how each is reached |

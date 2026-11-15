@@ -138,6 +138,23 @@ Then the OS is pointed at the resolver:
 - **resolv.conf:** the resolver becomes the only nameserver. It forwards other names to the original nameservers, one after another, with a 2-second timeout each. Answers larger than the client accepts come back truncated.
 
 With `-dns-nameservers` on the server, devices send everything to MagicDNS (resolved's `~.` routing domain), and it forwards non-MagicDNS names to those servers.
+- **Android:** the VPN interface's DNS server is the resolver, and Android sends it every name. It forwards other names to the DNS servers of the network underneath (Wi-Fi or mobile data), which the app reports to `tcd` whenever that network changes. The resolver looks them up at each query, so a network change takes effect at once. A report without DNS servers (Android sends some while switching networks) keeps the previous ones.
+
+## Exit nodes
+
+A machine whose exit node role is on gets `ExitNode` in its own map entry, and in the map entries other machines of its account see, unless they may not send it everything (a share, or access rules). It then:
+- turns on IP forwarding (IPv6 too where possible; interfaces that accept router advertisements are moved to `accept_ra=2` first, so the host keeps its own IPv6 addresses);
+- adds an nftables table `tailconnect-exit` per family: masquerade traffic from `tc0` leaving by another interface, and accept it, with replies, in the forward hook.
+
+A machine using an exit node adds `0.0.0.0/0` and `::/0` to that peer's WireGuard allowed IPs, and routes the default through `tc0` without touching the main routing table, as `wg-quick` does:
+
+| Rule | Effect |
+|---|---|
+| `5270: fwmark 0x7c0000/0xff0000 lookup main` | `tcd`'s own sockets (WireGuard and disco UDP, relay and control connections), marked with `SO_MARK`, use the real network |
+| `5271: lookup main suppress_prefixlength 0` | every route of the main table except its default: the LAN and the tunnel's peers |
+| `5272: lookup 124` | table 124 holds the default routes into `tc0` |
+
+Inbound packets from the exit node can come from any address. WireGuard still attributes a packet to the peer with the most specific allowed IP, so the exit node can't pose as another peer. Everything is removed when the exit node is turned off or `tcd` stops, and on start (after a crash).
 
 ## Resilience
 

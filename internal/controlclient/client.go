@@ -22,6 +22,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"tailconnect/internal/key"
+	"tailconnect/internal/netmark"
 	"tailconnect/internal/noise"
 	"tailconnect/internal/protocol"
 )
@@ -45,7 +46,9 @@ func IsUnauthorized(err error) bool {
 // Over HTTPS this is authenticated by TLS; over plain HTTP it is trust-on-first-use.
 func FetchServerKey(ctx context.Context, serverURL string, hc *http.Client) (key.MachinePublic, error) {
 	if hc == nil {
-		hc = &http.Client{Timeout: 15 * time.Second}
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.DialContext = netmark.Dialer(15*time.Second, 30*time.Second).DialContext
+		hc = &http.Client{Timeout: 15 * time.Second, Transport: tr}
 	}
 	u, err := parseServerURL(serverURL)
 	if err != nil {
@@ -112,8 +115,7 @@ func New(opts Options) (*Client, error) {
 		return nil, errors.New("controlclient: ServerKey and MachineKey are required")
 	}
 	if opts.Dial == nil {
-		d := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
-		opts.Dial = d.DialContext
+		opts.Dial = netmark.Dialer(15*time.Second, 30*time.Second).DialContext
 	}
 	return &Client{opts: opts, u: u}, nil
 }

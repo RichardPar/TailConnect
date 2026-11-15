@@ -73,6 +73,7 @@ type persist struct {
 	Registered  bool
 	WantRunning bool
 	Self        *protocol.Node `json:",omitempty"`
+	ExitNode    string         `json:",omitempty"` // chosen exit node ("" = none)
 }
 
 type Daemon struct {
@@ -259,6 +260,20 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 		st.Hostname, _ = os.Hostname()
 	}
 	st.ControlURL = url
+	if req.ExitNode != nil {
+		pref := strings.TrimSpace(*req.ExitNode)
+		d.mu.Lock()
+		nm := d.netmap
+		d.mu.Unlock()
+		if pref != "" && nm != nil && !nm.Self.ExitNode {
+			// Catch typos now; an exit node that is offline or not yet in
+			// the map is still accepted (and reported in status).
+			if _, err := engine.FindExitNode(nm, pref); err != nil && !errors.Is(err, engine.ErrNoSuchMachine) {
+				return fmt.Errorf("--exit-node: %w", err)
+			}
+		}
+		st.ExitNode = pref
+	}
 
 	if !st.Registered || req.AuthKey != "" {
 		if !st.Registered && req.AuthKey == "" {
@@ -305,9 +320,16 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 	d.st = st
 	d.lastErr = ""
 	err := d.save()
+	eng := d.eng
 	d.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("save state: %w", err)
+	}
+	if eng != nil {
+		// Already running: switch exit nodes on the current map.
+		if err := eng.SetExitNode(st.ExitNode); err != nil {
+			return fmt.Errorf("apply exit node: %w", err)
+		}
 	}
 	d.startLocked()
 	return nil
@@ -367,6 +389,9 @@ func (d *Daemon) Status() localapi.Status {
 		stats = d.eng.Stats()
 		s.HomeRelay, s.RelayConnected = d.eng.HomeRelay(), d.eng.RelayConnected()
 		s.FilterDropped = d.eng.FilterDropped()
+		if es := d.eng.ExitStatus(); es.Chosen != "" || es.Serving {
+			s.ExitNode = &localapi.ExitStatus{Chosen: es.Chosen, Using: es.Using, Error: es.Error, Serving: es.Serving, ServingError: es.ServingError}
+		}
 		if ds := d.eng.DNSStatus(); ds.Domain != "" {
 			s.DNS = &localapi.DNSStatus{
 				Domain: ds.Domain, Base: ds.Base, Resolver: protocol.MagicDNSAddr, HostConfig: ds.Mode, SplitDNS: ds.Split, Error: ds.Error,
@@ -406,7 +431,7 @@ func peerStatus(n protocol.Node) localapi.PeerStatus {
 	return localapi.PeerStatus{
 		Name: n.Name, HostName: n.Hostinfo.Hostname, User: n.User, OS: n.Hostinfo.OS,
 		Addresses: n.Addresses, NodeKey: n.NodeKey, Endpoints: n.Endpoints,
-		Shared: n.Shared, NoInitiate: n.NoInitiate, Inbound: n.Inbound, Tags: n.Tags, KeyExpiry: n.KeyExpiry,
+		Shared: n.Shared, NoInitiate: n.NoInitiate, Inbound: n.Inbound, Tags: n.Tags, ExitNode: n.ExitNode, KeyExpiry: n.KeyExpiry,
 	}
 }
 
@@ -450,6 +475,7 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		fail(localapi.StateStopped, fmt.Errorf("start tunnel: %w", err))
 		return
 	}
+	_ = eng.SetExitNode(st.ExitNode) // no map yet: nothing to apply
 	if err := eng.SetControlURL(st.ControlURL); err != nil {
 		logf("relay base URL: %v", err)
 	}

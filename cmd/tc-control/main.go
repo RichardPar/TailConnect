@@ -65,6 +65,7 @@ Usage:
   tc-control keys list [-user NAME] | revoke ID
   tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
   tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
+  tc-control nodes exit-node ID on|off
   tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
   tc-control relays create NAME | list | delete NAME   (tokens for standalone tc-relay servers)
   tc-control version
@@ -1026,6 +1027,9 @@ func cmdNodes(args []string) error {
 			if n.Ephemeral {
 				status += ", ephemeral"
 			}
+			if n.ExitNode {
+				status += ", exit node"
+			}
 			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n.ID, n.GivenName, n.UserName, n.IPv4, n.Hostname, seen, expires, status)
 		}
 		return tw.Flush()
@@ -1054,6 +1058,28 @@ func cmdNodes(args []string) error {
 			return err
 		}
 		fmt.Printf("node %d tags: %s\n", id, strings.Join(tags, ","))
+	case "exit-node":
+		if fs.NArg() != 2 || (fs.Arg(1) != "on" && fs.Arg(1) != "off") {
+			return usageError("usage: tc-control nodes exit-node ID on|off")
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil {
+			return usageError("bad node ID " + strconv.Quote(fs.Arg(0)))
+		}
+		on := fs.Arg(1) == "on"
+		if on {
+			n, err := d.GetNode(ctx, id)
+			if err != nil {
+				return err
+			}
+			if err := db.CanBeExitNode(n); err != nil {
+				return err
+			}
+		}
+		if err := d.SetNodeExitNode(ctx, id, on); err != nil {
+			return err
+		}
+		fmt.Printf("node %d exit node: %s\n", id, fs.Arg(1))
 	case "approve":
 		id, err := idArg(fs, "nodes approve ID")
 		if err != nil {

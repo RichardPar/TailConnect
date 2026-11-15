@@ -32,6 +32,7 @@ type Node struct {
 	Ephemeral  bool
 	Approved   bool     // false: the account requires approval and nobody has given it yet
 	Tags       []string // access-rule tags
+	ExitNode   bool     // may carry its account's internet traffic (off by default)
 	CreatedAt  time.Time
 	LastSeen   time.Time // zero = never
 	ExpiresAt  time.Time // key expiry; zero = never
@@ -259,7 +260,7 @@ func (d *DB) TouchNode(ctx context.Context, id int64) error {
 
 const nodeSelect = `
 	SELECT n.id, n.user_id, u.name, u.status, n.machine_key, n.node_key, n.disco_key, n.hostname, n.given_name,
-	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.approved, n.tags, n.created_at, n.last_seen, n.expires_at
+	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.approved, n.tags, n.exit_node, n.created_at, n.last_seen, n.expires_at
 	FROM nodes n JOIN users u ON u.id = n.user_id`
 
 func scanNode(r rowScanner) (Node, error) {
@@ -268,7 +269,7 @@ func scanNode(r rowScanner) (Node, error) {
 	var created int64
 	var lastSeen, expires sql.NullInt64
 	err := r.Scan(&n.ID, &n.UserID, &n.UserName, &n.UserStatus, &n.MachineKey, &n.NodeKey, &n.DiscoKey, &n.Hostname,
-		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &n.Approved, &tags, &created, &lastSeen, &expires)
+		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &n.Approved, &tags, &n.ExitNode, &created, &lastSeen, &expires)
 	if err != nil {
 		return Node{}, err
 	}
@@ -526,6 +527,33 @@ func (d *DB) SetNodeTags(ctx context.Context, id int64, tags []string) error {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("node %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// SetNodeExitNode turns a machine's exit node role on or off.
+func (d *DB) SetNodeExitNode(ctx context.Context, id int64, on bool) error {
+	res, err := d.sql.ExecContext(ctx, `UPDATE nodes SET exit_node = ? WHERE id = ?`, on, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("node %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// CanBeExitNode reports why machine n can't be an exit node, if it can't:
+// forwarding and NAT are only implemented in the Linux client.
+func CanBeExitNode(n Node) error {
+	var hi struct{ OS string }
+	_ = json.Unmarshal([]byte(n.Hostinfo), &hi)
+	if hi.OS != "linux" {
+		os := hi.OS
+		if os == "" {
+			os = "unknown"
+		}
+		return fmt.Errorf("%w: %s runs %s; only Linux machines can be exit nodes", ErrInvalid, n.GivenName, os)
 	}
 	return nil
 }

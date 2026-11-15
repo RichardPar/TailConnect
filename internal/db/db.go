@@ -264,6 +264,14 @@ CREATE TABLE relay_tokens (
 	last_used  INTEGER NOT NULL DEFAULT 0
 );
 `,
+	// 10: exit nodes. A machine its owner allows to carry the account's
+	// internet traffic. Off for every machine until turned on; affects maps.
+	`
+ALTER TABLE nodes ADD COLUMN exit_node INTEGER NOT NULL DEFAULT 0;
+CREATE TRIGGER nodes_gen_exit AFTER UPDATE OF exit_node ON nodes
+	WHEN OLD.exit_node IS NOT NEW.exit_node
+	BEGIN UPDATE generation SET value = value + 1; END;
+`,
 }
 
 // Generation returns a counter that increases whenever nodes or users change

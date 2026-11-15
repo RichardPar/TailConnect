@@ -220,6 +220,7 @@ async function loadNodes() {
         el("td", {}, el("span", { class: "dot" + (n.online ? " on" : ""), title: n.online ? "online" : "offline" })),
         el("td", {}, el("div", {}, n.name), el("div", { class: "sub" }, n.fqdn),
           n.ephemeral && el("span", { class: "badge" }, "ephemeral"),
+          n.exitNode && el("span", { class: "badge", title: "Machines in this account can send their internet traffic through it" }, "exit node"),
           n.tags.length > 0 && el("div", { class: "tags" }, n.tags.map((t) => el("span", { class: "badge" }, "tag:" + t)))),
         me.operator && el("td", {}, n.user),
         el("td", { class: "mono" }, el("div", {}, n.ipv4), el("div", { class: "sub" }, n.ipv6)),
@@ -231,6 +232,10 @@ async function loadNodes() {
           !n.approved && el("button", { class: "primary small", onclick: () => approveNode(n) }, "Approve"),
           el("button", { class: "ghost", onclick: () => toggleExpiry(n) }, n.keyExpiry ? "Never expire" : "Set expiry"),
           el("button", { class: "ghost", onclick: () => editTags(n) }, "Tags"),
+          (n.exitNode || n.os === "linux") && el("button", {
+            class: "ghost", onclick: () => toggleExitNode(n),
+            title: n.exitNode ? "Stop carrying this account's internet traffic" : "Let this account's machines send their internet traffic through this machine",
+          }, n.exitNode ? "Exit node: on" : "Exit node: off"),
           el("button", { class: "ghost", onclick: () => renameNode(n) }, "Rename"),
           el("button", { class: "danger", onclick: () => deleteNode(n) }, "Remove"),
         ),
@@ -307,6 +312,19 @@ async function toggleExpiry(n) {
   try {
     await api("POST", `/api/v1/nodes/${n.id}/expiry`, { expiry: never ? "never" : "default" });
     toast(never ? `${n.name}'s key never expires` : `${n.name}'s key expiry set`);
+    refresh();
+  } catch (e) { handleErr(e); }
+}
+
+async function toggleExitNode(n) {
+  const on = !n.exitNode;
+  const q = on
+    ? `Make ${n.name} an exit node? Machines in ${n.user}'s account can then send all their internet traffic through it, and websites will see ${n.name}'s public address. Each machine still chooses whether to use it (tc up --exit-node ${n.name}).`
+    : `Stop ${n.name} being an exit node? Machines using it go back to their own internet connection.`;
+  if (!confirm(q)) return;
+  try {
+    await api("POST", `/api/v1/nodes/${n.id}/exit-node`, { enabled: on });
+    toast(on ? `${n.name} is an exit node` : `${n.name} is no longer an exit node`);
     refresh();
   } catch (e) { handleErr(e); }
 }
