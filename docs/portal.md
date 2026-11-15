@@ -207,6 +207,7 @@ The server's own settings are command-line options, set in `/etc/default/tc-cont
 | Domains accounts may choose (My account → MagicDNS domain) | `-tenant-domain-suffixes internal` | `internal` |
 | The URL shown for joining | `-public-url` | derived from `-listen` |
 | Where the portal listens | `-admin-listen` | `:7741` (every address) |
+| Extra names you open it by | `-admin-hosts` | none: IP addresses, `localhost`, the hostname and the certificate names work without it |
 | HTTPS | `-acme-domain NAME`, `-tls-self-signed`, or `-tls-cert`/`-tls-key` | off |
 
 All of them are in the [configuration reference](configuration.md#tc-control-serve). [Settings at a glance](configuration.md#settings-at-a-glance) lists every setting and where it's changed.

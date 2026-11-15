@@ -39,6 +39,8 @@ func (s *Server) hashing(f func()) {
 	f()
 }
 
+const tooMany = "too many attempts; wait a minute and try again"
+
 // config is public: the sign-in page uses it to decide what to offer.
 func (s *Server) config(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"signup": s.info.Signup, "version": s.info.Version})
@@ -57,8 +59,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if !s.authLimit.Allow(iplimit.IP(r)) {
-		writeError(w, http.StatusTooManyRequests, "too many attempts; wait a minute and try again")
+	if !s.authLimit.Allow(iplimit.Client(r)) {
+		writeError(w, http.StatusTooManyRequests, tooMany)
 		return
 	}
 	st, err := s.loadAuth(r.Context())
@@ -84,6 +86,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := strings.ToLower(strings.TrimSpace(req.Login))
+	if s.acctLimit.Blocked(name) {
+		s.log.Warn("login refused: too many wrong passwords for this account", "login", name, "remote", r.RemoteAddr)
+		writeError(w, http.StatusTooManyRequests, tooMany)
+		return
+	}
 	u, err := s.db.GetUser(r.Context(), name)
 	ok := false
 	switch {
@@ -96,6 +103,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.hashing(func() { ok = password.Verify(req.Password, u.PasswordHash) })
 	}
 	if !ok {
+		s.acctLimit.Allow(name) // count the failure
 		s.log.Warn("login failed", "login", name, "remote", r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, "wrong name or password")
 		return
@@ -138,8 +146,8 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if !s.authLimit.Allow(iplimit.IP(r)) {
-		writeError(w, http.StatusTooManyRequests, "too many attempts; wait a minute and try again")
+	if !s.authLimit.Allow(iplimit.Client(r)) {
+		writeError(w, http.StatusTooManyRequests, tooMany)
 		return
 	}
 	name := strings.ToLower(strings.TrimSpace(req.Login))
@@ -211,9 +219,17 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Checking the current password is a password guess like signing in,
+	// so it has the same limits (a stolen session mustn't guess faster).
+	if !s.authLimit.Allow(iplimit.Client(r)) || s.acctLimit.Blocked(p.user.Name) {
+		writeError(w, http.StatusTooManyRequests, tooMany)
+		return
+	}
 	ok := false
 	s.hashing(func() { ok = password.Verify(req.Current, p.user.PasswordHash) })
 	if !ok {
+		s.acctLimit.Allow(p.user.Name) // count the failure
+		s.log.Warn("password change: wrong current password", "login", p.user.Name, "remote", r.RemoteAddr)
 		writeError(w, http.StatusForbidden, "current password is wrong")
 		return
 	}

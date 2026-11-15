@@ -9,6 +9,7 @@ package iplimit
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -21,6 +22,23 @@ const maxTracked = 10000
 
 // IP returns the client address of r without its port.
 func IP(r *http.Request) string { return HostOf(r.RemoteAddr) }
+
+// Client returns the limiting key for r's client: its IPv4 address, or for
+// IPv6 its /64 network. One subscriber usually gets a whole /64, so keying
+// by address would hand them billions of fresh allowances.
+func Client(r *http.Request) string {
+	h := HostOf(r.RemoteAddr)
+	a, err := netip.ParseAddr(h)
+	if err != nil {
+		return h
+	}
+	a = a.Unmap()
+	if a.Is4() {
+		return a.String()
+	}
+	p, _ := a.WithZone("").Prefix(64)
+	return p.String()
+}
 
 // HostOf strips the port from a "host:port" address.
 func HostOf(addr string) string {

@@ -56,6 +56,9 @@ type Info struct {
 	// Traffic returns what machine id reported about its traffic (nil if
 	// nothing), from the control server. nil: no traffic in the portal.
 	Traffic func(id int64) *protocol.MachineTraffic
+	// Hosts are the names the portal answers to, besides IP addresses
+	// (always allowed). Requests for other names are refused.
+	Hosts []string
 }
 
 type Server struct {
@@ -64,16 +67,29 @@ type Server struct {
 	log  *slog.Logger
 	now  func() time.Time
 
-	hashSem   chan struct{} // bounds concurrent password hashing
-	authLimit *iplimit.Rate // sign-in and sign-up attempts per client IP
+	hashSem   chan struct{}   // bounds concurrent password hashing
+	hosts     map[string]bool // allowed Host names (normalized)
+	authLimit *iplimit.Rate   // password attempts and sign-ups per client (IPv4 address or IPv6 /64)
+	// acctLimit is wrong passwords per account, from anywhere, so guessing
+	// from many addresses gets no further. It counts only failures, so it
+	// never blocks a sign-in with the right password before it runs out.
+	acctLimit *iplimit.Rate
 }
 
 func New(d *db.DB, info Info, log *slog.Logger) *Server {
-	return &Server{
+	s := &Server{
 		db: d, info: info, log: log, now: time.Now,
 		hashSem:   make(chan struct{}, 4),
+		hosts:     map[string]bool{"localhost": true},
 		authLimit: iplimit.NewRate(6*time.Second, 10), // 10 at once, then one every 6s
+		acctLimit: iplimit.NewRate(time.Minute, 20),   // 20 wrong, then one a minute
 	}
+	for _, h := range info.Hosts {
+		if h = normalHost(strings.TrimSpace(h)); h != "" {
+			s.hosts[h] = true
+		}
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -124,12 +140,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/v1/", s.requireAuth(api))
 	sub, _ := fs.Sub(uiFS, "ui")
 	mux.Handle("/", http.FileServerFS(sub))
-	return securityHeaders(mux)
+	return securityHeaders(s.checkHost(mux))
 }
 
 func securityHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hd := w.Header()
+		if r.TLS != nil {
+			// No includeSubDomains: other names under the domain aren't ours.
+			hd.Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		hd.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		hd.Set("X-Content-Type-Options", "nosniff")
 		hd.Set("Referrer-Policy", "no-referrer")

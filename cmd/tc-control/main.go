@@ -15,7 +15,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -180,6 +182,7 @@ func cmdServe(args []string) error {
 	fs, dbPath := flags("serve")
 	listen := fs.String("listen", ":7740", "client-facing control API address")
 	adminListen := fs.String("admin-listen", ":7741", `web portal and API address: ":7741" for every network, "127.0.0.1:7741" for this machine only (reach it with an SSH tunnel), "" to turn it off`)
+	adminHosts := fs.String("admin-hosts", "", "extra comma-separated host names the web portal answers to (it always answers to IP addresses, localhost, this machine's hostname, the HTTPS certificate's names and the -public-url host; other names are refused, against DNS rebinding)")
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
 	tenantSuffixes := fs.String("tenant-domain-suffixes", "internal", `comma-separated suffixes accounts may choose their own MagicDNS domain under in the portal ("internal" allows acme.internal); "" lets only operators set account domains`)
 	keyExpiry := fs.String("key-expiry", "180d", `how long machines stay authorised before they must re-authenticate ("never", or e.g. 90d, 720h)`)
@@ -220,6 +223,7 @@ func cmdServe(args []string) error {
 		return usageError("-tls-names needs -tls-self-signed")
 	}
 	var certs *autotls.Manager
+	var acmeDomains []string
 	if *acmeDomain != "" {
 		if *tlsCert != "" {
 			return usageError("-acme-domain and -tls-cert exclude each other")
@@ -228,6 +232,7 @@ func cmdServe(args []string) error {
 		if err != nil {
 			return usageError("-acme-domain: " + err.Error())
 		}
+		acmeDomains = domains
 		cfg := autotls.Config{Domains: domains, Email: *acmeEmail, HTTPListen: *acmeHTTP, TLSListen: *listen,
 			CacheDir: filepath.Join(filepath.Dir(*dbPath), "acme"), Logf: log.Info}
 		switch *acmeDNS {
@@ -440,9 +445,27 @@ func cmdServe(args []string) error {
 			log.Info("sign-up is enabled but the web portal only listens on loopback; tenants need -admin-listen on a reachable address (with TLS)",
 				"signup", *signup)
 		}
+		hosts := tlspin.LocalNames()
+		if u, err := url.Parse(*publicURL); err == nil && u.Hostname() != "" {
+			hosts = append(hosts, u.Hostname())
+		}
+		if certs != nil {
+			hosts = append(hosts, acmeDomains...)
+		}
+		if selfSigned != nil {
+			hosts = append(hosts, selfSigned.Names...)
+		}
+		if *tlsCert != "" {
+			names, err := certNames(*tlsCert)
+			if err != nil {
+				return fmt.Errorf("-tls-cert: %w", err)
+			}
+			hosts = append(hosts, names...)
+		}
+		hosts = append(hosts, strings.Split(*adminHosts, ",")...)
 		adm := admin.New(d, admin.Info{
 			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, TenantDomainSuffixes: suffixes, ControlURL: *publicURL, TLSFingerprint: fingerprintOf(selfSigned), Version: version, Signup: *signup, KeyExpiry: keyLife,
-			Traffic: ctl.Traffic,
+			Traffic: ctl.Traffic, Hosts: hosts,
 		}, log)
 		servers = append(servers, &http.Server{
 			Addr: *adminListen, Handler: adm.Handler(),
@@ -528,6 +551,28 @@ func cmdServe(args []string) error {
 		_ = srv.Shutdown(shutCtx)
 	}
 	return err
+}
+
+// certNames returns the DNS names a PEM certificate file's first
+// certificate covers.
+func certNames(file string) ([]string, error) {
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		var b *pem.Block
+		if b, raw = pem.Decode(raw); b == nil {
+			return nil, errors.New("no certificate in " + file)
+		}
+		if b.Type == "CERTIFICATE" {
+			c, err := x509.ParseCertificate(b.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			return c.DNSNames, nil
+		}
+	}
 }
 
 func isLoopback(addr string) bool {

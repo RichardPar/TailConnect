@@ -32,6 +32,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 | Send all of the devices' DNS through MagicDNS | `-dns-nameservers 1.1.1.1,…` | off (devices keep their own DNS) |
 | Control and relay address | `-listen` | `:7740` |
 | Portal address | `-admin-listen` | `:7741` (every address) |
+| Extra portal host names | `-admin-hosts` | none |
 | URL shown for joining | `-public-url` | derived |
 | HTTPS: automatic (Let's Encrypt) | `-acme-domain`, `-acme-http-listen`, `-acme-dns`, `-acme-email`, `-acme-staging` | off ([guide](lets-encrypt.md)) |
 | HTTPS: your own certificate | `-tls-cert`, `-tls-key` | off |
@@ -107,6 +108,7 @@ The coordination server: control API, built-in relay, STUN, web portal.
 | `-db` | see [below](#tc-control-admin-commands) | SQLite database. The packaged unit uses `/var/lib/tc-control/control.db`. |
 | `-listen` | `:7740` | Control API and built-in relay (TCP) |
 | `-admin-listen` | `:7741` | Web portal and its API: `:7741` on every address, `127.0.0.1:7741` on the server only (reach it with an SSH tunnel), `""` turns them off. Without HTTPS, passwords cross the network unencrypted, and `tc-control` logs a warning. |
+| `-admin-hosts` | (none) | Extra comma-separated host names the portal answers to. It always answers to IP addresses, `localhost`, this machine's hostname (and `HOSTNAME.local`), the HTTPS certificate's names and the `-public-url` host. Requests for any other name get "421 unknown host name", which stops other web pages from reaching the portal through your browser (DNS rebinding). Add a name here if you open the portal by a name it doesn't know, such as `pi.lan`. |
 | `-key-expiry` | `180d` | How long machines stay authorised after joining or re-authenticating: days (`90d`), a Go duration (`720h`), or `never`. Machines set to never expire, and machines that joined before this existed, are unaffected. |
 | `-ephemeral-timeout` | `30m` | Remove ephemeral machines that have been offline this long (`0` keeps them). |
 | `-signup` | `approval` | Who may create accounts in the portal: `off`, `approval` (pending until an operator approves), `invite` (needs an invite code) or `open`. A valid invite skips approval in every mode except `off`. |
