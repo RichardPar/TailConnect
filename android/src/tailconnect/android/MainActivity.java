@@ -55,7 +55,7 @@ import java.util.concurrent.Executors;
  * when the window changes (rotation, split-screen), keeping what was typed.
  */
 public class MainActivity extends Activity {
-    private static final int REQ_VPN = 1;
+    private static final int REQ_VPN = 1, REQ_QR = 2;
     private static final long POLL_MS = 1500;
     private static final int GREEN = 0xFF2E9E5B, AMBER = 0xFFE0A030, GREY = 0xFF8A8A8A, RED = 0xFFD9453B;
 
@@ -122,16 +122,7 @@ public class MainActivity extends Activity {
                 Toast.makeText(this, "This device has already joined a network. Log out first to join with this code.", Toast.LENGTH_LONG).show();
                 return;
             }
-            // From an auth key's QR code. Fill in, never connect by itself: the
-            // user checks the server (a link can come from anywhere) and taps Connect.
-            String s = link.getQueryParameter("server"), k = link.getQueryParameter("key"), h = link.getQueryParameter("hostname");
-            String fp = link.getQueryParameter("fp");
-            if (fp != null) tlsFp = fp.trim();
-            if (s != null && !s.isEmpty()) joinServer = s;
-            if (k != null && !k.isEmpty()) joinKey = k;
-            if (h != null && !h.isEmpty()) joinHost = h;
-            Toast.makeText(this, "Filled in from the QR code" + (s != null ? " for " + s : "") + ". Check the name and tap Join.", Toast.LENGTH_LONG).show();
-            showLogin();
+            applyJoinLink(link);
             return;
         }
         String v;
@@ -307,6 +298,39 @@ public class MainActivity extends Activity {
         return scroll;
     }
 
+    /**
+     * Fills in the join pop-up from a tailconnect://join link (an auth key's
+     * QR code) and shows it. Never connects by itself: the user checks the
+     * server (a link can come from anywhere) and taps Join.
+     */
+    private void applyJoinLink(Uri link) {
+        String s = link.getQueryParameter("server"), k = link.getQueryParameter("key"), h = link.getQueryParameter("hostname");
+        String fp = link.getQueryParameter("fp");
+        if (fp != null) tlsFp = fp.trim();
+        if (s != null && !s.isEmpty()) joinServer = s;
+        if (k != null && !k.isEmpty()) joinKey = k;
+        if (h != null && !h.isEmpty()) joinHost = h;
+        Toast.makeText(this, "Filled in from the QR code" + (s != null ? " for " + s : "") + ". Check the name and tap Join.", Toast.LENGTH_LONG).show();
+        showLogin();
+    }
+
+    /** What the camera read: a join link, or just an auth key. */
+    private void onQrScanned(String text) {
+        text = text.trim();
+        Uri link = Uri.parse(text);
+        if ("tailconnect".equals(link.getScheme()) && "join".equals(link.getHost())) {
+            applyJoinLink(link);
+            return;
+        }
+        if (text.startsWith("tc-auth-") && !text.contains(" ")) {
+            joinKey = text;
+            Toast.makeText(this, "Auth key read from the QR code.", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, "That QR code isn't a TailConnect auth key.", Toast.LENGTH_LONG).show();
+        }
+        showLogin();
+    }
+
     // ---- actions ----
 
     private void onConnectClicked() {
@@ -334,6 +358,10 @@ public class MainActivity extends Activity {
         if (request == REQ_VPN) {
             if (result == RESULT_OK) startConnect();
             else setError("TailConnect needs permission to create a VPN.");
+        } else if (request == REQ_QR && !joined) {
+            String text = data != null ? data.getStringExtra(QrScanActivity.EXTRA_TEXT) : null;
+            if (result == RESULT_OK && text != null) onQrScanned(text);
+            else showLogin(); // cancelled: back to the form as it was
         }
     }
 
@@ -380,6 +408,12 @@ public class MainActivity extends Activity {
         EditText key = field("tc-auth-…", InputType.TYPE_TEXT_VARIATION_PASSWORD, true);
         key.setText(joinKey.isEmpty() ? retryKey : joinKey);
         box.addView(key);
+        Button scan = null;
+        if (getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+            scan = new Button(this);
+            scan.setText("Read QR from Camera");
+            box.addView(scan, margins(0, dp(4), 0, 0));
+        }
         box.addView(label("Device name"), margins(0, gap, 0, 0));
         EditText host = field(form == Form.PHONE ? "phone" : "tablet", InputType.TYPE_TEXT_VARIATION_NORMAL, true);
         host.setText(joinHost);
@@ -402,6 +436,14 @@ public class MainActivity extends Activity {
                 .create();
         d.setOnDismissListener(x -> {
             if (loginDialog == d) loginDialog = null;
+        });
+        if (scan != null) scan.setOnClickListener(v -> {
+            // Keep what's typed; the pop-up is shown again after scanning.
+            joinServer = srv.getText().toString().trim();
+            joinKey = key.getText().toString().trim();
+            joinHost = host.getText().toString().trim();
+            d.dismiss();
+            startActivityForResult(new Intent(this, QrScanActivity.class), REQ_QR);
         });
         d.setOnShowListener(x -> d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             String u = srv.getText().toString().trim(), k = key.getText().toString().trim(), h = host.getText().toString().trim();
