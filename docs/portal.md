@@ -108,7 +108,7 @@ Operators see every machine's traffic; tenants see their own machines'.
 
 A device joins with an auth key: `sudo tc up --server URL --authkey KEY`, or the Auth key field in the [Android app](android.md).
 
-![Auth keys tab: options for a new key, the new key shown once, and the list of keys](images/portal-keys.png)
+![Auth keys tab: a new key shown once, with a QR code for Android devices, and the list of keys](images/portal-keys.png)
 
 | Option | Meaning |
 |---|---|
@@ -118,7 +118,9 @@ A device joins with an auth key: `sudo tc up --server URL --authkey KEY`, or the
 | Ephemeral | Machines that join with it are removed automatically after being offline for a while (`-ephemeral-timeout`, 30 minutes by default). For short-lived machines, such as test VMs and CI. |
 | Pre-approved | Machines that join with it skip the account's machine approval |
 
-The new key is shown **once**: copy it then. The server keeps only a hash. The table lists each key's uses and status (*active*, *used*, *expired* or *revoked*). **Revoke** stops a key from being used; machines that already joined with it stay.
+The new key is shown **once**: copy it then. The server keeps only a hash.
+
+**The QR code** next to it holds the server's address and the key, as a `tailconnect://join` link. On an Android phone or tablet with the TailConnect app, point the camera at it and open the link: the app fills in the server and the key; you check the device name and tap Connect ([details](android.md#join-with-a-qr-code)). The address in the code is the server's public URL (`-public-url`, or the one the installer set). The table lists each key's uses and status (*active*, *used*, *expired* or *revoked*). **Revoke** stops a key from being used; machines that already joined with it stay.
 
 ## Access rules
 

@@ -5,10 +5,13 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
@@ -31,6 +34,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.text.DateFormat;
+import java.util.Date;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -87,6 +92,17 @@ public class MainActivity extends Activity {
      */
     private void prefill(Intent i) {
         if (i == null) return;
+        Uri link = i.getData();
+        if (link != null && "tailconnect".equals(link.getScheme()) && "join".equals(link.getHost())) {
+            // From an auth key's QR code. Fill in, never connect by itself: the
+            // user checks the server (a link can come from anywhere) and taps Connect.
+            String s = link.getQueryParameter("server"), k = link.getQueryParameter("key"), h = link.getQueryParameter("hostname");
+            if (s != null && !s.isEmpty()) server.setText(s);
+            if (k != null && !k.isEmpty()) authKey.setText(k);
+            if (h != null && !h.isEmpty()) hostname.setText(h);
+            Toast.makeText(this, "Filled in from the QR code" + (s != null ? " for " + s : "") + ". Check the name and tap Connect.", Toast.LENGTH_LONG).show();
+            return;
+        }
         String v;
         if ((v = i.getStringExtra("server")) != null) server.setText(v);
         if ((v = i.getStringExtra("authkey")) != null) authKey.setText(v);
@@ -209,6 +225,10 @@ public class MainActivity extends Activity {
         errorText = text("", compact ? 14 : 15, false);
         errorText.setTextColor(RED);
         conn.addView(errorText, margins(0, dp(8), 0, 0));
+        TextView version = text(versionLine(), compact ? 12 : 13, false);
+        version.setAlpha(0.6f);
+        version.setTextIsSelectable(true);
+        conn.addView(version, margins(0, dp(compact ? 16 : 28), 0, 0));
 
         // The other devices, and the log.
         LinearLayout header = new LinearLayout(this);
@@ -464,6 +484,23 @@ public class MainActivity extends Activity {
     private String defaultHostname() {
         String m = Build.MODEL == null ? "tablet" : Build.MODEL;
         return m.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-").replaceAll("^-|-$", "");
+    }
+
+    /**
+     * "Version v0.6.0-dev · build 458903 (15 Nov 2026, 16:23)". The build
+     * number is minutes since 2026-01-01 UTC (android/build.sh), so it also
+     * says when the app was built.
+     */
+    private String versionLine() {
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            long build = pi.getLongVersionCode();
+            String when = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+                    .format(new Date((1767225600L + build * 60) * 1000));
+            return "Version " + pi.versionName + " · build " + build + " (" + when + ")";
+        } catch (PackageManager.NameNotFoundException e) {
+            return "";
+        }
     }
 
     private void setError(String msg) {

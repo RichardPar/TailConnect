@@ -114,9 +114,27 @@ public class TcVpnService extends VpnService {
             connectBridge();
             LocalApi.up(socketPath(getFilesDir()), server, authKey, hostname);
         } catch (Exception e) {
-            lastError = e.getMessage() == null ? e.toString() : e.getMessage();
-            addLog("connect: " + lastError);
+            String msg = e.getMessage() == null ? e.toString() : e.getMessage();
+            lastError = msg;
+            addLog("connect: " + msg);
             Log.w(TAG, "connect", e);
+            // A refused key doesn't undo an existing membership: if this device
+            // was already a member, it's still connected. Say so, rather than
+            // showing a bare error next to "Connected".
+            if (!authKey.isEmpty() && stillConnected()) {
+                lastError = "That auth key was refused (" + msg + "). This device is still connected: "
+                        + "it's already a member, and a key is only needed to join.";
+            }
+        }
+    }
+
+    /** Whether the daemon is running with a working membership. */
+    private boolean stillConnected() {
+        try {
+            String state = LocalApi.status(socketPath(getFilesDir())).optString("State");
+            return state.equals("Running") || state.equals("Starting");
+        } catch (IOException e) {
+            return false;
         }
     }
 

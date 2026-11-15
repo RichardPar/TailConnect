@@ -6,6 +6,7 @@ The TailConnect app puts an Android tablet or phone on your network, like any ot
 - [Build the app](#build-the-app)
 - [Install it](#install-it)
 - [Join and connect](#join-and-connect)
+- [Join with a QR code](#join-with-a-qr-code)
 - [Using it](#using-it)
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
@@ -55,6 +56,18 @@ Open TailConnect and fill in:
 
 Tap **Connect**. The first time, Android asks to allow TailConnect to set up a VPN connection; tap **OK**. A key icon in the status bar shows the VPN is on.
 
+## Join with a QR code
+
+The quickest way. In the web portal, create an auth key (Auth keys → Generate key; tick **Reusable** for several devices). A QR code appears next to the key. On the Android device:
+
+1. Open the camera app and point it at the code. (Any QR scanner works: Samsung's camera, Google Lens, the Quick Settings scanner.)
+2. Tap the link it offers (`tailconnect://join?…`). TailConnect opens with the server and the key filled in, and says which server they're for.
+3. Check the device name and tap **Connect**.
+
+The app never connects from a link by itself: a link can come from anywhere, so you always see the server and decide. A key works once unless it's reusable; to join more devices with one code, make it reusable.
+
+## Fill it in over USB
+
 To fill the form in from your computer while the device is on USB (handy when setting up several devices):
 
 ```sh
@@ -74,6 +87,7 @@ You still tap Connect, and approve the VPN, on the device.
 - **Disconnect** turns the VPN off. The device stays a member of the network; **Connect** brings it back without an auth key. **Log out of this network** removes it, so joining again needs a key.
 - **Always on:** Settings → Connections → More connection settings → VPN → the gear next to TailConnect → Always-on VPN. Android then starts it at boot and after it was stopped.
 - **Show log** shows the client's recent log, for troubleshooting.
+- **Version and build**, at the bottom of the connection panel: for example `Version v0.6.0-dev · build 458951 (15 Nov 2026 17:11)`. The build number also says when the app was built. Include it when reporting a problem.
 
 ## How it works
 
@@ -89,6 +103,8 @@ You still tap Connect, and approve the VPN, on the device.
 |---|---|
 | "TailConnect needs permission to create a VPN" | You tapped Cancel on Android's VPN prompt. Tap Connect again and allow it. If another VPN app is set to always-on, turn that off first. |
 | "Not joined: enter an auth key" | The device isn't a member yet, or was removed or logged out. Enter a new auth key and connect. |
+| "invalid, expired or already-used auth key" | Keys work once unless they're reusable, and expire. Create a new one. If the device is already connected, you don't need a key at all: leave the field empty. The server logs each refused key's start (`journalctl -u tc-control \| grep refused`), to match against `tc-control keys list`. |
+| The camera offers no link for the QR code | Use a scanner that opens links (Google Lens, the camera's QR mode). The code holds a `tailconnect://join` link, so the TailConnect app must be installed first. |
 | Connects, but no devices are listed | The account has no other machines, or [access rules](usage.md#access-rules) hide them. Check in the web portal. |
 | Devices show **Relay** on the same Wi-Fi | The Wi-Fi may isolate its clients (common on guest networks). It still works, more slowly. |
 | Names don't resolve in an app | Check that the key icon is showing. Some apps cache DNS; restart the app. |

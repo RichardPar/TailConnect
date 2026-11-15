@@ -387,6 +387,8 @@ $("key-form").addEventListener("submit", async (ev) => {
   try {
     const r = await api("POST", "/api/v1/keys", body);
     $("new-key-value").textContent = r.key;
+    $("new-key-qr").hidden = !r.qrSvg;
+    if (r.qrSvg) $("new-key-qr-img").src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(r.qrSvg);
     $("new-key").hidden = false;
     refresh();
   } catch (e) { handleErr(e); }

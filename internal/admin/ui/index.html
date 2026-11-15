@@ -107,6 +107,10 @@
         <div id="new-key" class="new-key" hidden>
           <p><strong>New auth key</strong>. Copy it now. It won't be shown again.</p>
           <div class="copy-row"><code id="new-key-value"></code><button id="copy-key" class="ghost" data-copy="new-key-value">Copy</button></div>
+          <div id="new-key-qr" class="qr-row" hidden>
+            <img id="new-key-qr-img" alt="QR code with the server address and this key">
+            <p class="muted">On an Android phone or tablet with the TailConnect app, point the camera at this code and open the link: the app fills in the server and the key. Check the device name and tap Connect.</p>
+          </div>
         </div>
         <div class="table-wrap"><table>
           <thead><tr><th>ID</th><th>Key</th><th class="op-only">Account</th><th>Type</th><th>Uses</th><th>Expires</th><th>Status</th><th></th></tr></thead>

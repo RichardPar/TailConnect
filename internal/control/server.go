@@ -282,17 +282,23 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Alloc:      s.ipam.Next,
 		KeyExpiry:  s.cfg.KeyExpiry,
 	})
+	// Refusals are logged with the key's visible prefix (as `tc-control keys
+	// list` shows it), so an operator can tell which key a device tried.
+	refused := func(reason string) {
+		s.stats.registerRefused.Add(1)
+		s.log.Info("registration refused", "reason", reason, "host", req.Hostinfo.Hostname, "key", keyPrefix(req.AuthKey), "remote", r.RemoteAddr)
+	}
 	switch {
 	case errors.Is(err, db.ErrInvalidAuthKey):
-		s.stats.registerRefused.Add(1)
+		refused("auth key invalid, expired, revoked or already used")
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	case errors.Is(err, db.ErrExists):
-		s.stats.registerRefused.Add(1)
+		refused("node key belongs to another machine")
 		writeError(w, http.StatusConflict, "node key already registered to another machine")
 		return
 	case errors.Is(err, db.ErrAccountInactive):
-		s.stats.registerRefused.Add(1)
+		refused("account not active")
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	case errors.Is(err, ipam.ErrExhausted):
@@ -722,4 +728,16 @@ func ValidDomain(d string) error {
 // tenantDomain is the DNS domain of a tenant's machines: <tenant>.<base>.
 func (s *Server) tenantDomain(user string) string {
 	return db.TenantLabel(user) + "." + s.cfg.BaseDomain
+}
+
+// keyPrefix is the start of an auth key, as `tc-control keys list` shows it
+// ("" if none): enough to tell keys apart, not to use one.
+func keyPrefix(k string) string {
+	if k == "" {
+		return ""
+	}
+	if n := len(db.AuthKeyPrefix) + 8; len(k) > n {
+		return k[:n] + "…"
+	}
+	return "(malformed)"
 }

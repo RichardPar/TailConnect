@@ -120,7 +120,7 @@ func (s *Server) Handler() http.Handler {
 func securityHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hd := w.Header()
-		hd.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		hd.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		hd.Set("X-Content-Type-Options", "nosniff")
 		hd.Set("Referrer-Policy", "no-referrer")
 		hd.Set("Cache-Control", "no-store")
@@ -490,7 +490,11 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("admin: auth key created", "id", k.ID, "user", u.Name, "reusable", k.Reusable)
-	writeJSON(w, http.StatusCreated, map[string]any{"key": secret, "info": toAPIKey(k, s.now())})
+	resp := map[string]any{"key": secret, "info": toAPIKey(k, s.now()), "joinURL": JoinURL(s.info.ControlURL, secret)}
+	if svg, err := qrSVG(JoinURL(s.info.ControlURL, secret)); err == nil {
+		resp["qrSvg"] = svg
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {

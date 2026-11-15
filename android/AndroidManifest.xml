@@ -29,6 +29,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- tailconnect://join?server=…&key=… links, from the web portal's
+                 auth key QR codes: they fill in the form; the user taps Connect. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tailconnect" android:host="join" />
+            </intent-filter>
         </activity>
 
         <service

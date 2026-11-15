@@ -137,3 +137,9 @@ button.traffic-link:hover div:first-child { text-decoration: underline; }
 tr.detail > td { background: var(--bg); }
 table.peer-traffic { width: auto; margin-top: 6px; }
 table.peer-traffic td { padding: 4px 18px 4px 0; border: none; white-space: nowrap; }
+
+/* An auth key's QR code, for joining Android devices with the camera. */
+.qr-row { display: flex; gap: 20px; align-items: center; margin-top: 14px; }
+.qr-row img { width: 180px; height: 180px; border-radius: 8px; background: #fff; flex: none; }
+.qr-row p { max-width: 46ch; margin: 0; }
+@media (max-width: 600px) { .qr-row { flex-direction: column; align-items: flex-start; } }

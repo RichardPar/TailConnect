@@ -93,7 +93,7 @@ Name for this device [laptop]:
 Connected as laptop.alice.home.internal (100.64.0.2, fd7c:7c0e:a1e0::6440:2)
 ```
 
-**Android:** build and install the app ([how](docs/android.md#build-the-app)), then enter the server, the auth key and a name, and tap Connect.
+**Android:** build and install the app ([how](docs/android.md#build-the-app)). Then, in the web portal, create an auth key and point the device's camera at its QR code: the app opens with the server and key filled in ([how](docs/android.md#join-with-a-qr-code)). Or type them in. Tap Connect.
 
 <img alt="The Android app connected: this device's name and addresses, and four other devices reached directly" src="docs/images/android-phone.png" width="300">
 
