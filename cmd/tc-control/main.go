@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,11 +27,14 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+
+	"golang.org/x/term"
 	"time"
 
 	"tailconnect/internal/admin"
 	"tailconnect/internal/control"
 	"tailconnect/internal/db"
+	"tailconnect/internal/password"
 	"tailconnect/internal/protocol"
 	"tailconnect/internal/relay"
 	"tailconnect/internal/stun"
@@ -44,7 +48,10 @@ const usage = `tc-control: TailConnect coordination server
 Usage:
   tc-control serve [flags]
   tc-control admin-token [-db PATH]
-  tc-control users create NAME | list | delete NAME
+  tc-control users create NAME [-operator] [-password] | list | delete NAME
+  tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
+  tc-control users role NAME operator|tenant
+  tc-control invites create [-expiration 168h] | list | revoke ID
   tc-control keys create -user NAME [-reusable] [-ephemeral] [-expiration 24h]
   tc-control keys list [-user NAME] | revoke ID
   tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
@@ -67,6 +74,8 @@ func main() {
 		err = cmdServe(args)
 	case "admin-token":
 		err = cmdAdminToken(args)
+	case "invites":
+		err = cmdInvites(args)
 	case "users":
 		err = cmdUsers(args)
 	case "keys":
@@ -150,6 +159,7 @@ func cmdServe(args []string) error {
 	listen := fs.String("listen", ":7740", "client-facing control API address")
 	adminListen := fs.String("admin-listen", "127.0.0.1:7741", `admin web UI/API address ("" disables)`)
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
+	signup := fs.String("signup", admin.SignupApproval, "who may create accounts in the web portal: off, approval (operator approves), invite (needs an invite code) or open")
 	magicDNS := fs.Bool("magic-dns", true, "clients resolve <node>.<domain> names in-tunnel and point the OS at them")
 	nameservers := fs.String("dns-nameservers", "", "comma-separated upstream resolvers for all other names; clients then send all DNS through MagicDNS (default: clients keep their own resolvers)")
 	publicURL := fs.String("public-url", "", "URL clients use to reach this server (shown in the admin UI)")
@@ -169,6 +179,9 @@ func cmdServe(args []string) error {
 
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return usageError("-tls-cert and -tls-key must be given together")
+	}
+	if !admin.ValidSignupMode(*signup) {
+		return usageError("-signup must be off, approval, invite or open")
 	}
 	*domain = strings.TrimSuffix(strings.ToLower(*domain), ".")
 	if err := control.ValidDomain(*domain); err != nil {
@@ -270,14 +283,28 @@ func cmdServe(args []string) error {
 			return err
 		}
 		if !ok {
-			log.Warn("no admin token configured; run `tc-control admin-token` to create one before signing in")
+			users, err := d.ListUsers(ctx)
+			if err != nil {
+				return err
+			}
+			canSignIn := false
+			for _, u := range users {
+				canSignIn = canSignIn || (u.Operator() && u.Active() && u.HasPassword())
+			}
+			if !canSignIn {
+				log.Warn("nobody can sign in to the web portal as operator yet: run `tc-control users create NAME -operator -password` (or `tc-control admin-token`)")
+			}
 		}
 		if !isLoopback(*adminListen) && *tlsCert == "" {
-			log.Warn("admin web server is on a non-loopback address without TLS; the admin token and session cookie travel in clear text",
+			log.Warn("web portal is on a non-loopback address without TLS; passwords, the admin token and session cookies travel in clear text",
 				"listen", *adminListen)
 		}
+		if *signup != admin.SignupOff && isLoopback(*adminListen) {
+			log.Info("sign-up is enabled but the web portal only listens on loopback; tenants need -admin-listen on a reachable address (with TLS)",
+				"signup", *signup)
+		}
 		adm := admin.New(d, admin.Info{
-			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, ControlURL: *publicURL, Version: version,
+			MachineKey: ctl.MachinePublic().String(), BaseDomain: *domain, ControlURL: *publicURL, Version: version, Signup: *signup,
 		}, log)
 		servers = append(servers, &http.Server{
 			Addr: *adminListen, Handler: adm.Handler(),
@@ -370,6 +397,8 @@ func cmdUsers(args []string) error {
 	}
 	fs, dbPath := flags("users " + sub)
 	asJSON := fs.Bool("json", false, "output JSON")
+	operator := fs.Bool("operator", false, "users create: make the account an operator")
+	setPassword := fs.Bool("password", false, "users create: also set a password (prompted, or read from stdin)")
 	parseArgs(fs, rest)
 	d, err := openDB(*dbPath)
 	if err != nil {
@@ -380,15 +409,24 @@ func cmdUsers(args []string) error {
 
 	switch sub {
 	case "create":
-		name, err := oneArg(fs, "users create NAME")
+		name, err := oneArg(fs, "users create NAME [-operator] [-password]")
 		if err != nil {
 			return err
 		}
-		u, err := d.CreateUser(ctx, name)
+		acct := db.NewAccount{Name: name}
+		if *operator {
+			acct.Role = db.RoleOperator
+		}
+		if *setPassword {
+			if acct.PasswordHash, err = readNewPassword(name); err != nil {
+				return err
+			}
+		}
+		u, err := d.CreateAccount(ctx, acct)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("created user %s (id %d)\n", u.Name, u.ID)
+		fmt.Printf("created %s %s (id %d)\n", u.Role, u.Name, u.ID)
 	case "list":
 		users, err := d.ListUsers(ctx)
 		if err != nil {
@@ -397,9 +435,13 @@ func cmdUsers(args []string) error {
 		if *asJSON {
 			return printJSON(users)
 		}
-		tw := table("ID", "NAME", "CREATED")
+		tw := table("ID", "NAME", "ROLE", "STATUS", "PASSWORD", "CREATED")
 		for _, u := range users {
-			fmt.Fprintf(tw, "%d\t%s\t%s\n", u.ID, u.Name, u.CreatedAt.Local().Format(time.DateTime))
+			pw := "no"
+			if u.HasPassword() {
+				pw = "yes"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", u.ID, u.Name, u.Role, u.Status, pw, u.CreatedAt.Local().Format(time.DateTime))
 		}
 		return tw.Flush()
 	case "delete":
@@ -411,8 +453,146 @@ func cmdUsers(args []string) error {
 			return err
 		}
 		fmt.Printf("deleted user %s and all their machines and keys\n", name)
+	case "passwd":
+		name, err := oneArg(fs, "users passwd NAME")
+		if err != nil {
+			return err
+		}
+		if _, err := d.GetUser(ctx, name); err != nil {
+			return err
+		}
+		hash, err := readNewPassword(name)
+		if err != nil {
+			return err
+		}
+		if err := d.SetPassword(ctx, name, hash); err != nil {
+			return err
+		}
+		fmt.Printf("password set for %s (their other web sessions are signed out)\n", name)
+	case "approve", "activate", "suspend":
+		name, err := oneArg(fs, "users "+sub+" NAME")
+		if err != nil {
+			return err
+		}
+		status := db.StatusActive
+		if sub == "suspend" {
+			status = db.StatusSuspended
+		}
+		if err := d.SetUserStatus(ctx, name, status); err != nil {
+			return err
+		}
+		if status == db.StatusSuspended {
+			fmt.Printf("suspended %s: their machines are cut off and they are signed out\n", name)
+		} else {
+			fmt.Printf("%s is active\n", name)
+		}
+	case "role":
+		if fs.NArg() != 2 || (fs.Arg(1) != db.RoleOperator && fs.Arg(1) != db.RoleTenant) {
+			return usageError("usage: tc-control users role NAME operator|tenant")
+		}
+		if err := d.SetUserRole(ctx, fs.Arg(0), fs.Arg(1)); err != nil {
+			return err
+		}
+		article := "a"
+		if fs.Arg(1) == db.RoleOperator {
+			article = "an"
+		}
+		fmt.Printf("%s is now %s %s\n", fs.Arg(0), article, fs.Arg(1))
 	default:
 		return usageError("unknown users command " + strconv.Quote(sub))
+	}
+	return nil
+}
+
+// readNewPassword prompts twice on a terminal (no echo), or reads one line
+// from stdin when it isn't a terminal (for scripts), and returns its hash.
+func readNewPassword(name string) (string, error) {
+	var pw string
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprintf(os.Stderr, "New password for %s: ", name)
+		a, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprint(os.Stderr, "Repeat it: ")
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", err
+		}
+		if string(a) != string(b) {
+			return "", errors.New("the passwords don't match")
+		}
+		pw = string(a)
+	} else {
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && line == "" {
+			return "", fmt.Errorf("read password from stdin: %w", err)
+		}
+		pw = strings.TrimRight(line, "\r\n")
+	}
+	return password.Hash(pw)
+}
+
+func cmdInvites(args []string) error {
+	sub, rest, err := subcommand(args, "invites")
+	if err != nil {
+		return err
+	}
+	fs, dbPath := flags("invites " + sub)
+	asJSON := fs.Bool("json", false, "output JSON")
+	expiration := fs.Duration("expiration", 7*24*time.Hour, "invites create: how long the code stays valid")
+	parseArgs(fs, rest)
+	d, err := openDB(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	switch sub {
+	case "create":
+		code, inv, err := d.CreateInvite(ctx, *expiration)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "invite %d, single use, expires %s (shown once):\n", inv.ID, inv.ExpiresAt.Local().Format(time.DateTime))
+		fmt.Println(code)
+	case "list":
+		list, err := d.ListInvites(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return printJSON(list)
+		}
+		now := time.Now()
+		tw := table("ID", "CODE", "EXPIRES", "STATUS")
+		for _, i := range list {
+			status := "unused"
+			switch {
+			case i.Revoked:
+				status = "revoked"
+			case i.UsedBy != "" || !i.UsedAt.IsZero():
+				status = "used by " + i.UsedBy
+			case !i.Usable(now):
+				status = "expired"
+			}
+			fmt.Fprintf(tw, "%d\t%s…\t%s\t%s\n", i.ID, i.Prefix, i.ExpiresAt.Local().Format(time.DateTime), status)
+		}
+		return tw.Flush()
+	case "revoke":
+		id, err := idArg(fs, "invites revoke ID")
+		if err != nil {
+			return err
+		}
+		if err := d.RevokeInvite(ctx, id); err != nil {
+			return err
+		}
+		fmt.Printf("revoked invite %d\n", id)
+	default:
+		return usageError("unknown invites command " + strconv.Quote(sub))
 	}
 	return nil
 }

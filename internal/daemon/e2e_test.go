@@ -478,3 +478,40 @@ func TestControlServerMoved(t *testing.T) {
 		t.Fatal("switching to another server without an auth key should fail")
 	}
 }
+
+func TestSuspendedAccount(t *testing.T) {
+	cdb, url, aliceKey := newControl(t)
+	bob, _ := cdb.CreateUser(context.Background(), "bob")
+	bobKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: bob.ID, Reusable: true, TTL: time.Hour})
+	a, b := newTestNode(t, "alpha"), newTestNode(t, "beta")
+	if err := a.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: aliceKey, Hostname: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: bobKey, Hostname: "beta"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both running with a peer", func() bool { return running(a, 1)() && running(b, 1)() })
+
+	// Suspending bob cuts his machine off: alpha drops it, and beta gets an
+	// empty map with a notice explaining why.
+	if err := cdb.SetUserStatus(context.Background(), "bob", db.StatusSuspended); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alpha drops beta", running(a, 0))
+	waitFor(t, "beta cut off with a notice", func() bool {
+		s := b.d.Status()
+		return len(s.Peers) == 0 && strings.Contains(s.Notice, "suspended")
+	})
+	// A suspended account's machines can't (re)register either.
+	if err := b.d.Up(localapi.UpRequest{AuthKey: bobKey}); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("re-register while suspended: %v", err)
+	}
+
+	// Reactivation restores everything without any action on the devices.
+	if err := cdb.SetUserStatus(context.Background(), "bob", db.StatusActive); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both see each other again", func() bool {
+		return running(a, 1)() && running(b, 1)() && b.d.Status().Notice == ""
+	})
+}

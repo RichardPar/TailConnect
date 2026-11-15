@@ -112,3 +112,20 @@ td.actions { text-align: right; white-space: nowrap; }
   .top { padding: 10px 16px; }
   main { padding: 16px; }
 }
+
+/* accounts and sign-up */
+:root { --warn: #b7791f; }
+@media (prefers-color-scheme: dark) { :root { --warn: #e0a94a; } }
+.field { display: grid; gap: 4px; color: var(--muted); font-size: 13px; }
+.field input { color: var(--text); font-size: 14px; }
+.alt { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0; font-size: 13px; }
+.alt a, a { color: var(--accent); }
+.who { color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.badge.warn { color: var(--warn); border-color: currentColor; }
+.count { background: var(--danger); color: #fff; border-radius: 9px; font-size: 11px; padding: 0 6px; margin-left: 4px; }
+button.small { padding: 3px 9px; }
+td.actions button { margin-left: 4px; }
+.intro { margin: -4px 0 12px; }
+.card.narrow { max-width: 520px; }
+.stack { display: grid; gap: 10px; }
+h3 { font-size: 14px; margin: 8px 0 0; font-weight: 600; }

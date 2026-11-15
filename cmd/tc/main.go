@@ -187,6 +187,9 @@ func cmdStatus(c *localapi.Client, args []string) error {
 	if st.Error != "" {
 		fmt.Println("Warning:", st.Error)
 	}
+	if st.Notice != "" {
+		fmt.Println("Notice:", st.Notice)
+	}
 	if d := st.DNS; d != nil {
 		how := d.HostConfig
 		switch {

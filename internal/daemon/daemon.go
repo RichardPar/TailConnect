@@ -368,6 +368,7 @@ func (d *Daemon) Status() localapi.Status {
 	if d.netmap != nil {
 		self = &d.netmap.Self
 		s.Domain = d.netmap.DNS.Domain
+		s.Notice = d.netmap.Notice
 		for _, p := range d.netmap.Peers {
 			ps := peerStatus(p)
 			if st, ok := stats[p.NodeKey]; ok {

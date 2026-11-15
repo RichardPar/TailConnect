@@ -36,6 +36,7 @@ type UpRequest struct {
 type Status struct {
 	State      string
 	Error      string `json:",omitempty"` // last error, if any
+	Notice     string `json:",omitempty"` // message from the control server (e.g. account suspended)
 	ControlURL string `json:",omitempty"`
 	Domain     string `json:",omitempty"` // MagicDNS suffix
 	TUN        string `json:",omitempty"`

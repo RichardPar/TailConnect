@@ -1,10 +1,15 @@
-// Package admin is tc-control's administration web server: a JSON API under
-// /api/v1 and an embedded single-page UI at /.
+// Package admin is tc-control's web portal: a JSON API under /api/v1 and an
+// embedded single-page UI at /.
 //
-// Authentication uses an admin token (created with `tc-control admin-token`).
-// Browsers exchange it for an HMAC-signed session cookie; scripts can send it
-// as "Authorization: Bearer <token>". Mutating requests must be JSON, and
-// cookies are SameSite=Strict, which together block cross-site request forgery.
+// People sign in with an account (name and password). Tenants see and manage
+// only their own machines and auth keys; operators manage the whole server:
+// accounts, approvals and invites. The admin token (`tc-control admin-token`)
+// is the operator's break-glass credential, and the API token for scripts
+// ("Authorization: Bearer <token>").
+//
+// Browsers get an HMAC-signed session cookie. Mutating requests must be JSON,
+// and cookies are SameSite=Strict, which together block cross-site request
+// forgery.
 package admin
 
 import (
@@ -12,6 +17,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -21,6 +27,7 @@ import (
 	"time"
 
 	"tailconnect/internal/db"
+	"tailconnect/internal/password"
 	"tailconnect/internal/protocol"
 )
 
@@ -36,6 +43,7 @@ type Info struct {
 	BaseDomain string
 	ControlURL string
 	Version    string
+	Signup     string // sign-up mode (SignupOff, ...); "" = off
 }
 
 type Server struct {
@@ -43,28 +51,48 @@ type Server struct {
 	info Info
 	log  *slog.Logger
 	now  func() time.Time
+
+	hashSem   chan struct{} // bounds concurrent password hashing
+	authLimit *limiter      // sign-in and sign-up attempts per client IP
 }
 
 func New(d *db.DB, info Info, log *slog.Logger) *Server {
-	return &Server{db: d, info: info, log: log, now: time.Now}
+	return &Server{
+		db: d, info: info, log: log, now: time.Now,
+		hashSem:   make(chan struct{}, 4),
+		authLimit: newLimiter(6*time.Second, 10), // 10 at once, then one every 6s
+	}
 }
 
 func (s *Server) Handler() http.Handler {
 	api := http.NewServeMux()
+	// Any signed-in account; tenants see only their own data.
 	api.HandleFunc("GET /api/v1/status", s.status)
-	api.HandleFunc("GET /api/v1/users", s.listUsers)
-	api.HandleFunc("POST /api/v1/users", s.createUser)
-	api.HandleFunc("DELETE /api/v1/users/{name}", s.deleteUser)
+	api.HandleFunc("GET /api/v1/me", s.me)
+	api.HandleFunc("POST /api/v1/me/password", s.changeOwnPassword)
 	api.HandleFunc("GET /api/v1/keys", s.listKeys)
 	api.HandleFunc("POST /api/v1/keys", s.createKey)
 	api.HandleFunc("DELETE /api/v1/keys/{id}", s.revokeKey)
 	api.HandleFunc("GET /api/v1/nodes", s.listNodes)
 	api.HandleFunc("DELETE /api/v1/nodes/{id}", s.deleteNode)
 	api.HandleFunc("POST /api/v1/nodes/{id}/rename", s.renameNode)
+	// Operators only.
+	op := func(pattern string, h http.HandlerFunc) { api.Handle(pattern, operatorOnly(h)) }
+	op("GET /api/v1/users", s.listUsers)
+	op("POST /api/v1/users", s.createUser)
+	op("DELETE /api/v1/users/{name}", s.deleteUser)
+	op("POST /api/v1/users/{name}/status", s.setStatus)
+	op("POST /api/v1/users/{name}/role", s.setRole)
+	op("POST /api/v1/users/{name}/password", s.setUserPassword)
+	op("GET /api/v1/invites", s.listInvites)
+	op("POST /api/v1/invites", s.createInvite)
+	op("DELETE /api/v1/invites/{id}", s.revokeInvite)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/config", s.config)
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.logout)
+	mux.HandleFunc("POST /api/signup", s.signup)
 	mux.Handle("/api/v1/", s.requireAuth(api))
 	sub, _ := fs.Sub(uiFS, "ui")
 	mux.Handle("/", http.FileServerFS(sub))
@@ -109,11 +137,14 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 			s.internal(w, "auth", err)
 			return
 		}
+		var p principal
 		ok := false
 		if tok, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); found {
 			ok = st.checkToken(tok)
 		} else if c, err := r.Cookie(sessionCookie); err == nil {
-			ok = st.checkSession(c.Value, s.now())
+			if subject, valid := st.checkSession(c.Value, s.now()); valid {
+				p, ok = s.resolve(r.Context(), subject)
+			}
 		}
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "not logged in")
@@ -123,57 +154,33 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
-		h.ServeHTTP(w, r)
+		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, p)))
 	})
 }
 
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	if err := checkMutation(r); err != nil {
-		writeError(w, http.StatusForbidden, err.Error())
-		return
-	}
-	var req struct{ Token string }
-	if !decode(w, r, &req) {
-		return
-	}
-	st, err := s.loadAuth(r.Context())
-	if err != nil {
-		s.internal(w, "login", err)
-		return
-	}
-	if st.tokenHash == "" {
-		writeError(w, http.StatusUnauthorized, "no admin token configured; run `tc-control admin-token` on the server")
-		return
-	}
-	if !st.checkToken(strings.TrimSpace(req.Token)) {
-		s.log.Warn("admin login failed", "remote", r.RemoteAddr)
-		time.Sleep(500 * time.Millisecond) // blunt online guessing
-		writeError(w, http.StatusUnauthorized, "invalid token")
-		return
-	}
-	val, exp := st.newSession(s.now())
-	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: val, Path: "/", Expires: exp,
-		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
+func operatorOnly(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !principalFrom(r.Context()).operator() {
+			writeError(w, http.StatusForbidden, "operators only")
+			return
+		}
+		h(w, r)
 	})
-	s.log.Info("admin login", "remote", r.RemoteAddr)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // --- API types ---
 
 type apiUser struct {
-	Name    string    `json:"name"`
-	Created time.Time `json:"created"`
-	Nodes   int       `json:"nodes"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"`
+	Role        string    `json:"role"`
+	HasPassword bool      `json:"hasPassword"`
+	Created     time.Time `json:"created"`
+	Nodes       int       `json:"nodes"`
+}
+
+func toAPIUser(u db.User, nodes int) apiUser {
+	return apiUser{Name: u.Name, Status: u.Status, Role: u.Role, HasPassword: u.HasPassword(), Created: u.CreatedAt, Nodes: nodes}
 }
 
 type apiKey struct {
@@ -228,12 +235,8 @@ func (s *Server) toAPINode(n db.Node) apiNode {
 // --- handlers ---
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
-	nodes, err := s.db.ListNodes(r.Context(), 0)
-	if err != nil {
-		s.internal(w, "status", err)
-		return
-	}
-	users, err := s.db.ListUsers(r.Context())
+	p := principalFrom(r.Context())
+	nodes, err := s.db.ListNodes(r.Context(), p.scope())
 	if err != nil {
 		s.internal(w, "status", err)
 		return
@@ -244,10 +247,25 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 			online++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"machineKey": s.info.MachineKey, "baseDomain": s.info.BaseDomain, "controlURL": s.info.ControlURL,
-		"version": s.info.Version, "users": len(users), "nodes": len(nodes), "online": online,
-	})
+		"version": s.info.Version, "nodes": len(nodes), "online": online, "signup": s.info.Signup,
+	}
+	if p.operator() {
+		users, err := s.db.ListUsers(r.Context())
+		if err != nil {
+			s.internal(w, "status", err)
+			return
+		}
+		pending := 0
+		for _, u := range users {
+			if u.Status == db.StatusPending {
+				pending++
+			}
+		}
+		out["users"], out["pending"] = len(users), pending
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
@@ -267,28 +285,43 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]apiUser, 0, len(users))
 	for _, u := range users {
-		out = append(out, apiUser{Name: u.Name, Created: u.CreatedAt, Nodes: count[u.ID]})
+		out = append(out, toAPIUser(u, count[u.ID]))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		Password string `json:"password"` // optional: without one, the account can't sign in to the portal
+		Role     string `json:"role"`     // default tenant
 	}
 	if !decode(w, r, &req) {
 		return
 	}
-	u, err := s.db.CreateUser(r.Context(), strings.TrimSpace(req.Name))
+	acct := db.NewAccount{Name: strings.TrimSpace(req.Name), Role: req.Role}
+	if req.Password != "" {
+		var err error
+		s.hashing(func() { acct.PasswordHash, err = password.Hash(req.Password) })
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	u, err := s.db.CreateAccount(r.Context(), acct)
 	if s.dbError(w, "create user", err) {
 		return
 	}
 	s.log.Info("admin: user created", "user", u.Name)
-	writeJSON(w, http.StatusCreated, apiUser{Name: u.Name, Created: u.CreatedAt})
+	writeJSON(w, http.StatusCreated, toAPIUser(u, 0))
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+	u, ok := s.targetUser(w, r, true)
+	if !ok {
+		return
+	}
+	name := u.Name
 	if s.dbError(w, "delete user", s.db.DeleteUser(r.Context(), name)) {
 		return
 	}
@@ -297,7 +330,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := s.db.ListPreAuthKeys(r.Context(), 0)
+	keys, err := s.db.ListPreAuthKeys(r.Context(), principalFrom(r.Context()).scope())
 	if err != nil {
 		s.internal(w, "list keys", err)
 		return
@@ -335,8 +368,21 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ttl must be a duration between 1s and 2160h (90 days)")
 		return
 	}
+	// Tenants create keys for themselves; operators for anyone (default: themselves).
+	p := principalFrom(r.Context())
+	if req.User == "" && p.user != nil {
+		req.User = p.user.Name
+	}
+	if !p.operator() && req.User != p.user.Name {
+		writeError(w, http.StatusForbidden, "you can only create keys for your own account")
+		return
+	}
 	u, err := s.db.GetUser(r.Context(), req.User)
 	if s.dbError(w, "create key", err) {
+		return
+	}
+	if !u.Active() {
+		writeError(w, http.StatusBadRequest, "account "+u.Name+" is not active (pending approval or suspended)")
 		return
 	}
 	secret, k, err := s.db.CreatePreAuthKey(r.Context(), db.CreatePreAuthKeyParams{
@@ -351,7 +397,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
-	if !ok || s.dbError(w, "revoke key", s.db.RevokePreAuthKey(r.Context(), id)) {
+	if !ok || s.dbError(w, "revoke key", s.db.RevokeUserPreAuthKey(r.Context(), id, principalFrom(r.Context()).scope())) {
 		return
 	}
 	s.log.Info("admin: auth key revoked", "id", id)
@@ -359,7 +405,7 @@ func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
-	nodes, err := s.db.ListNodes(r.Context(), 0)
+	nodes, err := s.db.ListNodes(r.Context(), principalFrom(r.Context()).scope())
 	if err != nil {
 		s.internal(w, "list nodes", err)
 		return
@@ -371,8 +417,28 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
+// ownNode loads node {id}, which must be visible to the principal. Another
+// tenant's node is reported as not found.
+func (s *Server) ownNode(w http.ResponseWriter, r *http.Request) (db.Node, bool) {
 	id, ok := pathID(w, r)
+	if !ok {
+		return db.Node{}, false
+	}
+	n, err := s.db.GetNode(r.Context(), id)
+	if err == nil {
+		if sc := principalFrom(r.Context()).scope(); sc != 0 && n.UserID != sc {
+			err = fmt.Errorf("node %d: %w", id, db.ErrNotFound)
+		}
+	}
+	if s.dbError(w, "node", err) {
+		return db.Node{}, false
+	}
+	return n, true
+}
+
+func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
+	n, ok := s.ownNode(w, r)
+	id := n.ID
 	if !ok || s.dbError(w, "delete node", s.db.DeleteNode(r.Context(), id)) {
 		return
 	}
@@ -381,10 +447,11 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renameNode(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
+	n0, ok := s.ownNode(w, r)
 	if !ok {
 		return
 	}
+	id := n0.ID
 	var req struct {
 		Name string `json:"name"`
 	}

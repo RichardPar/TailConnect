@@ -18,6 +18,7 @@ type Node struct {
 	ID         int64
 	UserID     int64
 	UserName   string
+	UserStatus string // the owning account's status (StatusActive, ...)
 	MachineKey string
 	NodeKey    string
 	DiscoKey   string
@@ -104,6 +105,9 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 		if err != nil {
 			return RegisterResult{}, err
 		}
+		if n.UserStatus != StatusActive {
+			return RegisterResult{}, ErrAccountInactive
+		}
 		return RegisterResult{Node: n}, tx.Commit()
 
 	case err == nil:
@@ -123,6 +127,9 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 		n, err := getNodeTx(ctx, tx, existing.ID)
 		if err != nil {
 			return RegisterResult{}, err
+		}
+		if n.UserStatus != StatusActive {
+			return RegisterResult{}, ErrAccountInactive
 		}
 		return RegisterResult{Node: n, Rotated: true}, tx.Commit()
 
@@ -200,7 +207,7 @@ func (d *DB) TouchNode(ctx context.Context, id int64) error {
 }
 
 const nodeSelect = `
-	SELECT n.id, n.user_id, u.name, n.machine_key, n.node_key, n.disco_key, n.hostname, n.given_name,
+	SELECT n.id, n.user_id, u.name, u.status, n.machine_key, n.node_key, n.disco_key, n.hostname, n.given_name,
 	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.created_at, n.last_seen, n.expires_at
 	FROM nodes n JOIN users u ON u.id = n.user_id`
 
@@ -209,7 +216,7 @@ func scanNode(r rowScanner) (Node, error) {
 	var v4, v6, eps string
 	var created int64
 	var lastSeen, expires sql.NullInt64
-	err := r.Scan(&n.ID, &n.UserID, &n.UserName, &n.MachineKey, &n.NodeKey, &n.DiscoKey, &n.Hostname,
+	err := r.Scan(&n.ID, &n.UserID, &n.UserName, &n.UserStatus, &n.MachineKey, &n.NodeKey, &n.DiscoKey, &n.Hostname,
 		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &created, &lastSeen, &expires)
 	if err != nil {
 		return Node{}, err

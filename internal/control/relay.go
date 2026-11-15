@@ -40,9 +40,12 @@ func NewEmbeddedRelay(ctx context.Context, d *db.DB, log *slog.Logger) (*relay.S
 		return nil, fmt.Errorf("relay key: %w", err)
 	}
 	authorize := func(ctx context.Context, nk key.NodePublic) error {
-		_, err := d.GetNodeByNodeKey(ctx, nk.String())
+		n, err := d.GetNodeByNodeKey(ctx, nk.String())
 		if errors.Is(err, db.ErrNotFound) {
 			return errors.New("node not registered")
+		}
+		if err == nil && n.UserStatus != db.StatusActive {
+			return errors.New("account not active")
 		}
 		return err
 	}

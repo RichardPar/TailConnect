@@ -84,6 +84,9 @@ type LogoutRequest struct {
 type MapResponse struct {
 	// KeepAlive messages carry no other fields; they only keep the stream alive.
 	KeepAlive bool `json:",omitempty"`
+	// Notice is a message for the device's user, e.g. that the account is
+	// suspended (and therefore the map has no peers).
+	Notice string `json:",omitempty"`
 
 	Self   Node
 	Peers  []Node

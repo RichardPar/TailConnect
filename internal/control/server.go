@@ -255,6 +255,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, db.ErrExists):
 		writeError(w, http.StatusConflict, "node key already registered to another machine")
 		return
+	case errors.Is(err, db.ErrAccountInactive):
+		writeError(w, http.StatusForbidden, err.Error())
+		return
 	case errors.Is(err, ipam.ErrExhausted):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -447,14 +450,20 @@ func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, 
 		},
 		Relays: s.cfg.Relays,
 	}
-	found := false
+	found, suspended := false, false
 	for _, n := range nodes {
+		if n.ID != id && n.UserStatus != db.StatusActive {
+			continue // suspended accounts' machines drop out of everyone's map
+		}
 		pn, err := s.toProtocol(n)
 		if err != nil {
 			return protocol.MapResponse{}, err
 		}
 		if n.ID == id {
 			resp.Self, found = pn, true
+			if n.UserStatus != db.StatusActive {
+				suspended = true
+			}
 		} else {
 			// LastSeen changes on every keep-alive; leaving it out of peers
 			// keeps maps stable so unchanged maps aren't re-sent.
@@ -466,6 +475,14 @@ func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, 
 		return protocol.MapResponse{}, fmt.Errorf("node %d: %w", id, db.ErrNotFound)
 	}
 	resp.Self.LastSeen = nil
+	if suspended {
+		// Keep the stream (so reactivation restores the map at once), but
+		// cut the device off: no peers, relays or DNS.
+		return protocol.MapResponse{
+			Self: resp.Self, Peers: []protocol.Node{},
+			Notice: "this machine's account is suspended or awaiting approval; ask the server's operator",
+		}, nil
+	}
 	return resp, nil
 }
 

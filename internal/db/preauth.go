@@ -116,7 +116,13 @@ func (d *DB) ListPreAuthKeys(ctx context.Context, userID int64) ([]PreAuthKey, e
 
 // RevokePreAuthKey makes a key unusable. Nodes already registered with it stay.
 func (d *DB) RevokePreAuthKey(ctx context.Context, id int64) error {
-	res, err := d.sql.ExecContext(ctx, `UPDATE preauth_keys SET revoked = 1 WHERE id = ?`, id)
+	return d.RevokeUserPreAuthKey(ctx, id, 0)
+}
+
+// RevokeUserPreAuthKey revokes key id only if it belongs to userID (0 = any
+// user). A key of another user is reported as not found.
+func (d *DB) RevokeUserPreAuthKey(ctx context.Context, id, userID int64) error {
+	res, err := d.sql.ExecContext(ctx, `UPDATE preauth_keys SET revoked = 1 WHERE id = ? AND (? = 0 OR user_id = ?)`, id, userID, userID)
 	if err != nil {
 		return err
 	}
@@ -142,6 +148,13 @@ func consumePreAuthKey(ctx context.Context, tx *sql.Tx, secret string, now time.
 	}
 	if !k.Usable(now) {
 		return PreAuthKey{}, ErrInvalidAuthKey
+	}
+	var status string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM users WHERE id = ?`, k.UserID).Scan(&status); err != nil {
+		return PreAuthKey{}, err
+	}
+	if status != StatusActive {
+		return PreAuthKey{}, ErrAccountInactive
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE preauth_keys SET uses = uses + 1 WHERE id = ?`, k.ID); err != nil {
 		return PreAuthKey{}, err
