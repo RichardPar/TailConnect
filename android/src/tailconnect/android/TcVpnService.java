@@ -8,6 +8,8 @@ import android.net.LinkProperties;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
 import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.VpnService;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
@@ -29,6 +31,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -58,6 +61,20 @@ public class TcVpnService extends VpnService {
     private ConnectivityManager.NetworkCallback networkCallback;
     private volatile String networkMessage; // last "network" message for the daemon
 
+    // ---- staying connected ----
+    // While the user wants to be connected, a watchdog (checks run on the
+    // worker, so never during a connect) disconnects and reconnects when the
+    // connection is interrupted: the daemon died or stopped, the underlying
+    // network changed, or the control server has been unreachable a while.
+    private static final long CHECK_MS = 5_000, UNREACHABLE_MS = 20_000, MIN_GAP_MS = 10_000, MAX_GAP_MS = 60_000;
+    private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
+    private volatile boolean wanted;     // the user asked to be connected
+    private long unreachableSince;       // when "control unreachable" was first seen (0 = not)
+    private long lastReconnect, gap = MIN_GAP_MS; // backoff between reconnects
+    private Network defaultNet;          // the underlying network last seen
+    private boolean netLost;             // it went away since
+    private final java.util.Set<Network> up = new java.util.LinkedHashSet<>(); // real networks that are up
+
     static String socketPath(File filesDir) {
         return new File(filesDir, "tcd.sock").getPath();
     }
@@ -73,15 +90,20 @@ public class TcVpnService extends VpnService {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
         if (ACTION_DISCONNECT.equals(action)) {
+            wanted = false;
             worker.execute(() -> stop(false));
         } else if (ACTION_LOGOUT.equals(action)) {
+            wanted = false;
             worker.execute(() -> stop(true));
         } else {
             // ACTION_CONNECT from the UI, or the system starting an always-on VPN
             // (then there are no extras: the daemon reconnects with its saved state).
             String server = extra(intent, EXTRA_SERVER), key = extra(intent, EXTRA_AUTHKEY), host = extra(intent, EXTRA_HOSTNAME);
             String fp = extra(intent, EXTRA_FP);
+            wanted = true;
+            gap = MIN_GAP_MS;
             worker.execute(() -> connect(server, key, host, fp));
+            startWatchdog();
         }
         return START_STICKY;
     }
@@ -94,11 +116,15 @@ public class TcVpnService extends VpnService {
     @Override
     public void onRevoke() {
         // Another VPN took over, or the user turned it off in Settings.
+        wanted = false;
         worker.execute(() -> stop(false));
     }
 
     @Override
     public void onDestroy() {
+        wanted = false;
+        timer.shutdownNow();
+        unwatchNetwork();
         stopDaemon();
         closeVpn();
         worker.shutdownNow();
@@ -141,18 +167,94 @@ public class TcVpnService extends VpnService {
 
     private void stop(boolean logout) {
         try {
+            // Logging out while disconnected: start the daemon just to log out
+            // (it tells the server and clears the saved membership).
+            if (logout && (daemon == null || !daemon.isAlive())) startDaemon();
             if (daemon != null && daemon.isAlive()) {
                 String sock = socketPath(getFilesDir());
                 if (logout) LocalApi.logout(sock);
                 else LocalApi.down(sock);
             }
-        } catch (IOException e) {
+        } catch (IOException | InterruptedException e) {
             addLog((logout ? "logout: " : "disconnect: ") + e.getMessage());
         }
         closeVpn();
         stopDaemon();
         unwatchNetwork();
         stopSelf();
+    }
+
+    private boolean watching;
+
+    private synchronized void startWatchdog() {
+        if (watching) return;
+        watching = true;
+        timer.scheduleWithFixedDelay(() -> {
+            if (wanted) worker.execute(this::check);
+        }, CHECK_MS, CHECK_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /** One watchdog check (on the worker). */
+    private void check() {
+        if (!wanted) return;
+        if (daemon == null || !daemon.isAlive()) {
+            reconnect("the daemon stopped");
+            return;
+        }
+        JSONObject st;
+        try {
+            st = LocalApi.status(socketPath(getFilesDir()));
+        } catch (IOException e) {
+            reconnect("the daemon isn't answering (" + e.getMessage() + ")");
+            return;
+        }
+        String state = st.optString("State");
+        long now = System.currentTimeMillis();
+        if (state.equals("NeedsLogin")) {
+            wanted = false; // removed from the network, or a join failed: nothing to reconnect
+            return;
+        }
+        if (state.equals("Running")) gap = MIN_GAP_MS;
+        if (state.equals("Stopped")) {
+            reconnect("the tunnel stopped" + (st.optString("Error").isEmpty() ? "" : " (" + st.optString("Error") + ")"));
+            return;
+        }
+        if (st.optString("Error").startsWith("control unreachable")) {
+            if (unreachableSince == 0) unreachableSince = now;
+            else if (now - unreachableSince >= UNREACHABLE_MS) reconnect("the server has been unreachable for " + (now - unreachableSince) / 1000 + " s");
+        } else {
+            unreachableSince = 0;
+        }
+    }
+
+    /** Disconnects and connects again with the saved membership (on the worker), with backoff. */
+    private void reconnect(String why) {
+        long now = System.currentTimeMillis();
+        if (!wanted || now - lastReconnect < gap) return;
+        lastReconnect = now;
+        gap = Math.min(gap * 2, MAX_GAP_MS); // reset once it's running again
+        unreachableSince = 0;
+        addLog("connection interrupted: " + why + "; reconnecting");
+        Log.i(TAG, "reconnect: " + why);
+        if (daemon != null && daemon.isAlive()) {
+            try {
+                LocalApi.down(socketPath(getFilesDir()));
+            } catch (IOException e) {
+                addLog("disconnect: " + e.getMessage());
+            }
+        }
+        closeVpn();
+        if (daemon != null && !daemon.isAlive()) stopDaemon(); // a dead one: start afresh
+        connect("", "", "", "");
+    }
+
+    /** The underlying network changed (on the worker): reconnect once it has settled. */
+    private void networkChanged(String why) {
+        timer.schedule(() -> worker.execute(() -> {
+            lastReconnect = 0; // a network change is worth reconnecting at once
+            gap = MIN_GAP_MS;
+            reconnect(why);
+        }), 2, TimeUnit.SECONDS);
     }
 
     // ---- the daemon process ----
@@ -313,19 +415,67 @@ public class TcVpnService extends VpnService {
     private void watchNetwork() {
         if (networkCallback != null) return;
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+        // Real networks only (Wi-Fi, mobile data): once our VPN is up,
+        // Android's "default network" callback follows the VPN and never
+        // reports the underlying network going away or changing.
+        NetworkRequest real = new NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build();
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
+            public void onAvailable(Network network) {
+                worker.execute(() -> {
+                    up.add(network);
+                    if (defaultNet == null) {
+                        defaultNet = network; // the network we started on
+                        sendNetwork(cm.getLinkProperties(network));
+                    } else if (netLost) {
+                        // Back on a network after losing ours: reconnect.
+                        useNetwork(cm, network, "the network came back");
+                    }
+                });
+            }
+
+            @Override
+            public void onLost(Network network) {
+                worker.execute(() -> {
+                    up.remove(network);
+                    if (!network.equals(defaultNet)) return;
+                    netLost = true;
+                    // Another network is already up (Wi-Fi gone, mobile data
+                    // still there): move to it now.
+                    if (!up.isEmpty()) useNetwork(cm, up.iterator().next(), "the network changed");
+                    else addLog("network lost; waiting for one to come back");
+                });
+            }
+
+            @Override
             public void onLinkPropertiesChanged(Network network, LinkProperties lp) {
-                String msg = networkJSON(lp).toString();
-                if (!msg.equals(networkMessage)) {
-                    networkMessage = msg;
-                    send(msg, null);
-                }
+                worker.execute(() -> {
+                    if (network.equals(defaultNet)) sendNetwork(lp);
+                });
             }
         };
-        // This app is excluded from its own VPN, so its default network is
-        // the real one (Wi-Fi, mobile data).
-        cm.registerDefaultNetworkCallback(networkCallback);
+        cm.registerNetworkCallback(real, networkCallback);
+    }
+
+    /** Switches to another network (on the worker), and reconnects over it. */
+    private void useNetwork(ConnectivityManager cm, Network n, String why) {
+        defaultNet = n;
+        netLost = false;
+        sendNetwork(cm.getLinkProperties(n));
+        if (wanted) networkChanged(why);
+    }
+
+    /** Tells the daemon the underlying network's DNS servers and addresses. */
+    private void sendNetwork(LinkProperties lp) {
+        if (lp == null) return;
+        String msg = networkJSON(lp).toString();
+        if (!msg.equals(networkMessage)) {
+            networkMessage = msg;
+            send(msg, null);
+        }
     }
 
     private void unwatchNetwork() {
@@ -335,6 +485,9 @@ public class TcVpnService extends VpnService {
         } catch (IllegalArgumentException ignored) {
         }
         networkCallback = null;
+        defaultNet = null;
+        netLost = false;
+        up.clear();
     }
 
     private JSONObject currentNetwork() {
