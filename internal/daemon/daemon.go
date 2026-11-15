@@ -51,6 +51,7 @@ type EngineParams struct {
 	NodeKey  key.NodePrivate
 	DiscoKey key.DiscoPrivate
 	Addrs    []netip.Prefix // this node's tunnel addresses
+	Name     string         // this node's MagicDNS name, e.g. "tablet.alice.home.internal"
 	Port     uint16         // preferred WireGuard port (0 = random)
 	// OnEndpointsChanged must be passed to engine.Config so the daemon
 	// re-reports endpoints when STUN finds a new public address.
@@ -431,7 +432,7 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		default:
 		}
 	}
-	params := EngineParams{NodeKey: st.NodeKey, DiscoKey: st.DiscoKey, Addrs: st.Self.Addresses, Port: d.opts.ListenPort, OnEndpointsChanged: kickNow}
+	params := EngineParams{NodeKey: st.NodeKey, DiscoKey: st.DiscoKey, Addrs: st.Self.Addresses, Name: st.Self.Name, Port: d.opts.ListenPort, OnEndpointsChanged: kickNow}
 	eng, err := d.opts.NewEngine(params)
 	if err != nil && d.opts.ListenPort != 0 {
 		logf("port %d unavailable (%v); using a random port", d.opts.ListenPort, err)

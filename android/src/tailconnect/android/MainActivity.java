@@ -1,0 +1,519 @@
+package tailconnect.android;
+
+import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.res.Configuration;
+import android.graphics.Rect;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.net.VpnService;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.InputType;
+import android.util.DisplayMetrics;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * The TailConnect screen. It tells phones from tablets (see {@link Form}): a
+ * tablet with room shows the connection and the devices side by side; phones
+ * and narrow tablet windows get one scrolling column. It re-lays itself out
+ * when the window changes (rotation, split-screen), keeping what was typed.
+ */
+public class MainActivity extends Activity {
+    private static final int REQ_VPN = 1;
+    private static final long POLL_MS = 1500;
+    private static final int GREEN = 0xFF2E9E5B, AMBER = 0xFFE0A030, GREY = 0xFF8A8A8A, RED = 0xFFD9453B;
+
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private SharedPreferences prefs;
+
+    private TextView stateText, selfName, selfAddr, errorText, peersTitle, logText;
+    private View stateDot;
+    private EditText server, authKey, hostname;
+    private Button connect, logout, showLog;
+    private LinearLayout peers;
+    private ScrollView logScroll; // two panes only: the log's own scroll
+    private View logBox;          // what to show or hide for the log
+    private Form form;
+    private JSONObject lastStatus;
+    private boolean running, polling, logShown;
+
+    @Override
+    protected void onCreate(Bundle saved) {
+        super.onCreate(saved);
+        prefs = getSharedPreferences("settings", MODE_PRIVATE);
+        setContentView(buildLayout());
+        server.setText(prefs.getString("server", ""));
+        hostname.setText(prefs.getString("hostname", defaultHostname()));
+        prefill(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        prefill(intent);
+    }
+
+    /**
+     * Fills in the form from the launching intent, for setting a device up
+     * over USB:  adb shell am start -n tailconnect.android/.MainActivity
+     * -e server http://… -e authkey tc-auth-… -e hostname tablet
+     * The user still presses Connect (and approves the VPN).
+     */
+    private void prefill(Intent i) {
+        if (i == null) return;
+        String v;
+        if ((v = i.getStringExtra("server")) != null) server.setText(v);
+        if ((v = i.getStringExtra("authkey")) != null) authKey.setText(v);
+        if ((v = i.getStringExtra("hostname")) != null) hostname.setText(v);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        polling = true;
+        poll();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        polling = false;
+    }
+
+    // ---- layout ----
+
+    /** How the screen is laid out. */
+    enum Form {
+        /** A phone: one compact, scrolling column; devices below the form. */
+        PHONE,
+        /** A tablet with a narrow window (portrait split-screen, a small pop-up): one column. */
+        TABLET_ONE_COLUMN,
+        /** A tablet with room for two panes: the connection on the left, devices on the right. */
+        TABLET_TWO_PANES
+    }
+
+    /**
+     * Phone or tablet goes by the whole display's smallest side, 600 dp and up
+     * being a tablet (Android's own rule for tablet layouts), so a tablet in a
+     * narrow split-screen window is still a tablet. Whether two panes fit goes
+     * by the window's current width.
+     */
+    private Form formFor(Configuration c) {
+        if (deviceSmallestWidthDp() < 600) return Form.PHONE;
+        return c.screenWidthDp >= 720 ? Form.TABLET_TWO_PANES : Form.TABLET_ONE_COLUMN;
+    }
+
+    private int deviceSmallestWidthDp() {
+        float density = getResources().getDisplayMetrics().density;
+        int w, h;
+        if (Build.VERSION.SDK_INT >= 30) {
+            Rect b = getWindowManager().getMaximumWindowMetrics().getBounds();
+            w = b.width();
+            h = b.height();
+        } else {
+            DisplayMetrics m = new DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(m);
+            w = m.widthPixels;
+            h = m.heightPixels;
+        }
+        return Math.round(Math.min(w, h) / density);
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        if (formFor(c) != form) rebuild();
+    }
+
+    /** Lays the screen out again for the current form, keeping what was typed. */
+    private void rebuild() {
+        String s = server.getText().toString(), k = authKey.getText().toString(), h = hostname.getText().toString();
+        CharSequence err = errorText.getText();
+        setContentView(buildLayout());
+        server.setText(s);
+        authKey.setText(k);
+        hostname.setText(h);
+        setError(err.toString());
+        if (logShown) setLogShown(true);
+        show(lastStatus);
+    }
+
+    private View buildLayout() {
+        form = formFor(getResources().getConfiguration());
+        boolean phone = form == Form.PHONE, twoPanes = form == Form.TABLET_TWO_PANES;
+        boolean compact = phone || getResources().getConfiguration().screenWidthDp < 600;
+        int pad = dp(compact ? 16 : 40);
+
+        // The connection: state, this device, the form.
+        LinearLayout conn = column();
+        LinearLayout stateRow = new LinearLayout(this);
+        stateRow.setGravity(Gravity.CENTER_VERTICAL);
+        stateDot = new View(this);
+        stateRow.addView(stateDot, new LinearLayout.LayoutParams(dp(compact ? 12 : 14), dp(compact ? 12 : 14)));
+        stateText = text("Starting…", compact ? 18 : 20, false);
+        stateText.setPadding(dp(10), 0, 0, 0);
+        stateRow.addView(stateText);
+        conn.addView(stateRow);
+        selfName = text("", compact ? 16 : 18, true);
+        selfAddr = text("", compact ? 14 : 16, false);
+        selfAddr.setTypeface(Typeface.MONOSPACE);
+        selfAddr.setTextIsSelectable(true);
+        conn.addView(selfName, margins(0, dp(compact ? 12 : 20), 0, 0));
+        conn.addView(selfAddr);
+
+        int gap = dp(compact ? 8 : 12);
+        conn.addView(label("Server"), margins(0, dp(compact ? 18 : 28), 0, 0));
+        server = field("http://192.168.1.10:7740", InputType.TYPE_TEXT_VARIATION_URI, compact);
+        conn.addView(server);
+        conn.addView(label("Auth key (only to join)"), margins(0, gap, 0, 0));
+        authKey = field("tc-auth-…", InputType.TYPE_TEXT_VARIATION_PASSWORD, compact);
+        conn.addView(authKey);
+        conn.addView(label("Device name"), margins(0, gap, 0, 0));
+        hostname = field(phone ? "phone" : "tablet", InputType.TYPE_TEXT_VARIATION_NORMAL, compact);
+        conn.addView(hostname);
+
+        connect = new Button(this);
+        connect.setTextSize(TypedValue.COMPLEX_UNIT_SP, compact ? 16 : 18);
+        connect.setOnClickListener(v -> onConnectClicked());
+        conn.addView(connect, margins(0, dp(compact ? 16 : 24), 0, 0));
+        logout = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        logout.setText("Log out of this network");
+        logout.setOnClickListener(v -> service(TcVpnService.ACTION_LOGOUT));
+        conn.addView(logout);
+        errorText = text("", compact ? 14 : 15, false);
+        errorText.setTextColor(RED);
+        conn.addView(errorText, margins(0, dp(8), 0, 0));
+
+        // The other devices, and the log.
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        peersTitle = text("Devices", compact ? 20 : 22, true);
+        header.addView(peersTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        showLog = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        showLog.setText("Show log");
+        showLog.setOnClickListener(v -> setLogShown(!logShown));
+        header.addView(showLog);
+        TextView hint = text("Tap a device to copy its address.", compact ? 13 : 14, false);
+        hint.setAlpha(0.7f);
+        peers = column();
+        logText = text("", compact ? 11 : 12, false);
+        logText.setTypeface(Typeface.MONOSPACE);
+        logText.setTextIsSelectable(true);
+
+        if (twoPanes) {
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.HORIZONTAL);
+            root.setPadding(pad, pad, pad, pad);
+            ScrollView left = new ScrollView(this);
+            left.addView(conn);
+            root.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 2));
+            root.addView(new View(this), new LinearLayout.LayoutParams(dp(48), 1));
+            LinearLayout right = column();
+            right.addView(header);
+            right.addView(hint);
+            ScrollView peerScroll = new ScrollView(this);
+            peerScroll.addView(peers);
+            right.addView(peerScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+            logScroll = new ScrollView(this);
+            logScroll.addView(logText);
+            logBox = logScroll;
+            right.addView(logScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+            root.addView(right, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 3));
+            logBox.setVisibility(View.GONE);
+            return root;
+        }
+
+        // One column (phones, narrow tablet windows): everything in one
+        // scroll, the devices below the form.
+        LinearLayout col = column();
+        col.setPadding(pad, pad, pad, pad);
+        col.addView(conn);
+        col.addView(header, margins(0, dp(compact ? 20 : 32), 0, 0));
+        col.addView(hint);
+        col.addView(peers);
+        logScroll = null;
+        logBox = logText;
+        col.addView(logText, margins(0, dp(12), 0, 0));
+        logBox.setVisibility(View.GONE);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(col);
+        return scroll;
+    }
+
+    // ---- actions ----
+
+    private void onConnectClicked() {
+        if (running) {
+            service(TcVpnService.ACTION_DISCONNECT);
+            return;
+        }
+        String url = server.getText().toString().trim();
+        if (url.isEmpty()) {
+            setError("Enter the server's address, e.g. http://192.168.1.10:7740");
+            return;
+        }
+        prefs.edit().putString("server", url).putString("hostname", hostname.getText().toString().trim()).apply();
+        Intent consent = VpnService.prepare(this); // asks once for permission to run a VPN
+        if (consent != null) startActivityForResult(consent, REQ_VPN);
+        else startConnect();
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request == REQ_VPN) {
+            if (result == RESULT_OK) startConnect();
+            else setError("TailConnect needs permission to create a VPN.");
+        }
+    }
+
+    private void startConnect() {
+        setError("");
+        Intent i = new Intent(this, TcVpnService.class).setAction(TcVpnService.ACTION_CONNECT)
+                .putExtra(TcVpnService.EXTRA_SERVER, server.getText().toString().trim())
+                .putExtra(TcVpnService.EXTRA_AUTHKEY, authKey.getText().toString().trim())
+                .putExtra(TcVpnService.EXTRA_HOSTNAME, hostname.getText().toString().trim());
+        startService(i);
+        authKey.setText(""); // used once; never stored
+        stateText.setText("Connecting…");
+        setDot(AMBER);
+    }
+
+    private void service(String action) {
+        startService(new Intent(this, TcVpnService.class).setAction(action));
+    }
+
+    private void setLogShown(boolean show) {
+        logShown = show;
+        logBox.setVisibility(show ? View.VISIBLE : View.GONE);
+        showLog.setText(show ? "Hide log" : "Show log");
+        if (show) refreshLog();
+    }
+
+    // ---- status ----
+
+    private void poll() {
+        if (!polling) return;
+        io.execute(() -> {
+            JSONObject st = null;
+            try {
+                st = LocalApi.status(TcVpnService.socketPath(getFilesDir()));
+            } catch (IOException ignored) {
+                // Not running: the daemon only runs while connected.
+            }
+            JSONObject s = st;
+            ui.post(() -> {
+                show(s);
+                ui.postDelayed(this::poll, POLL_MS);
+            });
+        });
+    }
+
+    private void show(JSONObject st) {
+        lastStatus = st;
+        String state = st == null ? "Off" : st.optString("State");
+        String err = TcVpnService.lastError;
+        if (st != null && !st.optString("Error").isEmpty()) err = st.optString("Error");
+        if (st != null && !st.optString("Notice").isEmpty()) err = st.optString("Notice");
+        running = st != null && !state.equals("Stopped") && !state.equals("NeedsLogin");
+        switch (state) {
+            case "Running":
+                stateText.setText("Connected");
+                setDot(GREEN);
+                break;
+            case "Starting":
+                stateText.setText("Connecting…");
+                setDot(AMBER);
+                break;
+            case "NeedsLogin":
+                stateText.setText("Not joined: enter an auth key");
+                setDot(GREY);
+                break;
+            default:
+                stateText.setText("Disconnected");
+                setDot(GREY);
+        }
+        connect.setText(running ? "Disconnect" : "Connect");
+        logout.setVisibility(st != null && !state.equals("NeedsLogin") ? View.VISIBLE : View.GONE);
+        setError(err);
+
+        JSONObject self = st == null ? null : st.optJSONObject("Self");
+        selfName.setText(self == null ? "" : self.optString("Name"));
+        selfAddr.setText(self == null ? "" : String.join("   ", addresses(self)));
+        selfName.setVisibility(self == null ? View.GONE : View.VISIBLE);
+        selfAddr.setVisibility(self == null ? View.GONE : View.VISIBLE);
+
+        peers.removeAllViews();
+        JSONArray ps = st == null ? null : st.optJSONArray("Peers");
+        int n = ps == null ? 0 : ps.length();
+        peersTitle.setText(n == 0 ? "Devices" : "Devices (" + n + ")");
+        if (n == 0) {
+            TextView none = text(running ? "No other devices yet." : "Connect to see your devices.", 16, false);
+            none.setAlpha(0.7f);
+            peers.addView(none, margins(0, dp(16), 0, 0));
+        }
+        for (int i = 0; i < n; i++) peers.addView(peerRow(ps.optJSONObject(i)));
+        if (logShown) refreshLog();
+    }
+
+    private View peerRow(JSONObject p) {
+        LinearLayout row = column();
+        row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(12));
+        bg.setColor(0x14808080);
+        row.setBackground(bg);
+
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        String name = p.optString("Name");
+        String shortName = p.optString("HostName", name);
+        TextView nameView = text(shortName, 18, true);
+        top.addView(nameView, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        String[] path = path(p);
+        TextView chip = text(path[0], 14, true);
+        chip.setTextColor(0xFFFFFFFF);
+        chip.setPadding(dp(10), dp(3), dp(10), dp(3));
+        GradientDrawable chipBg = new GradientDrawable();
+        chipBg.setCornerRadius(dp(10));
+        chipBg.setColor(Integer.parseInt(path[1]));
+        chip.setBackground(chipBg);
+        top.addView(chip);
+        row.addView(top);
+
+        List<String> addrs = addresses(p);
+        String detail = (addrs.isEmpty() ? "" : addrs.get(0)) + "   " + name;
+        if (p.optBoolean("Shared")) detail += "   shared by " + p.optString("User");
+        TextView sub = text(detail, 14, false);
+        sub.setAlpha(0.75f);
+        row.addView(sub, margins(0, dp(4), 0, 0));
+
+        String copy = addrs.isEmpty() ? name : addrs.get(0);
+        row.setOnClickListener(v -> {
+            ClipboardManager cm = getSystemService(ClipboardManager.class);
+            cm.setPrimaryClip(ClipData.newPlainText("TailConnect address", copy));
+            Toast.makeText(this, "Copied " + copy, Toast.LENGTH_SHORT).show();
+        });
+        LinearLayout.LayoutParams lp = margins(0, dp(10), 0, 0);
+        row.setLayoutParams(lp);
+        return row;
+    }
+
+    /** The path label and its colour for a peer. */
+    private static String[] path(JSONObject p) {
+        if (!p.optBoolean("Active")) return new String[]{"Idle", String.valueOf(GREY)};
+        String ep = p.optString("CurrentEndpoint");
+        if (!ep.isEmpty()) {
+            double ms = p.optDouble("LatencyMS", 0);
+            String label = ms > 0 ? String.format(Locale.ROOT, "Direct · %.0f ms", ms) : "Direct";
+            return new String[]{label, String.valueOf(GREEN)};
+        }
+        return new String[]{"Relay", String.valueOf(AMBER)};
+    }
+
+    private static List<String> addresses(JSONObject n) {
+        List<String> out = new ArrayList<>();
+        JSONArray a = n.optJSONArray("Addresses");
+        if (a != null) {
+            for (int i = 0; i < a.length(); i++) {
+                String s = a.optString(i);
+                int slash = s.indexOf('/');
+                out.add(slash < 0 ? s : s.substring(0, slash));
+            }
+        }
+        return out;
+    }
+
+    private void refreshLog() {
+        StringBuilder b = new StringBuilder();
+        synchronized (TcVpnService.log) {
+            for (String l : TcVpnService.log) b.append(l).append('\n');
+        }
+        logText.setText(b.length() == 0 ? "(nothing yet)" : b);
+        if (logScroll != null) logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+    }
+
+    // ---- small helpers ----
+
+    private String defaultHostname() {
+        String m = Build.MODEL == null ? "tablet" : Build.MODEL;
+        return m.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-").replaceAll("^-|-$", "");
+    }
+
+    private void setError(String msg) {
+        errorText.setText(msg);
+        errorText.setVisibility(msg == null || msg.isEmpty() ? View.GONE : View.VISIBLE);
+    }
+
+    private void setDot(int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(color);
+        stateDot.setBackground(d);
+    }
+
+    private LinearLayout column() {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        return l;
+    }
+
+    private TextView text(String s, int sp, boolean bold) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
+        return t;
+    }
+
+    private TextView label(String s) {
+        TextView t = text(s, 14, false);
+        t.setAlpha(0.75f);
+        return t;
+    }
+
+    private EditText field(String hint, int variation, boolean compact) {
+        EditText e = new EditText(this);
+        e.setHint(hint);
+        e.setSingleLine(true);
+        e.setInputType(InputType.TYPE_CLASS_TEXT | variation);
+        e.setTextSize(TypedValue.COMPLEX_UNIT_SP, compact ? 16 : 17);
+        return e;
+    }
+
+    private LinearLayout.LayoutParams margins(int l, int t, int r, int b) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.setMargins(l, t, r, b);
+        return p;
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+}
