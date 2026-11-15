@@ -263,3 +263,75 @@ func TestSessionsEndOnAccountChanges(t *testing.T) {
 }
 
 func contains(b []byte, sub string) bool { return strings.Contains(string(b), sub) }
+
+func TestSharingAPI(t *testing.T) {
+	f := newFx(t)
+	acme := f.account("acme", db.RoleTenant)
+	globex := f.account("globex", db.RoleTenant)
+	initech := f.account("initech", db.RoleTenant)
+	nas := f.machine("acme", "nas")
+	f.machine("globex", "laptop")
+
+	// Only the owner can share a machine.
+	if code, _, _ := f.do(globex, "POST", fmt.Sprintf("/api/v1/nodes/%d/shares", nas), map[string]string{"recipient": "globex"}, nil); code != 404 {
+		t.Fatalf("sharing someone else's machine: %d", code)
+	}
+	code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/shares", nas), map[string]string{"recipient": "globex"}, nil)
+	if code != 201 || m["status"] != "pending" || m["fqdn"] != "nas.acme.home.internal" {
+		t.Fatalf("share: %d %v", code, m)
+	}
+	id := int(m["id"].(float64))
+	if code, _, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/shares", nas), map[string]string{"recipient": "acme"}, nil); code != 400 {
+		t.Fatalf("sharing with yourself: %d", code)
+	}
+	// The recipient sees it as incoming and pending (with a badge count).
+	if _, m, _ := f.do(globex, "GET", "/api/v1/status", nil, nil); m["pendingShares"].(float64) != 1 {
+		t.Fatalf("pending badge: %v", m["pendingShares"])
+	}
+	_, _, raw := f.do(globex, "GET", "/api/v1/shares", nil, nil)
+	if !contains(raw, `"incoming":[{`) || !contains(raw, `"outgoing":[]`) {
+		t.Fatalf("globex shares: %s", raw)
+	}
+	// Third parties can't accept or delete it.
+	if code, _, _ := f.do(initech, "POST", fmt.Sprintf("/api/v1/shares/%d/accept", id), map[string]string{}, nil); code != 404 {
+		t.Fatalf("accept by a third party: %d", code)
+	}
+	if code, _, _ := f.do(initech, "DELETE", fmt.Sprintf("/api/v1/shares/%d", id), nil, nil); code != 404 {
+		t.Fatalf("delete by a third party: %d", code)
+	}
+	if code, m, _ := f.do(globex, "POST", fmt.Sprintf("/api/v1/shares/%d/accept", id), map[string]string{}, nil); code != 200 || m["inEffect"] != true {
+		t.Fatalf("accept: %d %v", code, m)
+	}
+	// The owner revokes.
+	if code, _, _ := f.do(acme, "DELETE", fmt.Sprintf("/api/v1/shares/%d", id), nil, nil); code != 204 {
+		t.Fatalf("revoke: %d", code)
+	}
+
+	// Links: create, redeem once.
+	code, m, _ = f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/share-links", nas), map[string]string{"ttl": "1h"}, nil)
+	if code != 201 {
+		t.Fatalf("share link: %d %v", code, m)
+	}
+	link := m["code"].(string)
+	if !strings.HasPrefix(link, db.ShareLinkPrefix) {
+		t.Fatalf("link code %q", link)
+	}
+	if code, _, _ := f.do(acme, "POST", "/api/v1/shares/redeem", map[string]string{"code": link}, nil); code != 400 {
+		t.Fatalf("owner redeeming: %d", code)
+	}
+	if code, m, _ := f.do(initech, "POST", "/api/v1/shares/redeem", map[string]string{"code": link}, nil); code != 200 || m["recipient"] != "initech" || m["inEffect"] != true {
+		t.Fatalf("redeem: %d %v", code, m)
+	}
+	if code, _, _ := f.do(globex, "POST", "/api/v1/shares/redeem", map[string]string{"code": link}, nil); code != 400 {
+		t.Fatalf("second redemption: %d", code)
+	}
+	// The recipient can leave a share.
+	_, _, raw = f.do(initech, "GET", "/api/v1/shares", nil, nil)
+	if !contains(raw, "nas.acme.home.internal") {
+		t.Fatalf("initech shares: %s", raw)
+	}
+	shares, _ := f.db.ListShares(context.Background(), db.ShareFilter{})
+	if code, _, _ := f.do(initech, "DELETE", fmt.Sprintf("/api/v1/shares/%d", shares[0].ID), nil, nil); code != 204 {
+		t.Fatalf("leave: %d", code)
+	}
+}

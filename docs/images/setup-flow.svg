@@ -12,17 +12,17 @@
     <text x="70" y="63" font-size="14.5" font-weight="600" fill="#1c2026">Install server</text>
     <text x="34" y="98" font-size="12" fill="#33405a" font-family="ui-monospace, 'DejaVu Sans Mono', monospace">install.sh server</text>
     <text x="34" y="124" font-size="12" fill="#6b7280">control API :7740</text>
-    <text x="34" y="142" font-size="12" fill="#6b7280">admin UI 127.0.0.1:7741</text>
+    <text x="34" y="142" font-size="12" fill="#6b7280">web portal :7741</text>
   </g>
   <line x1="186" y1="100" x2="206" y2="100" stroke="#9aa3ae" stroke-width="2" marker-end="url(#a)"/>
 
   <g>
     <rect x="210" y="30" width="164" height="140" rx="12" fill="#f6f7f9" stroke="#d5dae1"/>
     <circle cx="238" cy="58" r="15" fill="#2f6fde"/><text x="238" y="63" text-anchor="middle" font-size="14" font-weight="700" fill="#fff">2</text>
-    <text x="260" y="63" font-size="14.5" font-weight="600" fill="#1c2026">User + key</text>
+    <text x="260" y="63" font-size="14.5" font-weight="600" fill="#1c2026">Account + key</text>
     <text x="224" y="98" font-size="12" fill="#33405a" font-family="ui-monospace, 'DejaVu Sans Mono', monospace">users create</text>
     <text x="224" y="116" font-size="12" fill="#33405a" font-family="ui-monospace, 'DejaVu Sans Mono', monospace">keys create</text>
-    <text x="224" y="142" font-size="12" fill="#6b7280">or the Auth keys tab</text>
+    <text x="224" y="142" font-size="12" fill="#6b7280">or in the web portal</text>
   </g>
   <line x1="376" y1="100" x2="396" y2="100" stroke="#9aa3ae" stroke-width="2" marker-end="url(#a)"/>
 

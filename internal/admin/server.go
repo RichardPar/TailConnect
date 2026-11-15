@@ -76,6 +76,12 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/v1/nodes", s.listNodes)
 	api.HandleFunc("DELETE /api/v1/nodes/{id}", s.deleteNode)
 	api.HandleFunc("POST /api/v1/nodes/{id}/rename", s.renameNode)
+	api.HandleFunc("POST /api/v1/nodes/{id}/shares", s.shareNode)
+	api.HandleFunc("POST /api/v1/nodes/{id}/share-links", s.createShareLink)
+	api.HandleFunc("GET /api/v1/shares", s.listShares)
+	api.HandleFunc("POST /api/v1/shares/{id}/accept", s.acceptShare)
+	api.HandleFunc("POST /api/v1/shares/redeem", s.redeemShareLink)
+	api.HandleFunc("DELETE /api/v1/shares/{id}", s.deleteShare)
 	// Operators only.
 	op := func(pattern string, h http.HandlerFunc) { api.Handle(pattern, operatorOnly(h)) }
 	op("GET /api/v1/users", s.listUsers)
@@ -250,6 +256,20 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"machineKey": s.info.MachineKey, "baseDomain": s.info.BaseDomain, "controlURL": s.info.ControlURL,
 		"version": s.info.Version, "nodes": len(nodes), "online": online, "signup": s.info.Signup,
+	}
+	if p.user != nil {
+		incoming, err := s.db.ListShares(r.Context(), db.ShareFilter{RecipientID: p.user.ID})
+		if err != nil {
+			s.internal(w, "status", err)
+			return
+		}
+		pendingShares := 0
+		for _, sh := range incoming {
+			if sh.Status == db.SharePending {
+				pendingShares++
+			}
+		}
+		out["pendingShares"] = pendingShares
 	}
 	if p.operator() {
 		users, err := s.db.ListUsers(r.Context())

@@ -211,7 +211,7 @@ func cmdStatus(c *localapi.Client, args []string) error {
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 3, ' ', 0)
 	if st.Self != nil {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", first4(st.Self.Addresses), shortName(st.Self.Name, st.Domain), st.Self.User, st.Self.OS, "(this machine)")
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", first4(st.Self.Addresses), shortName(st.Self.Name, &st), st.Self.User, st.Self.OS, "(this machine)")
 	}
 	for _, p := range st.Peers {
 		state := "idle"
@@ -219,6 +219,13 @@ func cmdStatus(c *localapi.Client, args []string) error {
 			state = "active"
 		}
 		detail := state
+		if p.Shared {
+			if p.NoInitiate {
+				detail = "shared with you; " + state
+			} else {
+				detail = "has access to this machine; " + state
+			}
+		}
 		switch {
 		case p.CurrentEndpoint.IsValid():
 			detail += "; direct " + p.CurrentEndpoint.String()
@@ -233,7 +240,7 @@ func cmdStatus(c *localapi.Client, args []string) error {
 		if p.RxBytes+p.TxBytes > 0 {
 			detail += fmt.Sprintf("; rx %s tx %s", bytesStr(p.RxBytes), bytesStr(p.TxBytes))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", first4(p.Addresses), shortName(p.Name, st.Domain), p.User, p.OS, detail)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", first4(p.Addresses), shortName(p.Name, &st), p.User, p.OS, detail)
 	}
 	return tw.Flush()
 }
@@ -256,7 +263,7 @@ func cmdIP(c *localapi.Client, args []string) error {
 	} else {
 		want := fs.Arg(0)
 		for _, p := range st.Peers {
-			if p.Name == want || shortName(p.Name, st.Domain) == want || p.HostName == want {
+			if p.Name == want || shortName(p.Name, &st) == want || p.HostName == want {
 				addrs = p.Addresses
 				break
 			}
@@ -294,9 +301,14 @@ func first4(ps []netip.Prefix) string {
 	return "-"
 }
 
-func shortName(fqdn, domain string) string {
-	if domain != "" {
-		return strings.TrimSuffix(fqdn, "."+domain)
+// shortName drops this machine's own domain ("laptop"), or else the base
+// domain, leaving the tenant for other tenants' shared machines ("nas.acme").
+func shortName(fqdn string, st *localapi.Status) string {
+	if st.Domain != "" && strings.HasSuffix(fqdn, "."+st.Domain) {
+		return strings.TrimSuffix(fqdn, "."+st.Domain)
+	}
+	if st.DNS != nil && st.DNS.Base != "" {
+		return strings.TrimSuffix(fqdn, "."+st.DNS.Base)
 	}
 	return fqdn
 }

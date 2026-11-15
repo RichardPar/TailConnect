@@ -86,9 +86,9 @@ server)
 	install_docs
 	start tc-control
 	echo "tc-control is running ($("$PREFIX/bin/tc-control" version))."
-	echo "Next (once): sudo tc-control users create NAME"
+	echo "Next (once): sudo tc-control users create NAME -operator -password   # your account for the web portal"
 	echo "             sudo tc-control keys create -user NAME -reusable -expiration 24h"
-	echo "             sudo tc-control admin-token      # for the admin UI on http://127.0.0.1:7741"
+	echo "Web portal:  http://127.0.0.1:7741 on this machine (from elsewhere: ssh -L 7741:127.0.0.1:7741 $(hostname))"
 	;;
 relay)
 	need_root "$cmd"

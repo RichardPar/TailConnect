@@ -18,30 +18,36 @@ Every option, file and port. For what to set and when, see [Installation](instal
 
 ## tc-control serve
 
-The coordination server: control API, built-in relay, STUN, admin UI.
+The coordination server: control API, built-in relay, STUN, web portal.
 
 | Flag | Default | Description |
 |---|---|---|
 | `-db` | see [below](#tc-control-admin-commands) | SQLite database. The packaged unit uses `/var/lib/tc-control/control.db`. |
 | `-listen` | `:7740` | Control API and built-in relay (TCP) |
-| `-admin-listen` | `127.0.0.1:7741` | Admin web UI and API. `""` turns them off. Keep it on loopback, or put it behind TLS. |
+| `-admin-listen` | `127.0.0.1:7741` | Web portal and its API. `""` turns them off. Keep it on loopback, or use TLS if other people sign in to it ([how](installation.md#open-the-portal-to-other-people)). |
+| `-signup` | `approval` | Who may create accounts in the portal: `off`, `approval` (pending until an operator approves), `invite` (needs an invite code) or `open`. A valid invite skips approval in every mode except `off`. |
 | `-stun-listen` | `:3478` | Built-in STUN server (UDP). `""` turns it off; devices then can't learn their public address, and NAT traversal suffers. |
 | `-domain` | `tc.internal` | MagicDNS suffix: devices are `<name>.<domain>`. Needs two or more labels of lowercase letters, digits and `-`. |
 | `-magic-dns` | `true` | Devices resolve MagicDNS names and point the OS at the resolver. `=false` turns it off. |
 | `-dns-nameservers` | none | Comma-separated upstream resolvers. When set, devices send **all** DNS through MagicDNS, which forwards non-MagicDNS names to these. |
 | `-relay` | `true` | Serve the built-in relay at `/relay` on the control listener (registered devices only) |
 | `-relay-map` | none | JSON [relay map](#relay-map) to advertise instead of the built-in relay alone |
-| `-public-url` | derived from `-listen` | URL shown in the admin UI for clients to use |
-| `-tls-cert`, `-tls-key` | none | PEM certificate (with chain) and key. Turns on HTTPS for both the control and admin listeners. |
+| `-public-url` | derived from `-listen` | URL shown in the portal for clients to use |
+| `-tls-cert`, `-tls-key` | none | PEM certificate (with chain) and key. Turns on HTTPS for both the control and portal listeners. |
 | `-log-json` | `false` | Log in JSON instead of text |
 
 ## tc-control admin commands
 
 ```
-tc-control users create NAME | list | delete NAME
+tc-control users create NAME [-operator] [-password] | list | delete NAME
+tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
+tc-control users role NAME operator|tenant
+tc-control invites create [-expiration 168h] | list | revoke ID
 tc-control keys create -user NAME [-reusable] [-ephemeral] [-expiration 24h]
 tc-control keys list [-user NAME] | revoke ID
 tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
+tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
+tc-control shares accept ID | revoke ID
 tc-control admin-token
 tc-control version
 ```
@@ -50,12 +56,14 @@ tc-control version
 |---|---|---|
 | `-db PATH` | all | Database. Default: `$TC_CONTROL_DB`, else `/var/lib/tc-control/control.db` if it exists, else `./control.db` |
 | `-json` | `list` commands | Machine-readable output |
-| `-user NAME` | `keys create` (required), `keys list`, `nodes list` | User to create the key for, or to filter by |
+| `-user NAME` | `keys create` (required), `keys list`, `nodes list`, `shares list` | Account to create the key for, or to filter by |
+| `-operator` | `users create` | Make the account an operator |
+| `-password` | `users create` | Also set a password (prompted twice on a terminal, else one line from stdin), as `users passwd` does |
 | `-reusable` | `keys create` | The key can register any number of devices until it expires |
 | `-ephemeral` | `keys create` | Devices joining with it are marked ephemeral |
-| `-expiration` | `keys create` | Key lifetime as a Go duration (`30m`, `24h`, `720h`); default `24h` |
+| `-expiration` | `keys create`, `invites create`, `shares link` | Lifetime as a Go duration (`30m`, `24h`, `720h`); default `24h` for keys, `168h` for invites and share links |
 
-Device names for `rename` must be a DNS label: lowercase letters, digits and `-`, up to 63 characters.
+Account names are 1-32 lowercase letters, digits and inner `-` (they're part of machine names). Machine names for `rename` are a DNS label: lowercase letters, digits and `-`, up to 63 characters, unique within the account. Passwords are 10-256 characters.
 
 ## tcd
 
@@ -157,7 +165,7 @@ Restart the service after editing. Variables inside these files are **not** expa
 |---|---|---|---|
 | 7740 | TCP | control server | devices → control API and built-in relay |
 | 3478 | UDP | control server, `tc-relay` | devices → STUN |
-| 7741 | TCP | control server, loopback | administrator → admin UI and API |
+| 7741 | TCP | control server (loopback by default) | operators and tenants → web portal and API |
 | 7742 | TCP | `tc-relay` | devices → standalone relay |
 | 41641 | UDP | every device | device ↔ device (WireGuard, path discovery) |
 | 53 | UDP | `100.100.100.100`, inside each device | the device's own programs → MagicDNS (never leaves the device) |
@@ -169,7 +177,7 @@ Restart the service after editing. Variables inside these files are **not** expa
 | `/usr/local/bin/{tc-control,tcd,tc,tc-relay}` | Binaries (`install.sh`) |
 | `/etc/systemd/system/{tc-control,tcd}.service` | Units |
 | `/etc/default/{tc-control,tcd}` | [Settings files](#settings-files) |
-| `/var/lib/tc-control/control.db` | Server database: users, devices, key hashes, the server's private keys. Mode 0700 directory, owned by the service. [Back it up](installation.md#back-up-and-restore). |
+| `/var/lib/tc-control/control.db` | Server database: accounts, machines, shares, password and key hashes, the server's private keys. Mode 0700 directory, owned by the service. [Back it up](installation.md#back-up-and-restore). |
 | `/var/lib/tailconnect/state.json` | Device keys and registration |
 | `/var/lib/tailconnect/resolv.conf.backup` | Original `resolv.conf`, kept while `-dns file` is active |
 | `/run/tailconnect/tcd.sock` | `tc` ↔ `tcd` socket |

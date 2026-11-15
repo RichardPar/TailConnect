@@ -192,6 +192,31 @@ CREATE TRIGGER nodes_gen_relay AFTER UPDATE OF home_relay ON nodes
 	WHEN OLD.home_relay IS NOT NEW.home_relay
 	BEGIN UPDATE generation SET value = value + 1; END;
 `,
+	// 6: sharing a machine with another tenant. A share names its recipient
+	// (pending until accepted), or is an unclaimed link (recipient NULL,
+	// invite_hash set) that the first account to redeem it accepts. Shares
+	// end when the machine is deleted or moves to another tenant.
+	`
+CREATE TABLE shares (
+	id            INTEGER PRIMARY KEY,
+	node_id       INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+	recipient_id  INTEGER REFERENCES users(id) ON DELETE CASCADE,
+	status        TEXT NOT NULL,
+	invite_hash   BLOB UNIQUE,
+	invite_prefix TEXT NOT NULL DEFAULT '',
+	created_at    INTEGER NOT NULL,
+	accepted_at   INTEGER,
+	expires_at    INTEGER
+);
+CREATE UNIQUE INDEX shares_node_recipient ON shares(node_id, recipient_id) WHERE recipient_id IS NOT NULL;
+CREATE INDEX shares_recipient ON shares(recipient_id);
+CREATE TRIGGER shares_gen_ins AFTER INSERT ON shares BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER shares_gen_del AFTER DELETE ON shares BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER shares_gen_upd AFTER UPDATE ON shares BEGIN UPDATE generation SET value = value + 1; END;
+CREATE TRIGGER nodes_move_unshare AFTER UPDATE OF user_id ON nodes
+	WHEN OLD.user_id IS NOT NEW.user_id
+	BEGIN DELETE FROM shares WHERE node_id = NEW.id; END;
+`,
 }
 
 // Generation returns a counter that increases whenever nodes or users change

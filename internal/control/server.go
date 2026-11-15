@@ -73,6 +73,8 @@ type Server struct {
 	// for the relay's per-packet check. Rebuilt when the generation changes.
 	policyMu sync.RWMutex
 	tenantOf map[key.NodePublic]int64
+	// sharedWith maps a machine's node key to the tenants it is shared with.
+	sharedWith map[key.NodePublic]map[int64]bool
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
@@ -439,24 +441,59 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// BuildMap computes the network map for node id: its tenant's other
-// machines. Tenants are isolated: a machine never learns that another
-// tenant's machines exist.
+// BuildMap computes the network map for node id. Tenants are isolated: a
+// machine sees its own tenant's machines, plus, through shares in effect,
+// machines shared with its tenant and (if it is itself shared) the
+// recipient tenants' machines. Nothing else of another tenant.
+//
+// Sharing is one-way: peer P may open connections to this machine N only if
+// they're in the same tenant or N is shared with P's tenant. Other peers are
+// marked NoInitiate, and N's packet filter enforces it.
 func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, error) {
 	self, err := s.db.GetNode(ctx, id)
 	if err != nil {
 		return protocol.MapResponse{}, err
 	}
-	nodes, err := s.db.ListNodes(ctx, self.UserID)
+	shares, err := s.db.ListShares(ctx, db.ShareFilter{Accepted: true})
+	if err != nil {
+		return protocol.MapResponse{}, err
+	}
+	sharedIn := map[int64]bool{} // machines shared with self's tenant
+	sharedTo := map[int64]bool{} // tenants self is shared with
+	for _, sh := range shares {
+		if !sh.InEffect() {
+			continue
+		}
+		if sh.RecipientID == self.UserID {
+			sharedIn[sh.NodeID] = true
+		}
+		if sh.NodeID == self.ID {
+			sharedTo[sh.RecipientID] = true
+		}
+	}
+	var nodes []db.Node
+	if len(sharedIn) == 0 && len(sharedTo) == 0 {
+		nodes, err = s.db.ListNodes(ctx, self.UserID)
+	} else {
+		var all []db.Node
+		all, err = s.db.ListNodes(ctx, 0)
+		for _, n := range all {
+			if n.UserID == self.UserID || sharedIn[n.ID] || sharedTo[n.UserID] {
+				nodes = append(nodes, n)
+			}
+		}
+	}
 	if err != nil {
 		return protocol.MapResponse{}, err
 	}
 	resp := protocol.MapResponse{
 		Peers: []protocol.Node{},
 		DNS: protocol.DNSConfig{
-			MagicDNS:    !s.cfg.DisableMagicDNS,
-			Domain:      s.cfg.BaseDomain,
-			Search:      []string{s.tenantDomain(self.UserName)},
+			MagicDNS: !s.cfg.DisableMagicDNS,
+			Domain:   s.cfg.BaseDomain,
+			// The tenant domain first ("laptop" is our laptop), then the base
+			// domain, so shared machines' short forms ("nas.acme") resolve.
+			Search:      []string{s.tenantDomain(self.UserName), s.cfg.BaseDomain},
 			Resolver:    protocol.MagicDNSAddr,
 			Nameservers: s.cfg.Nameservers,
 		},
@@ -480,6 +517,10 @@ func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, 
 			// LastSeen changes on every keep-alive; leaving it out of peers
 			// keeps maps stable so unchanged maps aren't re-sent.
 			pn.LastSeen = nil
+			if n.UserID != self.UserID {
+				pn.Shared = true
+				pn.NoInitiate = !sharedTo[n.UserID]
+			}
 			resp.Peers = append(resp.Peers, pn)
 		}
 	}
@@ -584,29 +625,53 @@ func (s *Server) refreshPolicy() {
 		}
 		return
 	}
+	shares, err := s.db.ListShares(s.ctx, db.ShareFilter{Accepted: true})
+	if err != nil {
+		if s.ctx.Err() == nil {
+			s.log.Warn("refresh relay policy", "err", err)
+		}
+		return
+	}
 	m := make(map[key.NodePublic]int64, len(nodes))
+	byID := map[int64]key.NodePublic{}
 	for _, n := range nodes {
 		if n.UserStatus != db.StatusActive {
 			continue
 		}
 		if nk, err := key.ParsePublic[key.NodeKind](n.NodeKey); err == nil {
 			m[nk] = n.UserID
+			byID[n.ID] = nk
 		}
 	}
+	sw := map[key.NodePublic]map[int64]bool{}
+	for _, sh := range shares {
+		nk, ok := byID[sh.NodeID]
+		if !ok || !sh.InEffect() {
+			continue
+		}
+		if sw[nk] == nil {
+			sw[nk] = map[int64]bool{}
+		}
+		sw[nk][sh.RecipientID] = true
+	}
 	s.policyMu.Lock()
-	s.tenantOf = m
+	s.tenantOf, s.sharedWith = m, sw
 	s.policyMu.Unlock()
 }
 
-// RelayAllowed reports whether the relay may carry packets from a to b:
-// both must be active machines of the same tenant. Install it with
+// RelayAllowed reports whether the relay may carry packets between a and b
+// (either direction): both must be active machines, of the same tenant or
+// with one shared with the other's tenant. Install it with
 // relay.Server.SetAllow.
 func (s *Server) RelayAllowed(a, b key.NodePublic) bool {
 	s.policyMu.RLock()
 	defer s.policyMu.RUnlock()
 	ta, ok1 := s.tenantOf[a]
 	tb, ok2 := s.tenantOf[b]
-	return ok1 && ok2 && ta == tb
+	if !ok1 || !ok2 {
+		return false
+	}
+	return ta == tb || s.sharedWith[a][tb] || s.sharedWith[b][ta]
 }
 
 // watchGeneration notices changes made outside this process (admin CLI) or

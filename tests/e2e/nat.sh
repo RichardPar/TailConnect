@@ -181,7 +181,7 @@ echo "== MagicDNS"
 for n in a b; do
 	wait_for 5 "$n's resolv.conf points at MagicDNS" grep -q '^nameserver 100.100.100.100$' "$WORK/resolv-$n.conf"
 done
-grep -q '^search alice.nat.internal corp.example$' "$WORK/resolv-a.conf" || { cat "$WORK/resolv-a.conf"; fail "search domains"; }
+grep -q '^search alice.nat.internal nat.internal corp.example$' "$WORK/resolv-a.conf" || { cat "$WORK/resolv-a.conf"; fail "search domains"; }
 ok "resolv.conf rewritten (original search domain kept)"
 tca status | grep -q '^MagicDNS: alice.nat.internal (file, all names)' || { tca status; fail "tc status MagicDNS line"; }
 got=$(lookup a getent ahostsv4 beta | awk 'NR==1{print $1}')
@@ -200,14 +200,24 @@ lookup a ping -c1 -W2 beta >/dev/null || fail "ping beta by name"
 ok "ping beta (by name) works"
 
 echo "== tenants are isolated"
-# A machine of another tenant (bob), sharing site b's namespace on its own
-# interface and port: alice's machines must not see, resolve or reach it.
+# A machine of another tenant (bob) on a second network behind site b's
+# router (same NAT): alice's machines must not see, resolve or reach it.
+ip link add rb-lan2 type veth peer name c-eth
+ip netns add c
+ip -n c link set lo up
+ip link set rb-lan2 netns rb
+ip link set c-eth netns c
+ip -n rb addr add 10.3.0.1/24 dev rb-lan2
+ip -n rb link set rb-lan2 up
+ip -n c addr add 10.3.0.2/24 dev c-eth
+ip -n c link set c-eth up
+ip -n c route add default via 10.3.0.1
 tc-control users create bob >/dev/null
 BOBKEY=$(tc-control keys create -user bob 2>/dev/null)
-ip netns exec b tcd -state "$WORK/state-c" -socket /run/tc-c.sock -tun tc1 -port 41642 -dns off >"$LOG/tcd-c.log" 2>&1 &
+ip netns exec c tcd -state "$WORK/state-c" -socket /run/tc-c.sock -dns off >"$LOG/tcd-c.log" 2>&1 &
 pids+=($!)
 wait_for 5 "tcd-c socket" test -S /run/tc-c.sock
-tcc() { ip netns exec b tc --socket /run/tc-c.sock "$@"; }
+tcc() { ip netns exec c tc --socket /run/tc-c.sock "$@"; }
 tcc up --server http://198.51.100.1:7740 --authkey "$BOBKEY" --hostname gamma
 IPC=$(tcc ip -4)
 sleep 1
@@ -220,6 +230,25 @@ ok "gamma.bob.nat.internal doesn't resolve for alice"
 ip netns exec a ping -c2 -W1 "$IPC" >/dev/null 2>&1 && fail "alice reached bob's machine"
 ok "alice can't reach bob's machine"
 
+echo "== sharing is one-way"
+SHARE=$(tc-control shares create 1 bob | grep -o 'share [0-9]*' | cut -d' ' -f2)
+tc-control shares accept "$SHARE" >/dev/null
+wait_for 5 "bob's gamma sees alpha" bash -c "ip netns exec c tc --socket /run/tc-c.sock status | grep -q 'alpha.alice.*shared with you'"
+tca status | grep -q 'gamma.bob.*has access to this machine' || { tca status; fail "alpha's view of gamma"; }
+ok "alpha shared with bob: gamma sees alpha.alice; alpha sees gamma.bob as having access"
+wait_for 10 "gamma → alpha ping" ip netns exec c ping -c1 -W1 "$IPA"
+ok "bob's gamma can reach alice's shared alpha"
+ip netns exec a ping -c2 -W1 "$IPC" >/dev/null 2>&1 && fail "alpha (the shared machine) reached bob's gamma"
+dropped=$(ip netns exec c tc --socket /run/tc-c.sock status --json | grep -o '"FilterDropped": [0-9]*' | grep -o '[0-9]*$')
+[[ ${dropped:-0} -gt 0 ]] || fail "gamma's filter counted no refused packets"
+ok "alpha can't reach gamma (gamma's filter refused $dropped packets)"
+ip netns exec c ping -c1 -W1 "$IPB" >/dev/null 2>&1 && fail "gamma reached beta, which isn't shared"
+ok "beta (not shared) stays out of bob's reach"
+tc-control shares revoke "$SHARE" >/dev/null
+wait_for 5 "share gone" bash -c "! ip netns exec c tc --socket /run/tc-c.sock status | grep -q alpha"
+ip netns exec c ping -c2 -W1 "$IPA" >/dev/null 2>&1 && fail "gamma still reaches alpha after revoking"
+ok "revoked: gamma can no longer reach alpha"
+
 echo "== direct path dies: fall back to relay, then recover"
 # Drop all UDP between the two NATs (both still reach control and the relay).
 ip netns exec ra nft -f - <<-EOF
@@ -231,7 +260,11 @@ ip netns exec ra nft -f - <<-EOF
 	}
 EOF
 t0=$(date +%s)
-wait_for 20 "alpha → beta via relay" bash -c "ip netns exec a ping -c1 -W1 $IPB >/dev/null && ip netns exec a tc --socket /run/tc-a.sock status | grep -q 'relay 1'"
+if ! (wait_for 20 "alpha → beta via relay" bash -c "ip netns exec a ping -c1 -W1 $IPB >/dev/null && ip netns exec a tc --socket /run/tc-a.sock status | grep -q 'relay 1'"); then
+	echo "--- alpha:"; tca status; echo "--- beta:"; tcb status
+	ip netns exec a ping -c3 -W1 "$IPB" | tail -2
+	fail "alpha → beta via relay"
+fi
 ok "fell back to relay ($(( $(date +%s) - t0 ))s)"
 ip netns exec ra nft delete table ip cut
 t0=$(date +%s)

@@ -104,10 +104,17 @@ type Node struct {
 	Addresses []netip.Prefix   // single-address prefixes (/32 and /128)
 	Endpoints []netip.AddrPort `json:",omitempty"`
 	HomeRelay int              `json:",omitempty"` // relay region ID
-	Hostinfo  Hostinfo
-	Created   time.Time
-	LastSeen  *time.Time `json:",omitempty"`
-	KeyExpiry *time.Time `json:",omitempty"`
+	// Shared: the machine belongs to another tenant and is in this map
+	// because of a share (it is shared with us, or we are shared with it).
+	Shared bool `json:",omitempty"`
+	// NoInitiate: the machine may only reply to connections this machine
+	// starts; tcd's packet filter drops anything else from it. Set for
+	// machines shared with our tenant (sharing is one-way).
+	NoInitiate bool `json:",omitempty"`
+	Hostinfo   Hostinfo
+	Created    time.Time
+	LastSeen   *time.Time `json:",omitempty"`
+	KeyExpiry  *time.Time `json:",omitempty"`
 }
 
 // DNSConfig tells clients how to resolve names. With MagicDNS on, each
@@ -119,7 +126,8 @@ type DNSConfig struct {
 	MagicDNS bool
 	Domain   string // base domain, e.g. "home.internal"; every machine is <name>.<tenant>.<Domain>
 	// Search domains for short names; the first is this machine's tenant
-	// domain (e.g. "acme.home.internal"), so "laptop" finds its own laptop.
+	// domain (e.g. "acme.home.internal"), so "laptop" finds its own laptop,
+	// then the base domain, so "nas.globex" finds a machine shared by globex.
 	Search      []string     `json:",omitempty"`
 	Resolver    netip.Addr   // in-tunnel resolver (MagicDNSAddr)
 	Nameservers []netip.Addr `json:",omitempty"` // upstream resolvers; empty = keep OS defaults

@@ -69,7 +69,7 @@ function showLoginView(id) {
 
 function showLogin(msg) {
   $("toast").hidden = true; // don't carry messages over to the next session
-  $("new-key").hidden = $("new-invite").hidden = true;
+  $("new-key").hidden = $("new-invite").hidden = $("new-share-link").hidden = true;
   $("app").hidden = true;
   $("login").hidden = false;
   $("show-signup").hidden = config.signup === "off";
@@ -191,6 +191,9 @@ async function loadStatus() {
   stats.push(stat(s.baseDomain, "MagicDNS domain", true), stat(s.version || "dev", "server version", true));
   $("stats").replaceChildren(...stats);
   document.querySelectorAll(".control-url").forEach((e) => (e.textContent = s.controlURL || "URL"));
+  const sb = $("share-badge");
+  sb.hidden = !s.pendingShares;
+  sb.textContent = s.pendingShares || "";
   const badge = $("pending-badge");
   badge.hidden = !s.pending;
   badge.textContent = s.pending || "";
@@ -289,6 +292,94 @@ $("key-form").addEventListener("submit", async (ev) => {
     const r = await api("POST", "/api/v1/keys", body);
     $("new-key-value").textContent = r.key;
     $("new-key").hidden = false;
+    refresh();
+  } catch (e) { handleErr(e); }
+});
+
+// ---- sharing ----
+
+async function loadSharing() {
+  const [shares, nodes] = await Promise.all([api("GET", "/api/v1/shares"), api("GET", "/api/v1/nodes")]);
+  const sel = $("share-machine");
+  const prev = sel.value;
+  sel.replaceChildren(...nodes.map((n) => el("option", { value: n.id }, me.operator && n.user !== me.login ? `${n.name} (${n.user})` : n.name)));
+  if (nodes.some((n) => String(n.id) === prev)) sel.value = prev;
+  $("share-form").hidden = nodes.length === 0;
+  $("outgoing-empty").textContent = nodes.length === 0 ? "Add a machine to your network to share it." : "You haven't shared any machines.";
+
+  const statusOf = (s) => s.inEffect ? ["active", "ok"] : s.status === "pending" ? ["pending", "warn"] : ["inactive", ""];
+  $("incoming-empty").hidden = shares.incoming.length > 0;
+  $("incoming-body").replaceChildren(...shares.incoming.map((s) => {
+    const st = statusOf(s);
+    const actions = s.status === "pending"
+      ? [el("button", { class: "primary small", onclick: () => acceptShare(s) }, "Accept"),
+         el("button", { class: "ghost", onclick: () => removeShare(s, `Decline ${s.fqdn}?`) }, "Decline")]
+      : [el("button", { class: "danger", onclick: () => removeShare(s, `Stop using ${s.fqdn}? You'd need the owner to share it again.`) }, "Remove")];
+    return el("tr", {},
+      el("td", {}, el("div", {}, s.machine), el("div", { class: "sub" }, s.fqdn)),
+      el("td", {}, s.owner),
+      el("td", {}, el("span", { class: "badge " + st[1] }, st[0])),
+      el("td", {}, s.acceptedAt ? fmtDate(s.acceptedAt) : "–"),
+      el("td", { class: "actions" }, actions));
+  }));
+  $("outgoing-empty").hidden = shares.outgoing.length > 0;
+  $("outgoing-body").replaceChildren(...shares.outgoing.map((s) => {
+    const st = s.recipient ? statusOf(s) : ["link not used yet", ""];
+    const who = s.recipient || el("span", { class: "mono" }, s.linkPrefix + "…");
+    return el("tr", {},
+      el("td", {}, el("div", {}, s.machine), el("div", { class: "sub" }, me.operator && s.owner !== me.login ? `owner: ${s.owner}` : s.fqdn)),
+      el("td", {}, who, s.expires && el("div", { class: "sub" }, "expires " + fmtDate(s.expires))),
+      el("td", {}, el("span", { class: "badge " + st[1] }, st[0])),
+      el("td", {}, fmtDate(s.created)),
+      el("td", { class: "actions" }, el("button", { class: "danger", onclick: () => removeShare(s, `Stop sharing ${s.machine}${s.recipient ? " with " + s.recipient : ""}? Access ends immediately.`) }, "Revoke")));
+  }));
+}
+
+async function acceptShare(s) {
+  try {
+    await api("POST", `/api/v1/shares/${s.id}/accept`, {});
+    toast(`${s.fqdn} is now available to your machines`);
+    refresh();
+  } catch (e) { handleErr(e); }
+}
+
+async function removeShare(s, question) {
+  if (!confirm(question)) return;
+  try {
+    await api("DELETE", `/api/v1/shares/${s.id}`);
+    toast("Share removed");
+    refresh();
+  } catch (e) { handleErr(e); }
+}
+
+$("share-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const recipient = $("share-recipient").value.trim().toLowerCase();
+  if (!recipient) return toast("Enter an account name, or create a link", true);
+  try {
+    const s = await api("POST", `/api/v1/nodes/${$("share-machine").value}/shares`, { recipient });
+    $("share-recipient").value = "";
+    toast(`Offered ${s.machine} to ${s.recipient}. It takes effect when they accept.`);
+    refresh();
+  } catch (e) { handleErr(e); }
+});
+
+$("share-link").addEventListener("click", async () => {
+  if (!$("share-machine").value) return toast("You have no machines to share", true);
+  try {
+    const r = await api("POST", `/api/v1/nodes/${$("share-machine").value}/share-links`, { ttl: $("share-link-ttl").value });
+    $("new-share-link-value").textContent = r.code;
+    $("new-share-link").hidden = false;
+    refresh();
+  } catch (e) { handleErr(e); }
+});
+
+$("redeem-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  try {
+    const s = await api("POST", "/api/v1/shares/redeem", { code: $("redeem-code").value.trim() });
+    $("redeem-code").value = "";
+    toast(`${s.fqdn} is now available to your machines`);
     refresh();
   } catch (e) { handleErr(e); }
 });
@@ -444,6 +535,7 @@ async function refresh() {
     await loadStatus();
     if (currentTab === "nodes") await loadNodes();
     else if (currentTab === "keys") await loadKeys();
+    else if (currentTab === "sharing") await loadSharing();
     else if (currentTab === "users") { await loadUsers(); await loadInvites(); }
   } catch (e) { handleErr(e); }
 }

@@ -108,6 +108,7 @@ type resolved struct {
 	ifname  string
 	logf    func(string, ...any)
 	applied bool
+	search  []string // search domains last applied
 }
 
 func (r *resolved) Mode() string                { return ModeResolved }
@@ -127,6 +128,14 @@ func (r *resolved) run(args ...string) error {
 func (r *resolved) Set(c OSConfig) error {
 	if len(c.Nameservers) == 0 {
 		return r.Close()
+	}
+	// resolved doesn't rewrite its stub resolv.conf (whose "search" line
+	// glibc uses) when a running link's domains change, only when a link
+	// is configured afresh; so start over if the search list changed.
+	if r.applied && !slices.Equal(r.search, c.SearchDomains) {
+		if err := r.run("revert", r.ifname); err != nil {
+			r.logf("dns: %v", err)
+		}
 	}
 	dnsArgs := []string{"dns", r.ifname}
 	for _, ns := range c.Nameservers {
@@ -149,7 +158,7 @@ func (r *resolved) Set(c OSConfig) error {
 			return err
 		}
 	}
-	r.applied = true
+	r.applied, r.search = true, slices.Clone(c.SearchDomains)
 	// The resolver answers from the network map: plain DNS, unsigned, no
 	// multicast name protocols on this link. Older resolved versions lack
 	// some of these settings, so failures are only logged.

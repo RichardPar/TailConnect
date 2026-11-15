@@ -46,8 +46,11 @@ type Status struct {
 	HomeRelay      int        `json:",omitempty"`
 	RelayConnected bool       `json:",omitempty"`
 	DNS            *DNSStatus `json:",omitempty"`
-	Self           *PeerStatus
-	Peers          []PeerStatus
+	// FilterDropped counts packets refused because a shared machine tried to
+	// open a connection to this one.
+	FilterDropped int64 `json:",omitempty"`
+	Self          *PeerStatus
+	Peers         []PeerStatus
 }
 
 // DNSStatus describes MagicDNS on this node.
@@ -81,6 +84,10 @@ type PeerStatus struct {
 	TxBytes         int64
 	// Active means a WireGuard handshake completed within the last 3 minutes.
 	Active bool
+	// Shared: another tenant's machine, in this network because of a share.
+	// NoInitiate: it may only reply to connections this machine opens.
+	Shared     bool `json:",omitempty"`
+	NoInitiate bool `json:",omitempty"`
 }
 
 // Backend is implemented by the daemon.

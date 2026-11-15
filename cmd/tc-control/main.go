@@ -1,10 +1,12 @@
 // Command tc-control is the TailConnect coordination server and its admin CLI.
 //
-//	tc-control serve                     run the control + admin web servers
-//	tc-control admin-token               create/replace the admin web token
-//	tc-control users create|list|delete  manage users
+//	tc-control serve                     run the control server and web portal
+//	tc-control admin-token               create/replace the admin token (API, break-glass sign-in)
+//	tc-control users ...                 manage accounts (create, approve, suspend, passwords, roles)
+//	tc-control invites ...               manage sign-up invite codes
 //	tc-control keys create|list|revoke   manage pre-auth keys
 //	tc-control nodes list|delete|rename  manage registered machines
+//	tc-control shares ...                manage machines shared between accounts
 //
 // Admin subcommands operate on the SQLite database directly, so they work
 // whether or not the server is running.
@@ -52,6 +54,8 @@ Usage:
   tc-control users passwd NAME | approve NAME | suspend NAME | activate NAME
   tc-control users role NAME operator|tenant
   tc-control invites create [-expiration 168h] | list | revoke ID
+  tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
+  tc-control shares accept ID | revoke ID
   tc-control keys create -user NAME [-reusable] [-ephemeral] [-expiration 24h]
   tc-control keys list [-user NAME] | revoke ID
   tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
@@ -76,6 +80,8 @@ func main() {
 		err = cmdAdminToken(args)
 	case "invites":
 		err = cmdInvites(args)
+	case "shares":
+		err = cmdShares(args)
 	case "users":
 		err = cmdUsers(args)
 	case "keys":
@@ -157,12 +163,12 @@ func openDB(path string) (*db.DB, error) {
 func cmdServe(args []string) error {
 	fs, dbPath := flags("serve")
 	listen := fs.String("listen", ":7740", "client-facing control API address")
-	adminListen := fs.String("admin-listen", "127.0.0.1:7741", `admin web UI/API address ("" disables)`)
+	adminListen := fs.String("admin-listen", "127.0.0.1:7741", `web portal and API address ("" disables; other people need it reachable over TLS)`)
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
 	signup := fs.String("signup", admin.SignupApproval, "who may create accounts in the web portal: off, approval (operator approves), invite (needs an invite code) or open")
 	magicDNS := fs.Bool("magic-dns", true, "clients resolve <node>.<domain> names in-tunnel and point the OS at them")
 	nameservers := fs.String("dns-nameservers", "", "comma-separated upstream resolvers for all other names; clients then send all DNS through MagicDNS (default: clients keep their own resolvers)")
-	publicURL := fs.String("public-url", "", "URL clients use to reach this server (shown in the admin UI)")
+	publicURL := fs.String("public-url", "", "URL clients use to reach this server (shown in the web portal)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file (enables HTTPS on both listeners)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
 	logJSON := fs.Bool("log-json", false, "log in JSON format")
@@ -373,7 +379,7 @@ func isLoopback(addr string) bool {
 func cmdAdminToken(args []string) error {
 	fs, dbPath := flags("admin-token")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Create a new admin web token, replacing (and logging out) any previous one.")
+		fmt.Fprintln(fs.Output(), "Create a new admin token (for scripts and break-glass operator sign-in), replacing any previous one.")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
@@ -536,6 +542,104 @@ func readNewPassword(name string) (string, error) {
 		pw = strings.TrimRight(line, "\r\n")
 	}
 	return password.Hash(pw)
+}
+
+func cmdShares(args []string) error {
+	sub, rest, err := subcommand(args, "shares")
+	if err != nil {
+		return err
+	}
+	fs, dbPath := flags("shares " + sub)
+	asJSON := fs.Bool("json", false, "output JSON")
+	user := fs.String("user", "", "shares list: only shares of or to this account")
+	expiration := fs.Duration("expiration", 7*24*time.Hour, "shares link: how long the link stays valid")
+	parseArgs(fs, rest)
+	d, err := openDB(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	switch sub {
+	case "list":
+		var f db.ShareFilter
+		if *user != "" {
+			u, err := d.GetUser(ctx, *user)
+			if err != nil {
+				return err
+			}
+			f.OwnerID, f.RecipientID = u.ID, u.ID
+		}
+		list, err := d.ListShares(ctx, f)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return printJSON(list)
+		}
+		tw := table("ID", "MACHINE", "OWNER", "SHARED WITH", "STATUS")
+		for _, sh := range list {
+			with, status := sh.RecipientName, sh.Status
+			if sh.RecipientID == 0 {
+				with = sh.LinkPrefix + "… (link)"
+				status = "unused, expires " + sh.ExpiresAt.Local().Format(time.DateTime)
+			} else if sh.Status == db.ShareAccepted && !sh.InEffect() {
+				status = "accepted (an account is not active)"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", sh.ID, sh.NodeName, sh.OwnerName, with, status)
+		}
+		return tw.Flush()
+	case "create":
+		if fs.NArg() != 2 {
+			return usageError("usage: tc-control shares create NODE_ID ACCOUNT")
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil {
+			return usageError("bad node ID " + strconv.Quote(fs.Arg(0)))
+		}
+		sh, err := d.ShareWith(ctx, id, fs.Arg(1))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("offered %s (owner %s) to %s as share %d; it takes effect when they accept\n", sh.NodeName, sh.OwnerName, sh.RecipientName, sh.ID)
+	case "link":
+		id, err := idArg(fs, "shares link NODE_ID [-expiration 168h]")
+		if err != nil {
+			return err
+		}
+		code, sh, err := d.CreateShareLink(ctx, id, *expiration)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "share link for %s, single use, expires %s (shown once):\n", sh.NodeName, sh.ExpiresAt.Local().Format(time.DateTime))
+		fmt.Println(code)
+	case "accept":
+		id, err := idArg(fs, "shares accept ID")
+		if err != nil {
+			return err
+		}
+		sh, err := d.GetShare(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := d.AcceptShare(ctx, id, sh.RecipientID); err != nil {
+			return err
+		}
+		fmt.Printf("accepted share %d on behalf of %s: %s's machines can now reach %s\n", id, sh.RecipientName, sh.RecipientName, sh.NodeName)
+	case "revoke":
+		id, err := idArg(fs, "shares revoke ID")
+		if err != nil {
+			return err
+		}
+		if err := d.DeleteShare(ctx, id, 0); err != nil {
+			return err
+		}
+		fmt.Printf("revoked share %d\n", id)
+	default:
+		return usageError("unknown shares command " + strconv.Quote(sub))
+	}
+	return nil
 }
 
 func cmdInvites(args []string) error {

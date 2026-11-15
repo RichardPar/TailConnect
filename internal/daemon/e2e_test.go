@@ -572,3 +572,91 @@ func TestTenantsIsolated(t *testing.T) {
 		t.Fatal("alice reached bob's machine")
 	}
 }
+
+func TestSharingIsOneWay(t *testing.T) {
+	cdb, url, aliceKey := newControl(t)
+	bob, _ := cdb.CreateUser(context.Background(), "bob")
+	bobKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: bob.ID, TTL: time.Hour})
+	nas, laptop := newTestNode(t, "alice-nas"), newTestNode(t, "bob-laptop")
+	if err := nas.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: aliceKey, Hostname: "nas"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := laptop.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: bobKey, Hostname: "laptop"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both running", func() bool { return running(nas, 0)() && running(laptop, 0)() })
+	ipNas, ipLaptop := selfIP(t, nas), selfIP(t, laptop)
+	echo(t, nas, ipNas)
+	echo(t, laptop, ipLaptop)
+
+	// Alice shares her nas with bob; it takes effect once bob accepts.
+	nasID := nodeID(t, cdb, "nas", "alice")
+	sh, err := cdb.ShareWith(context.Background(), nasID, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if len(laptop.d.Status().Peers) != 0 {
+		t.Fatal("pending share already visible")
+	}
+	if err := cdb.AcceptShare(context.Background(), sh.ID, bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "share in both maps", func() bool { return running(nas, 1)() && running(laptop, 1)() })
+	lp := laptop.d.Status().Peers[0]
+	if lp.Name != "nas.alice.e2e.internal" || !lp.Shared || !lp.NoInitiate {
+		t.Fatalf("bob's view of the nas: %+v", lp)
+	}
+	if np := nas.d.Status().Peers[0]; np.Name != "laptop.bob.e2e.internal" || !np.Shared || np.NoInitiate {
+		t.Fatalf("nas's view of bob's laptop: %+v", np)
+	}
+
+	// Bob's laptop can use the nas...
+	if got, err := ping(laptop, ipNas, "hello-nas"); err != nil || got != "pong:hello-nas" {
+		t.Fatalf("bob → nas: %q %v", got, err)
+	}
+	// ...and resolve it by name.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if a, err := resolver(laptop).LookupNetIP(ctx, "ip4", "nas.alice.e2e.internal"); err != nil || len(a) != 1 || a[0] != ipNas {
+		t.Fatalf("bob resolving the nas: %v %v", a, err)
+	}
+	// ...but the nas can't open connections to bob's laptop.
+	dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if c, err := nas.tnet().DialContextTCPAddrPort(dctx, netip.AddrPortFrom(ipLaptop, 7000)); err == nil {
+		c.Close()
+		t.Fatal("the shared nas opened a connection to bob's laptop")
+	}
+	if laptop.d.Status().FilterDropped == 0 {
+		t.Fatal("bob's filter didn't count the refused connection")
+	}
+	// Bob can still talk to the nas afterwards (the filter state is per flow).
+	if got, err := ping(laptop, ipNas, "again"); err != nil || got != "pong:again" {
+		t.Fatalf("bob → nas after the refused attempt: %q %v", got, err)
+	}
+
+	// Revoking ends access at once.
+	if err := cdb.DeleteShare(context.Background(), sh.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "share gone from both maps", func() bool { return running(nas, 0)() && running(laptop, 0)() })
+	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer rcancel()
+	if c, err := laptop.tnet().DialContextTCPAddrPort(rctx, netip.AddrPortFrom(ipNas, 7000)); err == nil {
+		c.Close()
+		t.Fatal("bob reached the nas after the share was revoked")
+	}
+}
+
+func nodeID(t *testing.T, cdb *db.DB, name, user string) int64 {
+	t.Helper()
+	nodes, _ := cdb.ListNodes(context.Background(), 0)
+	for _, n := range nodes {
+		if n.GivenName == name && n.UserName == user {
+			return n.ID
+		}
+	}
+	t.Fatalf("no node %s of %s", name, user)
+	return 0
+}
