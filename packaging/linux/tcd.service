@@ -1,10 +1,13 @@
 [Unit]
 Description=TailConnect client daemon
+Documentation=file:///usr/local/share/doc/tailconnect/README.md
 Wants=network-pre.target
 After=network-pre.target NetworkManager.service systemd-resolved.service
 
 [Service]
-ExecStart=/usr/local/bin/tcd -state /var/lib/tailconnect -socket /run/tailconnect/tcd.sock
+# Options go in /etc/default/tcd (TCD_ARGS), e.g. -dns or -port.
+EnvironmentFile=-/etc/default/tcd
+ExecStart=/usr/local/bin/tcd -state /var/lib/tailconnect -socket /run/tailconnect/tcd.sock $TCD_ARGS
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=tailconnect

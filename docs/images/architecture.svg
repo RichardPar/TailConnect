@@ -15,13 +15,13 @@
   <text x="135" y="92" text-anchor="middle" font-size="12.5" fill="#6b7280">browser → admin UI</text>
   <text x="135" y="110" text-anchor="middle" font-size="12.5" fill="#6b7280">or tc-control CLI</text>
   <line x1="232" y1="83" x2="338" y2="83" stroke="#6b7280" stroke-width="1.6" marker-end="url(#arrowg)"/>
-  <text x="285" y="74" text-anchor="middle" font-size="11.5" fill="#6b7280">:8081 / DB</text>
+  <text x="285" y="74" text-anchor="middle" font-size="11.5" fill="#6b7280">:7741 / DB</text>
 
   <!-- control server -->
   <rect x="340" y="28" width="300" height="120" rx="12" fill="#eef4ff" stroke="#2f6fde" stroke-width="1.6"/>
   <text x="490" y="56" text-anchor="middle" font-size="17" font-weight="700" fill="#1c2026">tc-control</text>
-  <text x="490" y="80" text-anchor="middle" font-size="12.5" fill="#33405a">Control API :8080: Noise IK → HTTP/2</text>
-  <text x="490" y="99" text-anchor="middle" font-size="12.5" fill="#33405a">Admin UI :8081 · STUN :3478 (UDP)</text>
+  <text x="490" y="80" text-anchor="middle" font-size="12.5" fill="#33405a">Control API :7740: Noise IK → HTTP/2</text>
+  <text x="490" y="99" text-anchor="middle" font-size="12.5" fill="#33405a">Admin UI :7741 · STUN :3478 (UDP)</text>
   <text x="490" y="118" text-anchor="middle" font-size="12.5" fill="#33405a">SQLite: users · auth keys · nodes</text>
   <text x="490" y="137" text-anchor="middle" font-size="11.5" fill="#6b7280">relay at /relay: fallback when direct fails</text>
 

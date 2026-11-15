@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -302,7 +303,14 @@ func TestEndToEndMesh(t *testing.T) {
 	if nodes, _ := cdb.ListNodes(context.Background(), 0); len(nodes) != 0 {
 		t.Fatalf("%d nodes left after logout", len(nodes))
 	}
-	// After logout, the control URL is remembered: an auth key alone rejoins.
+	// Logout forgets the pinned server key (a rebuilt server must not lock the
+	// device out) but remembers the URL: an auth key alone rejoins.
+	a.d.mu.Lock()
+	pinned := a.d.st.ServerKey
+	a.d.mu.Unlock()
+	if !pinned.IsZero() {
+		t.Fatal("server key still pinned after logout")
+	}
 	if err := a.d.Up(localapi.UpRequest{AuthKey: authKey}); err != nil {
 		t.Fatalf("rejoin: %v", err)
 	}
@@ -434,5 +442,39 @@ func TestMagicDNS(t *testing.T) {
 	})
 	if _, err := r.LookupNetIP(ctx, "ip4", "beta.e2e.internal"); err == nil {
 		t.Fatal("old name still resolves after rename")
+	}
+}
+
+func TestControlServerMoved(t *testing.T) {
+	_, url, authKey := newControl(t)
+	a := newTestNode(t, "alpha")
+	if err := a.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: authKey, Hostname: "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "alpha running", running(a, 0))
+	ip := selfIP(t, a)
+
+	// A mistyped auth key fails without disconnecting the device.
+	if err := a.d.Up(localapi.UpRequest{AuthKey: "tc-auth-wrong"}); err == nil {
+		t.Fatal("bad auth key accepted")
+	}
+	if st := a.d.Status(); st.State != localapi.StateRunning {
+		t.Fatalf("after a failed re-registration: state %s, want Running", st.State)
+	}
+
+	// Same server, new address: keep the registration, no auth key needed.
+	moved := strings.Replace(url, "127.0.0.1", "localhost", 1)
+	if err := a.d.Up(localapi.UpRequest{ControlURL: moved}); err != nil {
+		t.Fatalf("up with moved URL: %v", err)
+	}
+	waitFor(t, "alpha running via new URL", running(a, 0))
+	if st := a.d.Status(); st.ControlURL != moved || selfIP(t, a) != ip {
+		t.Fatalf("after move: url=%s ip=%s (want %s, %s)", st.ControlURL, selfIP(t, a), moved, ip)
+	}
+
+	// A different server: fresh identity, so an auth key is required.
+	_, other, _ := newControl(t)
+	if err := a.d.Up(localapi.UpRequest{ControlURL: other}); err == nil {
+		t.Fatal("switching to another server without an auth key should fail")
 	}
 }

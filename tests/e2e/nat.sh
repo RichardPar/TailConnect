@@ -8,7 +8,7 @@
 # no root needed if unprivileged user namespaces are enabled.
 #
 #   [ns a] 10.1.0.2 ── [ns ra] NAT 198.51.100.2 ──┐
-#                                                 br0 198.51.100.1  ← tc-control :8080, STUN :3478
+#                                                 br0 198.51.100.1  ← tc-control :7740, STUN :3478
 #   [ns b] 10.2.0.2 ── [ns rb] NAT 198.51.100.3 ──┘
 set -euo pipefail
 
@@ -132,9 +132,9 @@ echo "== control server (relay + STUN)"
 export TC_CONTROL_DB=$WORK/control.db
 tc-control users create alice >/dev/null
 KEY=$(tc-control keys create -user alice -reusable -expiration 10m 2>/dev/null)
-tc-control serve -listen 198.51.100.1:8080 -admin-listen "" -stun-listen 198.51.100.1:3478 -domain nat.internal >"$LOG/control.log" 2>&1 &
+tc-control serve -listen 198.51.100.1:7740 -admin-listen "" -stun-listen 198.51.100.1:3478 -domain nat.internal >"$LOG/control.log" 2>&1 &
 pids+=($!)
-wait_for 5 "control listening" bash -c 'exec 3<>/dev/tcp/198.51.100.1/8080'
+wait_for 5 "control listening" bash -c 'exec 3<>/dev/tcp/198.51.100.1/7740'
 ok "tc-control up"
 
 if [[ -n "${TC_NAT_PCAP:-}" ]]; then
@@ -155,8 +155,8 @@ done
 for n in a b; do wait_for 5 "tcd-$n socket" test -S "/run/tc-$n.sock"; done
 tca() { ip netns exec a tc --socket /run/tc-a.sock "$@"; }
 tcb() { ip netns exec b tc --socket /run/tc-b.sock "$@"; }
-tca up --server http://198.51.100.1:8080 --authkey "$KEY" --hostname alpha
-tcb up --server http://198.51.100.1:8080 --authkey "$KEY" --hostname beta
+tca up --server http://198.51.100.1:7740 --authkey "$KEY" --hostname alpha
+tcb up --server http://198.51.100.1:7740 --authkey "$KEY" --hostname beta
 IPA=$(tca ip -4); IPB=$(tcb ip -4)
 
 echo "== STUN: public addresses"

@@ -53,6 +53,20 @@ type RegisterResult struct {
 	Rotated bool // an existing machine got a new node key
 }
 
+// applyAuthKey consumes key (if any) and moves node id to the key's user.
+func applyAuthKey(ctx context.Context, tx *sql.Tx, id int64, key string, now time.Time) error {
+	if key == "" {
+		return nil
+	}
+	k, err := consumePreAuthKey(ctx, tx, key, now)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, ephemeral = ?, preauth_key_id = ? WHERE id = ?`,
+		k.UserID, k.Ephemeral, k.ID, id)
+	return err
+}
+
 // RegisterNode atomically validates the auth key, allocates addresses and
 // creates or updates the node for p.MachineKey.
 //
@@ -60,8 +74,10 @@ type RegisterResult struct {
 //   - Known machine, same node key: hostinfo/disco are refreshed; no auth key needed.
 //   - Known machine, new node key: the node key is rotated, keeping addresses
 //     and name. The caller must have authenticated the machine key (the Noise
-//     channel does). If AuthKey is given it is consumed and the node moves to
-//     that key's user.
+//     channel does).
+//
+// For a known machine an AuthKey is optional; if given, it must be valid: it
+// is consumed and the node moves to that key's user.
 func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult, error) {
 	if p.Hostinfo == "" {
 		p.Hostinfo = "{}"
@@ -81,6 +97,9 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 			p.DiscoKey, p.Hostname, p.Hostinfo, unix(now), existing.ID); err != nil {
 			return RegisterResult{}, err
 		}
+		if err := applyAuthKey(ctx, tx, existing.ID, p.AuthKey, now); err != nil {
+			return RegisterResult{}, err
+		}
 		n, err := getNodeTx(ctx, tx, existing.ID)
 		if err != nil {
 			return RegisterResult{}, err
@@ -92,18 +111,13 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 			UPDATE nodes SET node_key = ?, disco_key = ?, hostname = ?, hostinfo = ?, last_seen = ?, endpoints = '[]'
 			WHERE id = ?`,
 			p.NodeKey, p.DiscoKey, p.Hostname, p.Hostinfo, unix(now), existing.ID)
-		if err == nil && p.AuthKey != "" {
-			var k PreAuthKey
-			if k, err = consumePreAuthKey(ctx, tx, p.AuthKey, now); err != nil {
-				return RegisterResult{}, err
-			}
-			_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, ephemeral = ?, preauth_key_id = ? WHERE id = ?`,
-				k.UserID, k.Ephemeral, k.ID, existing.ID)
-		}
 		if isUniqueViolation(err) {
 			return RegisterResult{}, fmt.Errorf("node key: %w", ErrExists)
 		}
 		if err != nil {
+			return RegisterResult{}, err
+		}
+		if err := applyAuthKey(ctx, tx, existing.ID, p.AuthKey, now); err != nil {
 			return RegisterResult{}, err
 		}
 		n, err := getNodeTx(ctx, tx, existing.ID)

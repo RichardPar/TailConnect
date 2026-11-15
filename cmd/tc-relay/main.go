@@ -31,7 +31,7 @@ import (
 var version = "dev"
 
 func main() {
-	listen := flag.String("listen", ":3340", "listen address")
+	listen := flag.String("listen", ":7742", "listen address")
 	keyFile := flag.String("key-file", "relay.key", "relay private key (created if missing)")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")

@@ -50,7 +50,8 @@ Usage:
   tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
   tc-control version
 
-Every subcommand accepts -db PATH (default $TC_CONTROL_DB or ./control.db).
+Every subcommand accepts -db PATH (default: $TC_CONTROL_DB, else
+/var/lib/tc-control/control.db if it exists, else ./control.db).
 Run "tc-control <command> -h" for command flags.
 `
 
@@ -95,11 +96,36 @@ type usageError string
 
 func (e usageError) Error() string { return string(e) }
 
+// installedDB is where the packaged systemd unit keeps the database.
+const installedDB = "/var/lib/tc-control/control.db"
+
+// defaultDBPath is $TC_CONTROL_DB, else the packaged location if it exists
+// (so `sudo tc-control users list` works on an installed server), else
+// ./control.db.
 func defaultDBPath() string {
 	if p := os.Getenv("TC_CONTROL_DB"); p != "" {
 		return p
 	}
+	if _, err := os.Stat(installedDB); err == nil {
+		return installedDB
+	}
 	return "control.db"
+}
+
+// parseArgs parses flags anywhere among the arguments, so both
+// `users create -db X alice` and `users create alice -db X` work.
+func parseArgs(fs *flag.FlagSet, args []string) {
+	var pos []string
+	for {
+		fs.Parse(args)
+		args = fs.Args()
+		if len(args) == 0 {
+			break
+		}
+		pos = append(pos, args[0])
+		args = args[1:]
+	}
+	fs.Parse(append([]string{"--"}, pos...))
 }
 
 // flags creates a FlagSet with the shared -db flag.
@@ -121,8 +147,8 @@ func openDB(path string) (*db.DB, error) {
 
 func cmdServe(args []string) error {
 	fs, dbPath := flags("serve")
-	listen := fs.String("listen", ":8080", "client-facing control API address")
-	adminListen := fs.String("admin-listen", "127.0.0.1:8081", `admin web UI/API address ("" disables)`)
+	listen := fs.String("listen", ":7740", "client-facing control API address")
+	adminListen := fs.String("admin-listen", "127.0.0.1:7741", `admin web UI/API address ("" disables)`)
 	domain := fs.String("domain", "tc.internal", "MagicDNS base domain")
 	magicDNS := fs.Bool("magic-dns", true, "clients resolve <node>.<domain> names in-tunnel and point the OS at them")
 	nameservers := fs.String("dns-nameservers", "", "comma-separated upstream resolvers for all other names; clients then send all DNS through MagicDNS (default: clients keep their own resolvers)")
@@ -344,7 +370,7 @@ func cmdUsers(args []string) error {
 	}
 	fs, dbPath := flags("users " + sub)
 	asJSON := fs.Bool("json", false, "output JSON")
-	fs.Parse(rest)
+	parseArgs(fs, rest)
 	d, err := openDB(*dbPath)
 	if err != nil {
 		return err
@@ -404,7 +430,7 @@ func cmdKeys(args []string) error {
 	reusable := fs.Bool("reusable", false, "allow the key to register more than one machine")
 	ephemeral := fs.Bool("ephemeral", false, "machines registered with this key are ephemeral")
 	expiration := fs.Duration("expiration", 24*time.Hour, "key lifetime")
-	fs.Parse(rest)
+	parseArgs(fs, rest)
 	d, err := openDB(*dbPath)
 	if err != nil {
 		return err
@@ -486,7 +512,7 @@ func cmdNodes(args []string) error {
 	fs, dbPath := flags("nodes " + sub)
 	user := fs.String("user", "", "only list this user's machines")
 	asJSON := fs.Bool("json", false, "output JSON")
-	fs.Parse(rest)
+	parseArgs(fs, rest)
 	d, err := openDB(*dbPath)
 	if err != nil {
 		return err

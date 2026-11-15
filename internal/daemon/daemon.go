@@ -23,6 +23,7 @@ import (
 
 	"tailconnect/internal/controlclient"
 	"tailconnect/internal/engine"
+	"tailconnect/internal/ipam"
 	"tailconnect/internal/key"
 	"tailconnect/internal/localapi"
 	"tailconnect/internal/protocol"
@@ -225,9 +226,16 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 		return errors.New("no control server configured: pass --server URL")
 	}
 	if st.ControlURL != "" && url != st.ControlURL {
-		d.opts.Logf("switching control server %s → %s; starting with a fresh identity", st.ControlURL, url)
 		d.stopLocked()
-		st = persist{Hostname: st.Hostname}
+		if d.sameServer(url, st.ServerKey) {
+			// The same server at a new address (new port, hostname or TLS).
+			// Safe to trust: the Noise handshake still authenticates the
+			// pinned key, whatever /key returned.
+			d.opts.Logf("control server moved %s → %s (same server key); keeping registration", st.ControlURL, url)
+		} else {
+			d.opts.Logf("switching control server %s → %s; starting with a fresh identity", st.ControlURL, url)
+			st = persist{Hostname: st.Hostname}
+		}
 	}
 	if st.MachineKey.IsZero() {
 		st.MachineKey = key.NewPrivate[key.MachineKind]()
@@ -268,7 +276,8 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 			return err
 		}
 		defer cc.Close()
-		d.stopLocked()
+		// Register before touching the running tunnel, so a failed attempt
+		// (say, a mistyped auth key) leaves the device connected.
 		resp, err := cc.Register(ctx, protocol.RegisterRequest{
 			NodeKey: st.NodeKey.Public(), DiscoKey: st.DiscoKey.Public(), AuthKey: req.AuthKey, Hostinfo: d.hostinfo(st),
 		})
@@ -278,6 +287,7 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 		if err != nil {
 			return fmt.Errorf("register: %w", err)
 		}
+		d.stopLocked()
 		st.ServerKey, st.Registered, st.Self = sk, true, &resp.Node
 		d.opts.Logf("registered as %s (%v)", resp.Node.Name, resp.Node.Addresses)
 	}
@@ -329,8 +339,10 @@ func (d *Daemon) Logout() error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// Keep the server URL and key so the next `tc up --authkey` needs no --server.
-	d.st = persist{ControlURL: st.ControlURL, ServerKey: st.ServerKey, Hostname: st.Hostname}
+	// Keep the server URL so the next `tc up --authkey` needs no --server. The
+	// pinned key is dropped and fetched again on rejoin: after a logout, a
+	// rebuilt server (new key) must not lock the device out.
+	d.st = persist{ControlURL: st.ControlURL, Hostname: st.Hostname}
 	d.state, d.lastErr, d.netmap = localapi.StateNeedsLogin, "", nil
 	return d.save()
 }
@@ -555,6 +567,21 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 // LocalEndpoints lists this host's usable unicast addresses (excluding
 // loopback, link-local and the tunnel interface itself) paired with port, plus
 // the prefixes they belong to. Results are sorted for stable comparison.
+// isTunnelIface reports whether an interface is a TailConnect tunnel (ours
+// under another name, or another tcd's): it carries an address from the
+// tunnel IPv6 range. Its addresses are only reachable through a tunnel, so
+// advertising them would send WireGuard traffic into WireGuard.
+func isTunnelIface(addrs []net.Addr) bool {
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok {
+			if ip, ok := netip.AddrFromSlice(ipn.IP); ok && ipam.DefaultV6.Contains(ip.Unmap()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func LocalEndpoints(port uint16, excludeIface string) ([]netip.AddrPort, []netip.Prefix) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -567,7 +594,7 @@ func LocalEndpoints(port uint16, excludeIface string) ([]netip.AddrPort, []netip
 			continue
 		}
 		addrs, err := ifc.Addrs()
-		if err != nil {
+		if err != nil || isTunnelIface(addrs) {
 			continue
 		}
 		for _, a := range addrs {
@@ -590,4 +617,15 @@ func LocalEndpoints(port uint16, excludeIface string) ([]netip.AddrPort, []netip
 	}
 	slices.SortFunc(eps, func(a, b netip.AddrPort) int { return a.Compare(b) })
 	return eps, prefixes
+}
+
+// sameServer reports whether the control server at url has the pinned key.
+func (d *Daemon) sameServer(url string, pinned key.MachinePublic) bool {
+	if pinned.IsZero() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sk, err := controlclient.FetchServerKey(ctx, url, nil)
+	return err == nil && sk.Equal(pinned)
 }

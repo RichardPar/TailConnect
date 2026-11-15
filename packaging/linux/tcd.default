@@ -1,0 +1,8 @@
+# Options for tcd (installed as /etc/default/tcd).
+# Restart after editing:  sudo systemctl restart tcd
+#
+# Examples:
+#   -dns off           leave the host's DNS settings alone
+#   -port 41642        WireGuard UDP port (default 41641)
+#   -tun tc1           TUN interface name (default tc0)
+TCD_ARGS=""

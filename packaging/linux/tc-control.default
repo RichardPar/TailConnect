@@ -1,0 +1,15 @@
+# Options for tc-control serve (installed as /etc/default/tc-control).
+# Restart after editing:  sudo systemctl restart tc-control
+#
+# Defaults: control API and built-in relay on :7740, admin UI on
+# 127.0.0.1:7741, STUN on UDP :3478, MagicDNS domain tc.internal.
+#
+# Examples:
+#   -domain home.internal                      MagicDNS names: <machine>.home.internal
+#   -public-url https://vpn.example.com:7740   URL shown in the admin UI
+#   -tls-cert /etc/tailconnect/cert.pem -tls-key /etc/tailconnect/key.pem
+#                                              HTTPS (files must be readable by the service;
+#                                              see docs/installation.md)
+#   -dns-nameservers 1.1.1.1,9.9.9.9           send all client DNS through MagicDNS
+#   -log-json                                  structured logs for a log collector
+TC_CONTROL_ARGS=""

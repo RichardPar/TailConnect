@@ -1,11 +1,15 @@
 [Unit]
 Description=TailConnect coordination server
+Documentation=file:///usr/local/share/doc/tailconnect/README.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/tc-control serve -db /var/lib/tc-control/control.db -listen :8080 -admin-listen 127.0.0.1:8081
+# Options go in /etc/default/tc-control (TC_CONTROL_ARGS), e.g. -domain.
+EnvironmentFile=-/etc/default/tc-control
+ExecStart=/usr/local/bin/tc-control serve -db /var/lib/tc-control/control.db $TC_CONTROL_ARGS
 Restart=on-failure
+RestartSec=2
 DynamicUser=yes
 StateDirectory=tc-control
 StateDirectoryMode=0700

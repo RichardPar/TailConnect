@@ -7,7 +7,7 @@
 # Topology (all inside a private user+mount+net namespace):
 #
 #   [ns a] va 10.99.0.2 ──┐
-#                         br0 10.99.0.1  ← tc-control :8080
+#                         br0 10.99.0.1  ← tc-control :7740
 #   [ns b] vb 10.99.0.3 ──┘
 set -euo pipefail
 
@@ -35,6 +35,7 @@ cleanup() {
 	local rc=$?
 	for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
 	wait 2>/dev/null || true
+	[[ -n "${KEEP_LOGS:-}" ]] && cp -r "$LOG/." "$KEEP_LOGS/" 2>/dev/null
 	if [[ $rc -ne 0 ]]; then
 		echo "== FAILED (rc=$rc); logs:"
 		for f in "$LOG"/*.log; do echo "--- $f"; tail -n 40 "$f"; done
@@ -76,9 +77,9 @@ echo "== control server"
 export TC_CONTROL_DB=$WORK/control.db
 tc-control users create alice >/dev/null
 KEY=$(tc-control keys create -user alice -reusable -expiration 10m 2>/dev/null)
-tc-control serve -listen 10.99.0.1:8080 -admin-listen "" -domain lan.internal >"$LOG/control.log" 2>&1 &
+tc-control serve -listen 10.99.0.1:7740 -admin-listen "" -domain lan.internal >"$LOG/control.log" 2>&1 &
 pids+=($!)
-wait_for 5 "control listening" bash -c 'exec 3<>/dev/tcp/10.99.0.1/8080'
+wait_for 5 "control listening" bash -c 'exec 3<>/dev/tcp/10.99.0.1/7740'
 ok "tc-control up"
 
 echo "== daemons"
@@ -91,8 +92,8 @@ for n in a b; do wait_for 5 "tcd-$n socket" test -S "/run/tc-$n.sock"; done
 tca() { ip netns exec a tc --socket "/run/tc-a.sock" "$@"; }
 tcb() { ip netns exec b tc --socket "/run/tc-b.sock" "$@"; }
 
-tca up --server http://10.99.0.1:8080 --authkey "$KEY" --hostname alpha
-tcb up --server http://10.99.0.1:8080 --authkey "$KEY" --hostname beta
+tca up --server http://10.99.0.1:7740 --authkey "$KEY" --hostname alpha
+tcb up --server http://10.99.0.1:7740 --authkey "$KEY" --hostname beta
 IPA=$(tca ip -4); IPB=$(tcb ip -4)
 IPA6=$(tca ip -6); IPB6=$(tcb ip -6)
 ok "alpha=$IPA/$IPA6 beta=$IPB/$IPB6"

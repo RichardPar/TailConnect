@@ -184,6 +184,14 @@ func TestReRegisterAndRotate(t *testing.T) {
 	if moved.Node.UserName != "bob" || moved.Node.IPv4 != first.Node.IPv4 {
 		t.Fatalf("move: %+v", moved.Node)
 	}
+	// The same applies without a rotation: a supplied key is always checked.
+	if _, err := reg(d, "m1", "n1c", "laptop", "tc-auth-bogus"); !errors.Is(err, ErrInvalidAuthKey) {
+		t.Fatalf("re-register with bad key: got %v", err)
+	}
+	back, err := reg(d, "m1", "n1c", "laptop", mustKey(t, d, u.ID, false))
+	if err != nil || back.Node.UserName != "alice" || back.Rotated {
+		t.Fatalf("re-register with alice's key: %+v %v", back.Node, err)
+	}
 }
 
 func TestGeneration(t *testing.T) {
