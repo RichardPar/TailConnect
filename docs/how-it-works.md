@@ -173,8 +173,10 @@ Inbound packets from the exit node can come from any address. WireGuard still at
 - **Tenant isolation.** See [Tenants](#tenants). In the portal and API, another account's machines, keys and shares look like they don't exist (404), and operator endpoints refuse tenants.
 - **Web portal.**
   - HMAC-signed `SameSite=Strict` session cookies, valid for 12 hours. A password change, suspension or role change ends that account's sessions; replacing the admin token ends token sessions.
-  - Sign-in and sign-up: 10 attempts per IP address, then one every 6 seconds; failed sign-ins take the same time whether or not the account exists; at most four password hashes are computed at once.
-  - Writes are accepted only as JSON, and the request origin is checked. A strict Content Security Policy.
+  - Password guesses are limited. Sign-in, sign-up and checking the current password when changing it allow 10 attempts per client, then one every 6 seconds. A client is one IPv4 address or one IPv6 /64 network, because one subscriber usually gets a whole /64. On top of that, each account allows 20 wrong passwords from anywhere, then one a minute, so guessing from many addresses gets no further. Failed sign-ins take the same time whether or not the account exists. At most four password hashes are computed at once.
+  - Writes are accepted only as JSON, and the request origin is checked. A strict Content Security Policy. Over HTTPS, browsers are told to use only HTTPS (HSTS, for a year).
+  - The portal answers only to host names it knows: IP addresses, `localhost`, the machine's hostname, the certificate's names, the `-public-url` host and any listed in `-admin-hosts`. This stops other web pages from reaching it through a visitor's browser by pointing their own name at the server (DNS rebinding), even when it listens on the server only.
+  - The UI builds pages from text only, never from HTML, so names and other data that machines report can't inject scripts.
   - It listens on port 7741 on every address by default (or only on the server, if you choose). Without TLS, `tc-control` warns that passwords cross the network unencrypted.
 - **Sharing.** One-way, enforced by the receiving machines' packet filter ([details](#sharing-and-the-packet-filter)).
 - **Path discovery.** Disco messages are sealed with NaCl box between the peers' disco keys, which are published in the network map. Discovery can't be spoofed to divert traffic.

@@ -291,7 +291,7 @@ curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://SERVER:7741/api/v1/nodes
 | `POST /api/v1/users/{name}/password` | `{"password"}` | |
 | `GET /api/v1/invites`, `POST /api/v1/invites` `{"ttl"}`, `DELETE /api/v1/invites/{id}` | | invites (TTL up to 720h) |
 
-Write requests must send `Content-Type: application/json`. Another account's machines, keys and shares look like they don't exist (404). Errors come back as `{"error": "…"}`. Sign-in and sign-up allow 10 attempts per IP address, then one every 6 seconds.
+Write requests must send `Content-Type: application/json`. Another account's machines, keys and shares look like they don't exist (404). Errors come back as `{"error": "…"}`. Sign-in and sign-up allow 10 attempts per IP address (per /64 network for IPv6), then one every 6 seconds, and 20 wrong passwords per account, then one a minute. Requests must use a host name the portal knows (an IP address, the server's names, or one in `-admin-hosts`); others get 421.
 
 ---
 

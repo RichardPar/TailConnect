@@ -27,6 +27,7 @@ Open **port 7741 on the server** in a browser: `http://192.168.1.10:7741`, or `h
   ```sh
   ssh -L 7741:127.0.0.1:7741 you@server      # then open http://localhost:7741
   ```
+- **Open it by the server's IP address or one of its own names**: its hostname, its HTTPS certificate's name or the `-public-url` host. Other names get "unknown host name". If you use another name, such as `pi.lan` from your router's DNS, add it with `-admin-hosts pi.lan` in the settings.
 - For other people to sign up, see [Open the portal to other people](installation.md#open-the-portal-to-other-people).
 
 The portal follows your system's light or dark setting.
@@ -48,6 +49,7 @@ The portal follows your system's light or dark setting.
   - with `off`, the link isn't shown.
 - **Account names** are 1–32 lowercase letters, digits or `-`. They're part of every machine name: `laptop.alice.home.internal`.
 - **Passwords** are at least 10 characters. There's no e-mail on the server, so an operator resets forgotten ones.
+- **Wrong passwords** are limited: 10 tries from one address, then one every 6 seconds, and 20 for one account from anywhere, then one a minute. After that, "too many attempts" means wait.
 - **Use the admin token** signs in as an operator without an account. It's for recovery, for example when no operator can sign in. Create one with `sudo tc-control admin-token`; scripts use the same token with the API.
 
 **No one can sign in yet?** The installer creates your operator account on a new server. A server set up another way, or upgraded from an older version, may have no account with both a password and the operator role. Check, then fix it on the server:
