@@ -25,6 +25,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ import (
 
 	"tailconnect/internal/acl"
 	"tailconnect/internal/admin"
+	"tailconnect/internal/autotls"
 	"tailconnect/internal/control"
 	"tailconnect/internal/db"
 	"tailconnect/internal/password"
@@ -63,6 +65,7 @@ Usage:
   tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
   tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
   tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
+  tc-control relays create NAME | list | delete NAME   (tokens for standalone tc-relay servers)
   tc-control version
 
 Every subcommand accepts -db PATH (default: $TC_CONTROL_DB, else
@@ -88,6 +91,8 @@ func main() {
 		err = cmdShares(args)
 	case "rules":
 		err = cmdRules(args)
+	case "relays":
+		err = cmdRelays(args)
 	case "users":
 		err = cmdUsers(args)
 	case "keys":
@@ -179,6 +184,10 @@ func cmdServe(args []string) error {
 	publicURL := fs.String("public-url", "", "URL clients use to reach this server (shown in the web portal)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file (enables HTTPS on both listeners)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file")
+	acmeDomain := fs.String("acme-domain", "", "get HTTPS certificates from Let's Encrypt for this DNS name (comma-separated for several); the name must point at this server, and port 443 (or -acme-http-listen) be reachable from the internet")
+	acmeEmail := fs.String("acme-email", "", "email address for Let's Encrypt's expiry notices (optional)")
+	acmeHTTP := fs.String("acme-http-listen", "", `also serve Let's Encrypt's checks on this address, e.g. ":80" (needed unless -listen is on port 443; it redirects other requests to HTTPS)`)
+	acmeStaging := fs.Bool("acme-staging", false, "use Let's Encrypt's test service (untrusted certificates, for trying a setup)")
 	logJSON := fs.Bool("log-json", false, "log in JSON format")
 	embedRelay := fs.Bool("relay", true, "serve the built-in relay at /relay on the control listener")
 	relayMapFile := fs.String("relay-map", "", "JSON relay map to advertise instead of the built-in relay (see docs)")
@@ -193,6 +202,32 @@ func cmdServe(args []string) error {
 
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return usageError("-tls-cert and -tls-key must be given together")
+	}
+	var certs *autotls.Manager
+	if *acmeDomain != "" {
+		if *tlsCert != "" {
+			return usageError("-acme-domain and -tls-cert exclude each other")
+		}
+		domains, err := autotls.ParseDomains(*acmeDomain)
+		if err != nil {
+			return usageError("-acme-domain: " + err.Error())
+		}
+		cfg := autotls.Config{Domains: domains, Email: *acmeEmail, HTTPListen: *acmeHTTP, TLSListen: *listen,
+			CacheDir: filepath.Join(filepath.Dir(*dbPath), "acme")}
+		if *acmeStaging {
+			cfg.DirectoryURL = autotls.StagingURL
+		}
+		if certs, err = autotls.New(cfg); err != nil {
+			return usageError("-acme-domain: " + err.Error())
+		}
+		if *publicURL == "" {
+			*publicURL = "https://" + domains[0]
+			if _, port, _ := net.SplitHostPort(*listen); port != "443" {
+				*publicURL += ":" + port
+			}
+		}
+	} else if *acmeHTTP != "" || *acmeEmail != "" || *acmeStaging {
+		return usageError("-acme-http-listen, -acme-email and -acme-staging need -acme-domain")
 	}
 	if !admin.ValidSignupMode(*signup) {
 		return usageError("-signup must be off, approval, invite or open")
@@ -281,7 +316,7 @@ func cmdServe(args []string) error {
 	}
 
 	scheme := "http"
-	if *tlsCert != "" {
+	if *tlsCert != "" || certs != nil {
 		scheme = "https"
 	}
 	if *publicURL == "" {
@@ -319,7 +354,7 @@ func cmdServe(args []string) error {
 				log.Warn("nobody can sign in to the web portal as operator yet: run `tc-control users create NAME -operator -password` (or `tc-control admin-token`)")
 			}
 		}
-		if !isLoopback(*adminListen) && *tlsCert == "" {
+		if !isLoopback(*adminListen) && *tlsCert == "" && certs == nil {
 			log.Warn("web portal is on a non-loopback address without TLS; passwords, the admin token and session cookies travel in clear text",
 				"listen", *adminListen)
 		}
@@ -337,24 +372,44 @@ func cmdServe(args []string) error {
 		names = append(names, "admin")
 	}
 
+	if certs != nil {
+		for _, srv := range servers {
+			srv.TLSConfig = certs.TLSConfig()
+		}
+	}
+	tlsOn := len(servers) // servers[:tlsOn] use TLS when it's on
+	if certs != nil && *acmeHTTP != "" {
+		servers = append(servers, &http.Server{Addr: *acmeHTTP, Handler: certs.HTTPHandler(), ReadHeaderTimeout: 10 * time.Second})
+		names = append(names, "certificate checks")
+	}
+
 	errc := make(chan error, len(servers))
 	for i, srv := range servers {
 		ln, err := net.Listen("tcp", srv.Addr)
 		if err != nil {
 			return fmt.Errorf("%s listener: %w", names[i], err)
 		}
-		log.Info("listening", "server", names[i], "addr", scheme+"://"+ln.Addr().String())
-		go func(srv *http.Server, ln net.Listener) {
+		sch := scheme
+		if i >= tlsOn {
+			sch = "http"
+		}
+		log.Info("listening", "server", names[i], "addr", sch+"://"+ln.Addr().String())
+		go func(srv *http.Server, ln net.Listener, useTLS bool) {
 			var err error
-			if *tlsCert != "" {
+			switch {
+			case !useTLS:
+				err = srv.Serve(ln)
+			case certs != nil:
+				err = srv.ServeTLS(ln, "", "")
+			case *tlsCert != "":
 				err = srv.ServeTLS(ln, *tlsCert, *tlsKey)
-			} else {
+			default:
 				err = srv.Serve(ln)
 			}
 			if !errors.Is(err, http.ErrServerClosed) {
 				errc <- err
 			}
-		}(srv, ln)
+		}(srv, ln, i < tlsOn)
 	}
 	log.Info("tc-control started", "version", version, "domain", *domain, "machine_key", ctl.MachinePublic().ShortString(),
 		"relay", relaySrv != nil, "relay_regions", len(relays.Regions))
@@ -1098,4 +1153,65 @@ func parseLongDuration(v string) (time.Duration, error) {
 		return 0, fmt.Errorf("bad duration %q (use e.g. 180d, 720h or never)", v)
 	}
 	return d, nil
+}
+
+func cmdRelays(args []string) error {
+	sub, rest, err := subcommand(args, "relays")
+	if err != nil {
+		return err
+	}
+	fs, dbPath := flags("relays " + sub)
+	asJSON := fs.Bool("json", false, "output JSON")
+	parseArgs(fs, rest)
+	d, err := openDB(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	ctx := context.Background()
+	switch sub {
+	case "create":
+		name, err := oneArg(fs, "relays create NAME")
+		if err != nil {
+			return err
+		}
+		secret, _, err := d.CreateRelayToken(ctx, name)
+		if err != nil {
+			return err
+		}
+		fmt.Println(secret)
+		fmt.Fprintf(os.Stderr, "Relay token for %q (shown once). On the relay host:\n"+
+			"  TC_RELAY_TOKEN=%s tc-relay -control-url https://THIS-SERVER\n"+
+			"then add the relay to the relay map (tc-control serve -relay-map FILE).\n", name, secret)
+		return nil
+	case "list":
+		ts, err := d.ListRelayTokens(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return printJSON(ts)
+		}
+		tw := table("ID", "NAME", "CREATED", "LAST USED")
+		for _, t := range ts {
+			used := "never"
+			if !t.LastUsed.IsZero() {
+				used = time.Since(t.LastUsed).Truncate(time.Second).String() + " ago"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", t.ID, t.Name, t.CreatedAt.Local().Format("2006-01-02 15:04"), used)
+		}
+		return tw.Flush()
+	case "delete":
+		name, err := oneArg(fs, "relays delete NAME")
+		if err != nil {
+			return err
+		}
+		if err := d.DeleteRelayToken(ctx, name); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Relay %q can no longer check machines; it refuses new connections and unknown pairs.\n", name)
+		return nil
+	default:
+		return usageError("relays: unknown subcommand " + sub)
+	}
 }

@@ -103,7 +103,7 @@ The options you're most likely to want:
 | `-domain home.internal` | MagicDNS names become `laptop.alice.home.internal` (default `tc.internal`). Changing it later renames everything. |
 | `-signup MODE` | Who may create accounts in the portal: `off`, `approval` (default), `invite` or `open`. See [accounts and sign-up](usage.md#accounts-and-sign-up). |
 | `-public-url URL` | The URL shown in the portal for clients to use |
-| `-tls-cert`, `-tls-key` | HTTPS; see [Enable HTTPS](#enable-https) |
+| `-acme-domain NAME` | Automatic HTTPS from Let's Encrypt; see [Enable HTTPS](#enable-https) |
 | `-listen :PORT` | A different control port (default `:7740`) |
 
 All options are listed in the [configuration reference](configuration.md#tc-control-serve).
@@ -137,9 +137,36 @@ The **web portal** is at `http://127.0.0.1:7741` on the server. From your workst
 
 ## Enable HTTPS
 
-Over plain HTTP, the control channel is still encrypted and authenticated with Noise. However, the first time a client connects, it trusts whatever server key it is given ("trust on first use"). HTTPS removes that gap and lets you serve on port 443. HTTPS covers both the control API and the web portal.
+Over plain HTTP, the control channel is still encrypted and authenticated with Noise. However, the first time a client connects, it trusts whatever server key it is given ("trust on first use"). HTTPS removes that gap and lets you serve on port 443. HTTPS covers both the control API and the web portal. `tc-control` does HTTPS itself: no web server or proxy in front of it.
 
-The packaged unit runs as a dynamic user that can't read files under `/etc/letsencrypt`. Instead, hand the certificate to the service with systemd **credentials**, using a drop-in:
+### Automatic certificates (Let's Encrypt)
+
+`tc-control` gets a free certificate from Let's Encrypt and renews it by itself. You need:
+- a DNS name pointing at the server, such as `vpn.example.com`;
+- TCP port 443 reachable from the internet, so Let's Encrypt can check that the name is yours.
+
+```sh
+# /etc/default/tc-control
+TC_CONTROL_ARGS="-listen :443 -acme-domain vpn.example.com -acme-email you@example.com"
+```
+
+```sh
+sudo systemctl restart tc-control
+curl https://vpn.example.com/key       # the first request fetches the certificate (a few seconds)
+```
+
+Clients then join with `--server https://vpn.example.com`. Open TCP 443 instead of 7740.
+
+- **Another port than 443?** Let's Encrypt connects only to ports 443 and 80. Keep your port and also serve its checks on port 80: `-listen :7740 -acme-http-listen :80`. Port 80 then redirects everything else to HTTPS. Clients use `https://vpn.example.com:7740`.
+- **Trying it out:** `-acme-staging` uses Let's Encrypt's test service, with generous limits but certificates that clients don't trust. Remove it, and the `acme` folder next to the database, for real certificates.
+- **Where certificates live:** in `acme/` next to the database (`/var/lib/tc-control/acme`). They're renewed about a month before they expire, with no restart.
+- **Several names:** `-acme-domain vpn.example.com,vpn.example.org`.
+
+If it can't work (HTTPS on a port other than 443 with no `-acme-http-listen`), `tc-control` refuses to start and says why.
+
+### Your own certificate
+
+If you already have a certificate (from your own CA, or one renewed by other tooling), give `tc-control` the files. The packaged unit runs as a dynamic user that can't read other users' files, such as those under `/etc/letsencrypt`. So hand the files to the service with systemd **credentials**, using a drop-in:
 
 ```sh
 sudo systemctl edit tc-control
@@ -149,8 +176,6 @@ sudo systemctl edit tc-control
 [Service]
 LoadCredential=cert.pem:/etc/letsencrypt/live/vpn.example.com/fullchain.pem
 LoadCredential=key.pem:/etc/letsencrypt/live/vpn.example.com/privkey.pem
-# Only needed to listen on a port below 1024, such as 443:
-AmbientCapabilities=CAP_NET_BIND_SERVICE
 ```
 
 Then point `tc-control` at the copies systemd makes:
@@ -160,22 +185,9 @@ Then point `tc-control` at the copies systemd makes:
 TC_CONTROL_ARGS="-listen :443 -public-url https://vpn.example.com -tls-cert /run/credentials/tc-control.service/cert.pem -tls-key /run/credentials/tc-control.service/key.pem"
 ```
 
-```sh
-sudo systemctl restart tc-control
-curl https://vpn.example.com/key
-```
-
-Clients then join with `--server https://vpn.example.com`. Open TCP 443 instead of 7740.
-
-- **Renewals:** systemd copies the credentials when the service starts, so restart it after each renewal. With certbot, create a deploy hook:
-  ```sh
-  printf '#!/bin/sh\nsystemctl restart tc-control\n' | sudo tee /etc/letsencrypt/renewal-hooks/deploy/tc-control
-  sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/tc-control
-  ```
-  Connected clients reconnect by themselves, and their tunnels keep running during the restart.
+- **Renewals:** systemd copies the credentials when the service starts, so restart `tc-control` after each renewal. Connected clients reconnect by themselves, and their tunnels keep running during the restart.
 - **Private CA or self-signed certificates:** clients check the certificate against the system trust store. Add your CA there (`/usr/local/share/ca-certificates/` and `update-ca-certificates` on Debian/Ubuntu), then **restart `tcd`**, which reads the store at startup.
 - **No certificate at all?** Pin the server key on each client instead: `sudo tc up --server http://… --server-key mkey:…`. The key is in the server log and in `curl http://SERVER:7740/key`.
-- **Reverse proxies** (nginx, Caddy) in front of `tc-control` aren't supported yet. The control and relay connections use their own HTTP Upgrade protocols, which haven't been tested through proxies. Terminate TLS in `tc-control` itself as shown above.
 
 ---
 
@@ -183,11 +195,11 @@ Clients then join with `--server https://vpn.example.com`. Open TCP 443 instead 
 
 If only you manage the server, keep the portal on 127.0.0.1 and reach it through SSH. If other people should sign up, add their own devices and share machines, they need to reach it, and since they type passwords into it, **over HTTPS only**:
 
-1. Set up the certificate as in [Enable HTTPS](#enable-https); it covers the portal too.
+1. Set up HTTPS as in [Enable HTTPS](#enable-https); the certificate covers the portal too.
 2. Listen on a reachable address and choose who may sign up:
    ```sh
    # /etc/default/tc-control
-   TC_CONTROL_ARGS="-listen :443 -admin-listen :7741 -signup approval -public-url https://vpn.example.com -tls-cert /run/credentials/tc-control.service/cert.pem -tls-key /run/credentials/tc-control.service/key.pem"
+   TC_CONTROL_ARGS="-listen :443 -acme-domain vpn.example.com -admin-listen :7741 -signup approval"
    ```
 3. Open TCP 7741, restart (`sudo systemctl restart tc-control`), and send people `https://vpn.example.com:7741`.
 

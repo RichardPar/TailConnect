@@ -6,6 +6,11 @@
 //	tc-control serve -relay-map relays.json
 //
 // where relays.json lists this server's URL (tc-relay prints an example).
+//
+// The relay asks tc-control which machines it may serve, with a token from
+// `tc-control relays create NAME`:
+//
+//	TC_RELAY_TOKEN=tc-relay-... tc-relay -control-url https://ctl.example.com
 package main
 
 import (
@@ -19,9 +24,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"tailconnect/internal/autotls"
 	"tailconnect/internal/key"
 	"tailconnect/internal/protocol"
 	"tailconnect/internal/relay"
@@ -35,9 +42,16 @@ func main() {
 	keyFile := flag.String("key-file", "relay.key", "relay private key (created if missing)")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")
+	acmeDomain := flag.String("acme-domain", "", "get HTTPS certificates from Let's Encrypt for this DNS name (it must point at this server; port 443, or -acme-http-listen, reachable from the internet)")
+	acmeEmail := flag.String("acme-email", "", "email address for Let's Encrypt's expiry notices (optional)")
+	acmeHTTP := flag.String("acme-http-listen", "", `also serve Let's Encrypt's checks on this address, e.g. ":80" (needed unless -listen is on port 443)`)
+	acmeDir := flag.String("acme-dir", "acme", "where certificates are kept")
+	acmeStaging := flag.Bool("acme-staging", false, "use Let's Encrypt's test service (untrusted certificates)")
 	publicURL := flag.String("public-url", "", "URL clients use, for the example relay map (e.g. https://relay.example.com/relay)")
 	stunListen := flag.String("stun-listen", ":3478", `UDP address for the STUN server ("" disables)`)
-	allowAny := flag.Bool("allow-any", false, "serve any node that proves ownership of its key (required: client verification against tc-control is not implemented yet)")
+	controlURL := flag.String("control-url", "", "tc-control URL to check machines with (e.g. https://ctl.example.com)")
+	tokenFile := flag.String("token-file", "", "file with the relay token from `tc-control relays create` (or set TC_RELAY_TOKEN)")
+	allowAny := flag.Bool("allow-any", false, "serve any machine that proves its key, without asking tc-control (an open relay)")
 	logJSON := flag.Bool("log-json", false, "log in JSON format")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -51,23 +65,83 @@ func main() {
 	}
 	log := slog.New(h)
 
-	if !*allowAny {
-		fmt.Fprintln(os.Stderr, "tc-relay: refusing to start without -allow-any.\n"+
-			"A standalone relay cannot yet check which nodes are registered with tc-control, so it would relay for any\n"+
-			"node. Packets stay end-to-end encrypted, but the relay's bandwidth is open to anyone who can reach it.\n"+
-			"The relay built into tc-control (on by default) only serves registered nodes.")
+	token := os.Getenv("TC_RELAY_TOKEN")
+	if *tokenFile != "" {
+		b, err := os.ReadFile(*tokenFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tc-relay:", err)
+			os.Exit(2)
+		}
+		token = strings.TrimSpace(string(b))
+	}
+	switch {
+	case *allowAny && *controlURL != "":
+		fmt.Fprintln(os.Stderr, "tc-relay: -allow-any and -control-url exclude each other")
+		os.Exit(2)
+	case !*allowAny && *controlURL == "":
+		fmt.Fprintln(os.Stderr, "tc-relay: give -control-url (and a token) so the relay serves only your network's machines.\n"+
+			"Create the token on the control server with: tc-control relays create NAME\n"+
+			"(-allow-any runs an open relay for any machine instead: packets stay end-to-end encrypted, but anyone\n"+
+			"who can reach the relay can use its bandwidth.)")
+		os.Exit(2)
+	case *controlURL != "" && token == "":
+		fmt.Fprintln(os.Stderr, "tc-relay: no relay token: set TC_RELAY_TOKEN or -token-file (from `tc-control relays create NAME`)")
 		os.Exit(2)
 	}
 	if (*tlsCert == "") != (*tlsKey == "") {
 		fmt.Fprintln(os.Stderr, "tc-relay: -tls-cert and -tls-key must be given together")
 		os.Exit(2)
 	}
+	var certs *autotls.Manager
+	if *acmeDomain != "" {
+		domains, err := autotls.ParseDomains(*acmeDomain)
+		if err == nil && *tlsCert != "" {
+			err = errors.New("-acme-domain and -tls-cert exclude each other")
+		}
+		if err == nil {
+			cfg := autotls.Config{Domains: domains, Email: *acmeEmail, HTTPListen: *acmeHTTP, TLSListen: *listen, CacheDir: *acmeDir}
+			if *acmeStaging {
+				cfg.DirectoryURL = autotls.StagingURL
+			}
+			certs, err = autotls.New(cfg)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tc-relay: -acme-domain:", err)
+			os.Exit(2)
+		}
+		if *publicURL == "" {
+			*publicURL = "https://" + domains[0]
+			if _, port, _ := net.SplitHostPort(*listen); port != "443" {
+				*publicURL += ":" + port
+			}
+			*publicURL += "/relay"
+		}
+	}
 	priv, err := loadOrCreateKey(*keyFile)
 	if err != nil {
 		log.Error("relay key", "err", err)
 		os.Exit(1)
 	}
-	srv := relay.NewServer(priv, nil, log)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var srv *relay.Server
+	if *allowAny {
+		srv = relay.NewServer(priv, nil, log)
+		log.Warn("open relay: serving any machine that proves its key (-allow-any)")
+	} else {
+		pol := relay.NewRemotePolicy(*controlURL, token, log)
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := pol.Check(cctx)
+		cancel()
+		if err != nil {
+			log.Error("cannot use the control server", "url", *controlURL, "err", err)
+			os.Exit(1)
+		}
+		srv = relay.NewServer(priv, pol.Authorize, log)
+		srv.SetAllow(pol.Allow)
+		go pol.Run(ctx)
+		log.Info("serving machines of the control server's network", "control", *controlURL)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/relay", srv)
@@ -76,6 +150,17 @@ func main() {
 		fmt.Fprintf(w, "TailConnect relay %s\nclients: %d\nforwarded: %d\ndropped: %d\n", version, n, fwd, drop)
 	})
 	hs := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	if certs != nil {
+		hs.TLSConfig = certs.TLSConfig()
+		if *acmeHTTP != "" {
+			go func() {
+				if err := http.ListenAndServe(*acmeHTTP, certs.HTTPHandler()); err != nil {
+					log.Error("certificate checks listener", "err", err)
+					os.Exit(1)
+				}
+			}()
+		}
+	}
 
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -84,7 +169,7 @@ func main() {
 	}
 	if *publicURL == "" {
 		scheme := "http"
-		if *tlsCert != "" {
+		if *tlsCert != "" || certs != nil {
 			scheme = "https"
 		}
 		*publicURL = scheme + "://" + ln.Addr().String() + "/relay"
@@ -104,12 +189,9 @@ func main() {
 		{ID: 1, Code: "control", Name: "tc-control (embedded)", Nodes: []protocol.RelayNode{{Name: "1a", URL: "/relay", STUNPort: 3478}}},
 		{ID: 2, Code: "edge", Name: "tc-relay", Nodes: []protocol.RelayNode{{Name: "2a", URL: *publicURL, STUNPort: stunPort}}},
 	}}, "", "  ")
-	log.Warn("serving any node that proves its key (-allow-any)")
 	log.Info("tc-relay started", "version", version, "addr", ln.Addr().String(), "key", priv.Public().ShortString())
 	fmt.Fprintf(os.Stderr, "Example relay map for `tc-control serve -relay-map FILE`:\n%s\n", example)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		srv.Close()
@@ -117,7 +199,9 @@ func main() {
 		defer cancel()
 		hs.Shutdown(sctx)
 	}()
-	if *tlsCert != "" {
+	if certs != nil {
+		err = hs.ServeTLS(ln, "", "")
+	} else if *tlsCert != "" {
 		err = hs.ServeTLS(ln, *tlsCert, *tlsKey)
 	} else {
 		err = hs.Serve(ln)

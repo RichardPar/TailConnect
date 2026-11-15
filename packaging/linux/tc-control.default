@@ -8,9 +8,12 @@
 # Examples:
 #   -domain home.internal                      MagicDNS names: <machine>.<account>.home.internal
 #   -public-url https://vpn.example.com:7740   URL shown in the web portal
+#   -listen :443 -acme-domain vpn.example.com  automatic HTTPS from Let's Encrypt: the name must
+#                                              point at this server and port 443 be reachable
+#                                              (add -acme-http-listen :80 to use another -listen port)
 #   -tls-cert /etc/tailconnect/cert.pem -tls-key /etc/tailconnect/key.pem
-#                                              HTTPS (files must be readable by the service;
-#                                              see docs/installation.md#enable-https)
+#                                              HTTPS with your own certificate (files must be
+#                                              readable by the service; see docs/installation.md#enable-https)
 #   -signup off|approval|invite|open           who may create accounts in the portal
 #   -admin-listen :7741                        let other people reach the portal (use TLS!)
 #   -dns-nameservers 1.1.1.1,9.9.9.9           send all client DNS through MagicDNS

@@ -337,7 +337,7 @@ The `MagicDNS:` line in `tc status` shows the account domain and the mode in use
 
 **Send all DNS through the tunnel.** Start the server with `-dns-nameservers 1.1.1.1,9.9.9.9`: machines then send every query to MagicDNS, which answers `.<domain>` names itself and forwards the rest. **Turn it off** for the whole server with `-magic-dns=false`, or on one machine with `-dns off`.
 
-Current limits: queries are UDP only (a forwarded answer too big for UDP comes back truncated, and the client's retry over TCP fails).
+Queries work over UDP and TCP. An answer too big for UDP comes back truncated, as DNS expects, and the client's automatic retry over TCP gets all of it.
 
 ---
 
@@ -347,13 +347,20 @@ When two machines can't reach each other directly (blocked UDP, strict NATs), th
 
 **The built-in relay.** `tc-control` serves a relay at `/relay` on its control port, plus a STUN server on UDP 3478. It serves only registered machines of active accounts, and only carries packets between machines that may talk: the same account, or a machine and the account it's shared with.
 
-**More relays.** If your machines are spread across the world, run `tc-relay` close to them so relayed traffic doesn't cross the globe twice:
+**More relays.** If your machines are spread across the world, run `tc-relay` close to them so relayed traffic doesn't cross the globe twice. A standalone relay asks the control server which machines it may serve, so it follows the same rules as the built-in relay. Give it a token, created on the control server:
 
 ```sh
-tc-relay -allow-any -listen :7742 -stun-listen :3478 -public-url http://relay-eu.example.com:7742/relay
+sudo tc-control relays create eu          # prints tc-relay-… (shown once)
 ```
 
-It prints an example relay map. Save the regions as JSON on the server and start `tc-control` with `-relay-map /etc/tailconnect/relays.json`:
+On the relay's host:
+
+```sh
+TC_RELAY_TOKEN=tc-relay-… tc-relay -control-url https://vpn.example.com \
+    -listen :443 -acme-domain relay-eu.example.com
+```
+
+`-acme-domain` gets it an HTTPS certificate from Let's Encrypt, as for [tc-control](installation.md#enable-https). Without it, use `-listen :7742` and plain HTTP: relayed packets are WireGuard, encrypted end to end either way. It prints an example relay map. Save the regions as JSON on the server and start `tc-control` with `-relay-map /etc/tailconnect/relays.json`:
 
 ```json
 {
@@ -361,7 +368,7 @@ It prints an example relay map. Save the regions as JSON on the server and start
     {"ID": 1, "Code": "home", "Name": "tc-control (embedded)",
      "Nodes": [{"Name": "1a", "URL": "/relay", "STUNPort": 3478}]},
     {"ID": 2, "Code": "eu", "Name": "Frankfurt",
-     "Nodes": [{"Name": "2a", "URL": "http://relay-eu.example.com:7742/relay", "STUNPort": 3478}]}
+     "Nodes": [{"Name": "2a", "URL": "https://relay-eu.example.com/relay", "STUNPort": 3478}]}
   ]
 }
 ```
@@ -370,4 +377,11 @@ It prints an example relay map. Save the regions as JSON on the server and start
 - `STUNPort` is the region's STUN server (`0` for none); `HostName` overrides the STUN host (default: the URL's host).
 - Machines pick the region with the lowest STUN latency as home, switching only when another region is at least 30% faster.
 
-`tc-relay` requires `-allow-any`. It can't check registrations or accounts with the server yet, so it relays for any machine that proves it owns its key, including between accounts. Traffic stays end-to-end encrypted, and machines still only accept packets from their own peers, but anyone who can reach the relay can use its bandwidth. All options are in the [configuration reference](configuration.md#tc-relay).
+How a standalone relay checks machines:
+- A machine may connect only if it is registered, approved and unexpired, in an active account.
+- Packets pass only between machines that may talk (same account and access rules, or a share).
+- The relay caches each answer until the server's rules change, so checking costs nothing per packet. The first packet between two machines waits for one question to the server.
+- If the server is unreachable, answers it already gave stay in force, and anything new is refused.
+- `tc-control relays list` shows when each relay last checked in; `tc-control relays delete eu` cuts it off.
+
+`-allow-any` instead runs an **open relay** that asks nobody. Traffic stays end-to-end encrypted, and machines still only accept packets from their own peers, but anyone who can reach the relay can use its bandwidth. All options are in the [configuration reference](configuration.md#tc-relay).

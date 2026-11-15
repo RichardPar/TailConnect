@@ -253,6 +253,17 @@ CREATE TRIGGER acl_gen_ins AFTER INSERT ON acl_rules BEGIN UPDATE generation SET
 CREATE TRIGGER acl_gen_del AFTER DELETE ON acl_rules BEGIN UPDATE generation SET value = value + 1; END;
 CREATE TRIGGER acl_gen_upd AFTER UPDATE ON acl_rules BEGIN UPDATE generation SET value = value + 1; END;
 `,
+	// 9: credentials of standalone relays (tc-relay), which ask the control
+	// server which machines they may serve.
+	`
+CREATE TABLE relay_tokens (
+	id         INTEGER PRIMARY KEY,
+	name       TEXT NOT NULL UNIQUE,
+	hash       BLOB NOT NULL UNIQUE,
+	created_at INTEGER NOT NULL,
+	last_used  INTEGER NOT NULL DEFAULT 0
+);
+`,
 }
 
 // Generation returns a counter that increases whenever nodes or users change

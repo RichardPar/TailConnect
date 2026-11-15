@@ -129,7 +129,7 @@ Each device runs a small DNS resolver at `100.100.100.100`, answering from the n
 - **PTR** records for tunnel addresses;
 - **NXDOMAIN** for unknown names under the domain.
 
-There's no socket: `tcd` catches UDP packets to `100.100.100.100:53` as they enter the TUN device, before WireGuard sees them, and writes the answer straight back. Two consequences:
+There's no socket: `tcd` catches UDP packets to `100.100.100.100:53` as they enter the TUN device, before WireGuard sees them, and writes the answer straight back. TCP queries (DNS clients retry over TCP when an answer is too big for UDP) go to a small TCP/IP stack inside `tcd` that owns only the resolver's addresses; it is started on the first TCP query. Two consequences:
 - it works the same on every platform;
 - only the device itself can query it, because peers' packets arrive on the other side of WireGuard.
 
@@ -160,7 +160,8 @@ With `-dns-nameservers` on the server, devices send everything to MagicDNS (reso
 - **Sharing.** One-way, enforced by the receiving machines' packet filter ([details](#sharing-and-the-packet-filter)).
 - **Path discovery.** Disco messages are sealed with NaCl box between the peers' disco keys, which are published in the network map. Discovery can't be spoofed to divert traffic.
 - **Data.** WireGuard traffic is encrypted end to end between devices. Neither the control server nor the relays can read it.
-- **Relays.** A device must prove it owns its node key before the relay accepts packets for it, so nobody can claim another device's key to intercept its packets. The built-in relay serves only registered machines of active accounts, and only between machines that may talk; standalone `tc-relay` serves anyone who proves a key (`-allow-any`).
+- **Relays.** A device must prove it owns its node key before the relay accepts packets for it, so nobody can claim another device's key to intercept its packets. Relays serve only registered machines of active accounts, and only between machines that may talk. The built-in relay knows this directly; a standalone `tc-relay` asks the control server, authenticated with its own revocable token, and caches the answers until the rules change (unless it is run as an open relay with `-allow-any`).
+- **HTTPS.** `tc-control` and `tc-relay` serve HTTPS themselves, with certificates from Let's Encrypt (`-acme-domain`, renewed automatically) or your own files. Nothing needs to run in front of them.
 - **MagicDNS.** It answers only the local device and isn't reachable from peers, so it can't be used as an open resolver.
 - **Local API.** `tc` talks to `tcd` over a Unix socket. The caller's UID (`SO_PEERCRED`) decides what it may do: status for anyone; up, down and logout for root.
 - **Least privilege.** `tc-control` runs as an unprivileged dynamic user. `tcd` runs as root, limited to `CAP_NET_ADMIN` and `CAP_NET_RAW`, with a read-only system except `/etc/resolv.conf`.

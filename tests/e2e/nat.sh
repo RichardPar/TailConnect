@@ -196,6 +196,11 @@ ok "unknown names under nat.internal: not found (not forwarded)"
 got=$(lookup a getent ahostsv4 www.example.com | awk 'NR==1{print $1}')
 [[ $got == 192.0.2.53 ]] || fail "www.example.com resolved to '$got', want 192.0.2.53 from the upstream"
 ok "other names forwarded to the original resolver"
+if command -v dig >/dev/null; then
+	got=$(ip netns exec a dig +tcp +short +time=3 +tries=1 @100.100.100.100 beta.alice.nat.internal A)
+	[[ $got == "$IPB" ]] || fail "DNS over TCP: beta.alice.nat.internal gave '$got', want $IPB"
+	ok "DNS over TCP: beta.alice.nat.internal → $IPB"
+fi
 lookup a ping -c1 -W2 beta >/dev/null || fail "ping beta by name"
 ok "ping beta (by name) works"
 

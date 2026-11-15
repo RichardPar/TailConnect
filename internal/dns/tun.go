@@ -15,8 +15,9 @@ import (
 const writeOffset = 16
 
 // TUN wraps the tunnel device and answers DNS queries the host sends to the
-// resolver addresses (UDP port 53) by writing responses back into the host,
-// as if they came from the resolver. Everything else passes through.
+// resolver addresses (UDP and TCP port 53) by writing responses back into
+// the host, as if they came from the resolver. Everything else passes
+// through.
 type TUN struct {
 	tun.Device
 	r    *Resolver
@@ -28,6 +29,9 @@ type TUN struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	tcpOnce  sync.Once
+	tcpStack *tcpStack // DNS over TCP, started on first use (see tcp.go)
 }
 
 // WrapTUN returns dev with DNS interception for addr4/addr6 (either may be
@@ -56,6 +60,10 @@ func (t *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 				t.handle(q)
 				continue
 			}
+			if t.isTCPToResolver(pkt) {
+				t.toTCPStack(pkt)
+				continue
+			}
 			if j != i {
 				copy(bufs[j][offset:], pkt)
 				sizes[j] = sizes[i]
@@ -71,6 +79,10 @@ func (t *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 func (t *TUN) Close() error {
 	t.cancel()
 	err := t.Device.Close()
+	t.tcpOnce.Do(func() {}) // no stack starts after this
+	if t.tcpStack != nil {
+		t.tcpStack.close()
+	}
 	t.wg.Wait()
 	return err
 }

@@ -35,7 +35,11 @@ The coordination server: control API, built-in relay, STUN, web portal.
 | `-relay` | `true` | Serve the built-in relay at `/relay` on the control listener (registered devices only) |
 | `-relay-map` | none | JSON [relay map](#relay-map) to advertise instead of the built-in relay alone |
 | `-public-url` | derived from `-listen` | URL shown in the portal for clients to use |
-| `-tls-cert`, `-tls-key` | none | PEM certificate (with chain) and key. Turns on HTTPS for both the control and portal listeners. |
+| `-acme-domain` | none | Get HTTPS certificates from Let's Encrypt for this DNS name (comma-separated for several), for both the control and portal listeners. The name must point at the server, and Let's Encrypt must reach port 443 (or `-acme-http-listen`). Certificates are kept in `acme/` next to the database and renewed automatically. ([How](installation.md#enable-https)) |
+| `-acme-http-listen` | none | Also serve Let's Encrypt's checks on this address (`:80`), and redirect other requests there to HTTPS. Needed when `-listen` isn't on port 443. |
+| `-acme-email` | none | Email for Let's Encrypt's expiry notices |
+| `-acme-staging` | `false` | Use Let's Encrypt's test service (certificates clients won't trust) |
+| `-tls-cert`, `-tls-key` | none | Your own PEM certificate (with chain) and key, instead of `-acme-domain`. Turns on HTTPS for both the control and portal listeners. |
 | `-log-json` | `false` | Log in JSON instead of text |
 
 ## tc-control admin commands
@@ -50,6 +54,7 @@ tc-control keys list [-user NAME] | revoke ID
 tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
 tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
 tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
+tc-control relays create NAME | list | delete NAME
 tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
 tc-control shares accept ID | revoke ID
 tc-control admin-token
@@ -104,12 +109,16 @@ A standalone relay and STUN server ([when to use one](usage.md#relays)).
 
 | Flag | Default | Description |
 |---|---|---|
-| `-allow-any` | `false` | **Required.** Relay for any device that proves it owns its key. A standalone relay can't check registrations with the control server yet. |
+| `-control-url` | none | The control server to check machines with ([how](usage.md#relays)). Required unless `-allow-any`. |
+| `-token-file` | none | File with the relay's token from `tc-control relays create NAME`. Or set `TC_RELAY_TOKEN`. (Not a flag value, which other users could read in `ps`.) |
+| `-allow-any` | `false` | Instead of `-control-url`: an open relay for any device that proves it owns its key |
 | `-listen` | `:7742` | Relay listen address (TCP) |
 | `-stun-listen` | `:3478` | STUN server (UDP). `""` turns it off. |
 | `-key-file` | `relay.key` | Relay private key, created if missing |
 | `-public-url` | derived | Relay URL, used only for the example relay map it prints |
-| `-tls-cert`, `-tls-key` | none | Serve HTTPS |
+| `-acme-domain`, `-acme-http-listen`, `-acme-email`, `-acme-staging` | none | Automatic HTTPS from Let's Encrypt, as for `tc-control` |
+| `-acme-dir` | `acme` | Where `tc-relay` keeps its certificates |
+| `-tls-cert`, `-tls-key` | none | Serve HTTPS with your own certificate |
 | `-log-json` | `false` | JSON logs |
 | `-version` | | Print the version and exit |
 
@@ -172,8 +181,10 @@ Restart the service after editing. Variables inside these files are **not** expa
 | 3478 | UDP | control server, `tc-relay` | devices → STUN |
 | 7741 | TCP | control server (loopback by default) | operators and tenants → web portal and API |
 | 7742 | TCP | `tc-relay` | devices → standalone relay |
+| 443 | TCP | control server or `tc-relay`, with `-listen :443` | devices → HTTPS; Let's Encrypt → certificate checks (`-acme-domain`) |
+| 80 | TCP | with `-acme-http-listen :80` | Let's Encrypt → certificate checks |
 | 41641 | UDP | every device | device ↔ device (WireGuard, path discovery) |
-| 53 | UDP | `100.100.100.100`, inside each device | the device's own programs → MagicDNS (never leaves the device) |
+| 53 | UDP and TCP | `100.100.100.100`, inside each device | the device's own programs → MagicDNS (never leaves the device) |
 
 ## Files and paths
 

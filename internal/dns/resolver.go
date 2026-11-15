@@ -11,6 +11,7 @@ package dns
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"strconv"
@@ -98,9 +99,19 @@ func canonical(name string) string {
 	return name
 }
 
-// Query answers one DNS message (UDP wire format). It returns nil when the
-// query is not worth answering (unparseable, or a response).
-func (r *Resolver) Query(ctx context.Context, q []byte) []byte {
+// Query answers one DNS message received over UDP. It returns nil when the
+// query is not worth answering (unparseable, or a response). Answers too
+// big for the client are truncated (TC bit), so it retries over TCP.
+func (r *Resolver) Query(ctx context.Context, q []byte) []byte { return r.query(ctx, q, false) }
+
+// QueryTCP answers one DNS message received over TCP: answers may be up to
+// 64 KB, and forwarded queries go upstream over TCP too.
+func (r *Resolver) QueryTCP(ctx context.Context, q []byte) []byte { return r.query(ctx, q, true) }
+
+// maxTCPSize is the largest DNS message over TCP (16-bit length prefix).
+const maxTCPSize = 65535
+
+func (r *Resolver) query(ctx context.Context, q []byte, tcp bool) []byte {
 	var p dnsmessage.Parser
 	h, err := p.Start(q)
 	if err != nil || h.Response {
@@ -111,6 +122,9 @@ func (r *Resolver) Query(ctx context.Context, q []byte) []byte {
 		return errorReply(h, nil, dnsmessage.RCodeFormatError, false)
 	}
 	edns, size := clientUDPSize(&p)
+	if tcp {
+		size = maxTCPSize
+	}
 	if h.OpCode != 0 {
 		return errorReply(h, questions, dnsmessage.RCodeNotImplemented, edns)
 	}
@@ -134,7 +148,7 @@ func (r *Resolver) Query(ctx context.Context, q []byte) []byte {
 		if len(upstream) == 0 {
 			return errorReply(h, questions, dnsmessage.RCodeRefused, edns)
 		}
-		return r.forward(ctx, h, questions, q, upstream, size, edns)
+		return r.forward(ctx, h, questions, q, upstream, size, edns, tcp)
 	}
 	return buildReply(h, questions, answers, rcode, edns, size)
 }
@@ -291,7 +305,7 @@ func build(h dnsmessage.Header, qs []dnsmessage.Question, ans []dnsmessage.Resou
 }
 
 // forward relays the query to each upstream in turn until one answers.
-func (r *Resolver) forward(ctx context.Context, h dnsmessage.Header, qs []dnsmessage.Question, q []byte, upstream []netip.AddrPort, size int, edns bool) []byte {
+func (r *Resolver) forward(ctx context.Context, h dnsmessage.Header, qs []dnsmessage.Question, q []byte, upstream []netip.AddrPort, size int, edns, tcp bool) []byte {
 	select {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
@@ -300,7 +314,13 @@ func (r *Resolver) forward(ctx context.Context, h dnsmessage.Header, qs []dnsmes
 	}
 	var lastErr error
 	for _, up := range upstream {
-		resp, err := r.exchange(ctx, up, q, h.ID)
+		var resp []byte
+		var err error
+		if tcp {
+			resp, err = r.exchangeTCP(ctx, up, q, h.ID)
+		} else {
+			resp, err = r.exchange(ctx, up, q, h.ID)
+		}
 		if err != nil {
 			lastErr = err
 			continue
@@ -341,6 +361,54 @@ func (r *Resolver) exchange(ctx context.Context, up netip.AddrPort, q []byte, id
 		}
 		return append([]byte(nil), buf[:n]...), nil
 	}
+}
+
+// exchangeTCP asks up over TCP (length-prefixed messages, RFC 1035 4.2.2).
+func (r *Resolver) exchangeTCP(ctx context.Context, up netip.AddrPort, q []byte, id uint16) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	defer cancel()
+	c, err := r.dial(ctx, "tcp", up.String())
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		c.SetDeadline(dl)
+	}
+	if err := writeTCPMsg(c, q); err != nil {
+		return nil, err
+	}
+	resp, err := readTCPMsg(c)
+	if err != nil {
+		return nil, err
+	}
+	var p dnsmessage.Parser
+	if rh, err := p.Start(resp); err != nil || !rh.Response || rh.ID != id {
+		return nil, errors.New("bad response from upstream")
+	}
+	return resp, nil
+}
+
+// readTCPMsg reads one length-prefixed DNS message.
+func readTCPMsg(c io.Reader) ([]byte, error) {
+	var l [2]byte
+	if _, err := io.ReadFull(c, l[:]); err != nil {
+		return nil, err
+	}
+	b := make([]byte, int(l[0])<<8|int(l[1]))
+	if _, err := io.ReadFull(c, b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// writeTCPMsg writes one length-prefixed DNS message.
+func writeTCPMsg(c io.Writer, b []byte) error {
+	if len(b) > maxTCPSize {
+		return errors.New("DNS message too long")
+	}
+	_, err := c.Write(append([]byte{byte(len(b) >> 8), byte(len(b))}, b...))
+	return err
 }
 
 // truncate turns an upstream response that is too big for the client into

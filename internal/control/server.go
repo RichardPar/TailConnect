@@ -88,10 +88,14 @@ type Server struct {
 	// Access rules: each machine's selector identity and each account's policy.
 	machineOf map[key.NodePublic]acl.Machine
 	policies  map[int64]*acl.Policy
+	// policyEpoch counts rebuilds, for standalone relays' caches.
+	policyEpoch int64
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	online map[int64]int // node ID → number of open map streams
+
+	stats stats // counters for RegisterMetrics
 }
 
 const settingMachineKey = "control.machine_key"
@@ -124,6 +128,9 @@ func New(ctx context.Context, d *db.DB, cfg Config, log *slog.Logger) (*Server, 
 	s.bus.init()
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.lastGen, _ = d.Generation(ctx)
+	// Relays cache answers per policy version; starting from the clock keeps
+	// versions increasing across restarts.
+	s.policyEpoch = time.Now().UnixNano()
 	s.refreshPolicy()
 	go s.watchGeneration()
 	return s, nil
@@ -156,6 +163,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /key", s.handleKey)
 	mux.HandleFunc("POST /machine/noise", s.handleUpgrade)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
+	mux.HandleFunc("POST "+protocol.RelayAPIPath+"authorize", s.relayAPI(s.handleRelayAuthorize))
+	mux.HandleFunc("POST "+protocol.RelayAPIPath+"allowed", s.relayAPI(s.handleRelayAllowed))
+	mux.HandleFunc("GET "+protocol.RelayAPIPath+"watch", s.relayAPI(s.handleRelayWatch))
 	return mux
 }
 
@@ -272,12 +282,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case errors.Is(err, db.ErrInvalidAuthKey):
+		s.stats.registerRefused.Add(1)
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	case errors.Is(err, db.ErrExists):
+		s.stats.registerRefused.Add(1)
 		writeError(w, http.StatusConflict, "node key already registered to another machine")
 		return
 	case errors.Is(err, db.ErrAccountInactive):
+		s.stats.registerRefused.Add(1)
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	case errors.Is(err, ipam.ErrExhausted):
@@ -293,6 +306,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "register", err)
 		return
 	}
+	s.stats.registerOK.Add(1)
 	s.log.Info("node registered", "node", res.Node.GivenName, "id", res.Node.ID, "user", res.Node.UserName,
 		"ip", res.Node.IPv4, "created", res.Created, "rotated", res.Rotated)
 	writeJSON(w, http.StatusOK, protocol.RegisterResponse{Node: node})
@@ -415,6 +429,7 @@ func (s *Server) streamMap(w http.ResponseWriter, r *http.Request, self db.Node,
 			return false
 		}
 		flusher.Flush()
+		s.stats.countMap(b)
 		return true
 	}
 	if !send() {
@@ -572,6 +587,7 @@ func (s *Server) refreshPolicy() {
 	}
 	s.policyMu.Lock()
 	s.tenantOf, s.sharedWith, s.machineOf, s.policies = m, sw, mo, snap.policies
+	s.policyEpoch++
 	s.policyMu.Unlock()
 }
 

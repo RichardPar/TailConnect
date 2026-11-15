@@ -58,8 +58,13 @@ func (c *sclient) close() {
 	})
 }
 
+// KeepAlive is how often the relay sends idle clients a keep-alive frame,
+// often enough to keep idle connections open through NATs and firewalls
+// that drop them after a minute.
+const KeepAlive = 25 * time.Second
+
 func NewServer(priv key.RelayPrivate, authorize AuthorizeFunc, log *slog.Logger) *Server {
-	return &Server{priv: priv, authorize: authorize, log: log, keepAlive: 60 * time.Second, clients: map[key.NodePublic]*sclient{}}
+	return &Server{priv: priv, authorize: authorize, log: log, keepAlive: KeepAlive, clients: map[key.NodePublic]*sclient{}}
 }
 
 // SetAllow installs a per-packet policy (nil = forward between any clients).
