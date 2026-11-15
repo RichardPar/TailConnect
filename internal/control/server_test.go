@@ -27,14 +27,20 @@ type fixture struct {
 	ts  *httptest.Server
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T) *fixture { return newFixtureWith(t, nil) }
+
+// newFixtureWith lets the test adjust the server's Config.
+func newFixtureWith(t *testing.T, adjust func(*Config)) *fixture {
 	t.Helper()
 	d, err := db.Open(filepath.Join(t.TempDir(), "c.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(context.Background(), d, Config{BaseDomain: "home.internal", PollInterval: 50 * time.Millisecond},
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := Config{BaseDomain: "home.internal", PollInterval: 50 * time.Millisecond}
+	if adjust != nil {
+		adjust(&cfg)
+	}
+	s, err := New(context.Background(), d, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

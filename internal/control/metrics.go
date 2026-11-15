@@ -11,6 +11,9 @@ import (
 
 type stats struct {
 	registerOK, registerRefused atomic.Int64
+	connRefused                 struct {
+		rate, tooMany, unidentified atomic.Int64
+	}
 	mapFull, mapDelta           atomic.Int64 // messages on map streams
 	mapFullBytes, mapDeltaBytes atomic.Int64
 }
@@ -95,5 +98,11 @@ func (s *Server) RegisterMetrics(r *metrics.Registry) {
 		func(emit func([]string, float64)) {
 			emit([]string{"result", "ok"}, float64(s.stats.registerOK.Load()))
 			emit([]string{"result", "refused"}, float64(s.stats.registerRefused.Load()))
+		})
+	r.Collect("tc_control_connections_refused_total", "Control connections refused or closed by the abuse limits.", "counter",
+		func(emit func([]string, float64)) {
+			emit([]string{"reason", "rate"}, float64(s.stats.connRefused.rate.Load()))
+			emit([]string{"reason", "too_many"}, float64(s.stats.connRefused.tooMany.Load()))
+			emit([]string{"reason", "unidentified"}, float64(s.stats.connRefused.unidentified.Load()))
 		})
 }

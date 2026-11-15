@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"tailconnect/internal/db"
+	"tailconnect/internal/iplimit"
 	"tailconnect/internal/password"
 	"tailconnect/internal/protocol"
 )
@@ -64,14 +65,14 @@ type Server struct {
 	now  func() time.Time
 
 	hashSem   chan struct{} // bounds concurrent password hashing
-	authLimit *limiter      // sign-in and sign-up attempts per client IP
+	authLimit *iplimit.Rate // sign-in and sign-up attempts per client IP
 }
 
 func New(d *db.DB, info Info, log *slog.Logger) *Server {
 	return &Server{
 		db: d, info: info, log: log, now: time.Now,
 		hashSem:   make(chan struct{}, 4),
-		authLimit: newLimiter(6*time.Second, 10), // 10 at once, then one every 6s
+		authLimit: iplimit.NewRate(6*time.Second, 10), // 10 at once, then one every 6s
 	}
 }
 

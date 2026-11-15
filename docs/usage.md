@@ -448,6 +448,7 @@ The metrics page has no login, so keep it on loopback or a private network.
 | `tc_control_map_streams` | Connected machines' map streams |
 | `tc_control_map_messages_total{kind}`, `tc_control_map_bytes_total{kind}` | Maps sent: `full` maps or `delta`s with only what changed |
 | `tc_control_registrations_total{result}` | Joins and re-authentications, `ok` or `refused` (e.g. a bad auth key) |
+| `tc_control_connections_refused_total{reason}` | Control connections stopped by the abuse limits: `rate` (too many attempts from one IP), `too_many` (too many open from one IP), `unidentified` (closed after 30 seconds without registering or acting as a registered machine) |
 | `tc_relay_clients`, `tc_relay_packets_total{result}`, `tc_relay_bytes_forwarded_total` | The built-in relay: connected machines; packets `forwarded`, `dropped` (receiver gone or too slow) or `denied` (the machines may not talk) |
 | `tc_build_info{program,version}`, `tc_uptime_seconds` | Version and uptime |
 

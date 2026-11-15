@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"tailconnect/internal/db"
+	"tailconnect/internal/iplimit"
 	"tailconnect/internal/password"
 )
 
@@ -56,7 +57,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if !s.authLimit.allow(r) {
+	if !s.authLimit.Allow(iplimit.IP(r)) {
 		writeError(w, http.StatusTooManyRequests, "too many attempts; wait a minute and try again")
 		return
 	}
@@ -137,7 +138,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if !s.authLimit.allow(r) {
+	if !s.authLimit.Allow(iplimit.IP(r)) {
 		writeError(w, http.StatusTooManyRequests, "too many attempts; wait a minute and try again")
 		return
 	}

@@ -11,6 +11,7 @@ import (
 
 	"tailconnect/internal/db"
 	"tailconnect/internal/ipam"
+	"tailconnect/internal/iplimit"
 	"tailconnect/internal/password"
 )
 
@@ -128,7 +129,7 @@ func TestSignupModes(t *testing.T) {
 
 func TestLoginFailures(t *testing.T) {
 	f := newFx(t)
-	f.srv.authLimit = newLimiter(6*time.Second, 10) // the production limit
+	f.srv.authLimit = iplimit.NewRate(6*time.Second, 10) // the production limit
 	f.account("acme", db.RoleTenant)
 	if code, _, _ := f.do(f.browser(), "POST", "/api/login", map[string]string{"login": "acme", "password": "wrong password"}, nil); code != 401 {
 		t.Fatalf("wrong password: %d", code)

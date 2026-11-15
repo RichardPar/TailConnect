@@ -17,6 +17,7 @@ import (
 
 	"tailconnect/internal/db"
 	"tailconnect/internal/ipam"
+	"tailconnect/internal/iplimit"
 )
 
 type fx struct {
@@ -40,7 +41,7 @@ func newFx(t *testing.T) *fx {
 		t.Fatal(err)
 	}
 	s := New(d, Info{BaseDomain: "home.internal"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	s.authLimit = newLimiter(time.Millisecond, 1000) // tests sign in a lot; TestLoginFailures checks the real limit
+	s.authLimit = iplimit.NewRate(time.Millisecond, 1000) // tests sign in a lot; TestLoginFailures checks the real limit
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	jar, _ := cookiejar.New(nil)

@@ -9,14 +9,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-
-	"golang.org/x/time/rate"
 
 	"tailconnect/internal/db"
 )
@@ -187,36 +183,4 @@ func (s *Server) setSession(w http.ResponseWriter, r *http.Request, st authState
 		Name: sessionCookie, Value: val, Path: "/", Expires: exp,
 		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
 	})
-}
-
-// ---- abuse limits for sign-in and sign-up ----
-
-// limiter allows each client IP a burst of attempts, refilling slowly.
-type limiter struct {
-	mu      sync.Mutex
-	clients map[string]*rate.Limiter
-	every   time.Duration
-	burst   int
-}
-
-func newLimiter(every time.Duration, burst int) *limiter {
-	return &limiter{clients: map[string]*rate.Limiter{}, every: every, burst: burst}
-}
-
-func (l *limiter) allow(r *http.Request) bool {
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		ip = r.RemoteAddr
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.clients) > 10000 {
-		l.clients = map[string]*rate.Limiter{} // crude bound on memory
-	}
-	lim, ok := l.clients[ip]
-	if !ok {
-		lim = rate.NewLimiter(rate.Every(l.every), l.burst)
-		l.clients[ip] = lim
-	}
-	return lim.Allow()
 }

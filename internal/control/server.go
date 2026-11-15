@@ -26,6 +26,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -33,6 +34,7 @@ import (
 	"tailconnect/internal/acl"
 	"tailconnect/internal/db"
 	"tailconnect/internal/ipam"
+	"tailconnect/internal/iplimit"
 	"tailconnect/internal/key"
 	"tailconnect/internal/noise"
 	"tailconnect/internal/protocol"
@@ -60,7 +62,25 @@ type Config struct {
 	// EphemeralTimeout: ephemeral machines offline this long are removed
 	// (0 = keep them).
 	EphemeralTimeout time.Duration
+	// IdentifyTimeout is how long a new Noise channel has to register or
+	// make a request as a registered machine before it is closed
+	// (default 30s). Anyone can open a channel, so this stops strangers
+	// holding connections open.
+	IdentifyTimeout time.Duration
 }
+
+// Per-IP abuse limits on the client-facing listener. They are generous:
+// machines behind one NAT (or a router looping LAN clients back in) share
+// an address.
+const (
+	connsPerIP      = 64    // open Noise channels from one IP
+	connsTotal      = 10000 // open Noise channels in all
+	handshakeEvery  = time.Second
+	handshakeBurst  = 30 // then one handshake a second
+	regFailEvery    = 30 * time.Second
+	regFailBurst    = 10 // failed registrations, then one every 30s
+	defaultIdentify = 30 * time.Second
+)
 
 type Server struct {
 	db   *db.DB
@@ -91,6 +111,11 @@ type Server struct {
 	// policyEpoch counts rebuilds, for standalone relays' caches.
 	policyEpoch int64
 
+	// Per-IP limits (a nil limit allows everything).
+	connLimit  *iplimit.Count // open Noise channels
+	handshakes *iplimit.Rate  // Noise handshakes
+	regFails   *iplimit.Rate  // registrations refused for a bad auth key
+
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	online map[int64]int // node ID → number of open map streams
@@ -113,6 +138,9 @@ func New(ctx context.Context, d *db.DB, cfg Config, log *slog.Logger) (*Server, 
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = time.Second
 	}
+	if cfg.IdentifyTimeout <= 0 {
+		cfg.IdentifyTimeout = defaultIdentify
+	}
 	fresh, _ := key.NewPrivate[key.MachineKind]().MarshalText()
 	stored, err := d.SetSettingIfAbsent(ctx, settingMachineKey, string(fresh))
 	if err != nil {
@@ -125,6 +153,9 @@ func New(ctx context.Context, d *db.DB, cfg Config, log *slog.Logger) (*Server, 
 	s := &Server{
 		db: d, cfg: cfg, ipam: ipam.Default(), mkey: mk, log: log,
 		conns: map[net.Conn]struct{}{}, online: map[int64]int{},
+		connLimit:  iplimit.NewCount(connsPerIP, connsTotal),
+		handshakes: iplimit.NewRate(handshakeEvery, handshakeBurst),
+		regFails:   iplimit.NewRate(regFailEvery, regFailBurst),
 	}
 	s.bus.init()
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -193,9 +224,31 @@ func machineFrom(ctx context.Context) key.MachinePublic {
 	return mk
 }
 
+// noiseConn is the state of one Noise channel, shared by its requests.
+type noiseConn struct {
+	ip         string
+	identified atomic.Bool // registered, or spoke as a registered machine
+}
+
+type noiseConnCtx struct{}
+
+func connFrom(ctx context.Context) *noiseConn {
+	c, _ := ctx.Value(noiseConnCtx{}).(*noiseConn)
+	if c == nil {
+		return &noiseConn{} // not on a Noise channel (tests calling handlers directly)
+	}
+	return c
+}
+
 func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), noise.UpgradeProtocol) {
 		writeError(w, http.StatusBadRequest, "expected Upgrade: "+noise.UpgradeProtocol)
+		return
+	}
+	ip := iplimit.IP(r)
+	if !s.handshakes.Allow(ip) { // before the handshake's key exchange
+		s.stats.connRefused.rate.Add(1)
+		writeError(w, http.StatusTooManyRequests, "too many connection attempts from this address; try again later")
 		return
 	}
 	init, err := base64.StdEncoding.DecodeString(r.Header.Get(noise.HandshakeHeader))
@@ -215,6 +268,13 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "connection cannot be upgraded (HTTP/2 front end?)")
 		return
 	}
+	if !s.connLimit.Acquire(ip) {
+		s.stats.connRefused.tooMany.Add(1)
+		s.log.Info("control connection refused: too many open", "remote", r.RemoteAddr)
+		writeError(w, http.StatusServiceUnavailable, "too many open connections from this address")
+		return
+	}
+	defer s.connLimit.Release(ip)
 	raw, brw, err := hj.Hijack()
 	if err != nil {
 		s.log.Error("hijack failed", "err", err)
@@ -248,11 +308,20 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		raw.Close()
 	}()
 
-	h2 := &http2.Server{ReadIdleTimeout: 60 * time.Second, PingTimeout: 15 * time.Second}
-	h2.ServeConn(nc, &http2.ServeConnOpts{
-		Context: context.WithValue(s.ctx, machineKeyCtx{}, peer),
-		Handler: s.noiseHandler(),
+	st := &noiseConn{ip: ip}
+	idle := time.AfterFunc(s.cfg.IdentifyTimeout, func() {
+		if !st.identified.Load() {
+			s.stats.connRefused.unidentified.Add(1)
+			s.log.Info("closing control connection that never identified a machine", "remote", r.RemoteAddr)
+			raw.Close()
+		}
 	})
+	defer idle.Stop()
+
+	ctx := context.WithValue(s.ctx, machineKeyCtx{}, peer)
+	ctx = context.WithValue(ctx, noiseConnCtx{}, st)
+	h2 := &http2.Server{ReadIdleTimeout: 60 * time.Second, PingTimeout: 15 * time.Second}
+	h2.ServeConn(nc, &http2.ServeConnOpts{Context: ctx, Handler: s.noiseHandler()})
 }
 
 // ---- API handlers ----
@@ -269,6 +338,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.NodeKey.IsZero() {
 		writeError(w, http.StatusBadRequest, "NodeKey is required")
+		return
+	}
+	conn := connFrom(r.Context())
+	if s.regFails.Blocked(conn.ip) {
+		s.stats.registerRefused.Add(1)
+		s.log.Info("registration refused", "reason", "too many failed attempts", "host", req.Hostinfo.Hostname, "remote", r.RemoteAddr)
+		writeError(w, http.StatusTooManyRequests, "too many failed registrations from this address; try again later")
 		return
 	}
 	hi, _ := json.Marshal(req.Hostinfo)
@@ -290,6 +366,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case errors.Is(err, db.ErrInvalidAuthKey):
+		s.regFails.Allow(conn.ip) // counts towards the limit above
 		refused("auth key invalid, expired, revoked or already used")
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
@@ -308,6 +385,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "register", err)
 		return
 	}
+	conn.identified.Store(true)
 	s.checkGeneration()
 	node, err := s.toProtocol(res.Node)
 	if err != nil {
@@ -337,6 +415,7 @@ func (s *Server) selfNode(w http.ResponseWriter, r *http.Request, nk key.NodePub
 		writeError(w, http.StatusForbidden, "node key belongs to a different machine")
 		return db.Node{}, false
 	}
+	connFrom(r.Context()).identified.Store(true)
 	return self, true
 }
 
