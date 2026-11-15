@@ -303,9 +303,10 @@ func (c *Client) StreamMap(ctx context.Context, req protocol.MapRequest, fn func
 	}
 	defer resp.Body.Close()
 	dec := json.NewDecoder(resp.Body)
+	var last *protocol.MapResponse // for applying deltas
 	for {
-		var m protocol.MapResponse
-		if err := dec.Decode(&m); err != nil {
+		m := &protocol.MapResponse{}
+		if err := dec.Decode(m); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -317,7 +318,14 @@ func (c *Client) StreamMap(ctx context.Context, req protocol.MapRequest, fn func
 		if m.KeepAlive {
 			continue
 		}
-		if err := fn(&m); err != nil {
+		if m.Delta {
+			if last == nil {
+				return errors.New("control: map stream: delta before the first map")
+			}
+			m = protocol.ApplyDelta(last, m)
+		}
+		last = m
+		if err := fn(m); err != nil {
 			return err
 		}
 	}

@@ -157,7 +157,7 @@ func (c *Conn) discoverLocked(p *peer, now time.Time, force bool) {
 }
 
 func (c *Conn) sendPingLocked(p *peer, to netip.AddrPort, now time.Time) {
-	if c.pconn == nil || p.discoKey.IsZero() || c.disco.IsZero() {
+	if c.socks == nil || p.discoKey.IsZero() || c.disco.IsZero() {
 		return
 	}
 	tx := disco.NewTxID()
@@ -166,7 +166,7 @@ func (c *Conn) sendPingLocked(p *peer, to netip.AddrPort, now time.Time) {
 		ep.lastPing = now
 	}
 	pkt := disco.Seal(c.disco, p.discoKey, &disco.Ping{TxID: tx, NodeKey: c.priv.Public()})
-	_, err := c.pconn.WriteToUDPAddrPort(pkt, to)
+	err := c.socks.write([][]byte{pkt}, to)
 	if debugDisco {
 		c.logf("disco: ping → %s at %v (err=%v)", p.key.ShortString(), to, err)
 	}
@@ -215,8 +215,8 @@ func (c *Conn) handleDiscoLocked(pkt []byte, src netip.AddrPort, viaRelay bool, 
 			return
 		}
 		ep := c.learnLocked(p, src, now)
-		if c.pconn != nil {
-			c.pconn.WriteToUDPAddrPort(disco.Seal(c.disco, p.discoKey, &disco.Pong{TxID: m.TxID, Src: src}), src)
+		if c.socks != nil {
+			c.socks.write([][]byte{disco.Seal(c.disco, p.discoKey, &disco.Pong{TxID: m.TxID, Src: src})}, src)
 		}
 		// Ping back: completes hole punching from our side.
 		if ep != nil && !p.trusted(now) && now.Sub(ep.lastPing) >= time.Second {
@@ -342,13 +342,13 @@ func (c *Conn) sendSTUN(targets []stunTarget) {
 		to := netip.AddrPortFrom(ip, uint16(t.port))
 		tx := stun.NewTxID()
 		c.mu.Lock()
-		pc := c.pconn
-		if pc != nil {
+		ss := c.socks
+		if ss != nil {
 			c.stunTx[tx] = stunRequest{region: t.region, sent: time.Now()}
 		}
 		c.mu.Unlock()
-		if pc != nil {
-			pc.WriteToUDPAddrPort(stun.Request(tx), to)
+		if ss != nil {
+			ss.write([][]byte{stun.Request(tx)}, to)
 		}
 	}
 }

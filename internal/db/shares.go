@@ -93,6 +93,10 @@ type ShareFilter struct {
 }
 
 func (d *DB) ListShares(ctx context.Context, f ShareFilter) ([]Share, error) {
+	return listShares(ctx, d.sql, f)
+}
+
+func listShares(ctx context.Context, db queryer, f ShareFilter) ([]Share, error) {
 	q := shareSelect + ` WHERE 1=1`
 	var args []any
 	switch {
@@ -109,7 +113,7 @@ func (d *DB) ListShares(ctx context.Context, f ShareFilter) ([]Share, error) {
 	if f.Accepted {
 		q += ` AND s.status = '` + ShareAccepted + `'`
 	}
-	rows, err := d.sql.QueryContext(ctx, q+` ORDER BY s.id`, args...)
+	rows, err := db.QueryContext(ctx, q+` ORDER BY s.id`, args...)
 	if err != nil {
 		return nil, err
 	}

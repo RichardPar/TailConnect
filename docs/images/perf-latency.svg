@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 314" width="760" height="314" role="img" aria-labelledby="t d">
 <title id="t">TCP round-trip time</title>
-<desc id="d">Bare network: p50 30 µs, p99 57 µs; Tunnel, direct: p50 156 µs, p99 273 µs; Tunnel, relay: p50 268 µs, p99 383 µs</desc>
+<desc id="d">Bare network: p50 31 µs, p99 58 µs; Tunnel, direct: p50 175 µs, p99 300 µs; Tunnel, relay: p50 279 µs, p99 410 µs</desc>
 <style>
   .surface { fill: #fcfcfb; stroke: #e3e6ea; }
   .t1 { fill: #0b0b0b; } .t2 { fill: #52514e; } .t3 { fill: #6f6e69; }
@@ -33,18 +33,18 @@
 <text class="t3" x="650.0" y="290" font-size="12" text-anchor="middle">400 µs</text>
 <line class="axis" x1="190" y1="90" x2="190" y2="272" stroke-width="1"/>
 <text class="t1" x="178" y="120.0" font-size="13.5" text-anchor="end">Bare network</text>
-<path class="s1" d="M190.0,96.0 H220.5 Q224.5,96.0 224.5,100.0 V110.0 Q224.5,114.0 220.5,114.0 H190.0 Z"/>
-<text class="t2" x="230.5" y="109.5" font-size="12.5">30 µs</text>
-<path class="s2" d="M190.0,116.0 H251.6 Q255.6,116.0 255.6,120.0 V130.0 Q255.6,134.0 251.6,134.0 H190.0 Z"/>
-<text class="t2" x="261.6" y="129.5" font-size="12.5">57 µs</text>
+<path class="s1" d="M190.0,96.0 H221.7 Q225.7,96.0 225.7,100.0 V110.0 Q225.7,114.0 221.7,114.0 H190.0 Z"/>
+<text class="t2" x="231.7" y="109.5" font-size="12.5">31 µs</text>
+<path class="s2" d="M190.0,116.0 H252.7 Q256.7,116.0 256.7,120.0 V130.0 Q256.7,134.0 252.7,134.0 H190.0 Z"/>
+<text class="t2" x="262.7" y="129.5" font-size="12.5">58 µs</text>
 <text class="t1" x="178" y="184.0" font-size="13.5" text-anchor="end">Tunnel, direct</text>
-<path class="s1" d="M190.0,160.0 H365.4 Q369.4,160.0 369.4,164.0 V174.0 Q369.4,178.0 365.4,178.0 H190.0 Z"/>
-<text class="t2" x="375.4" y="173.5" font-size="12.5">156 µs</text>
-<path class="s2" d="M190.0,180.0 H499.9 Q503.9,180.0 503.9,184.0 V194.0 Q503.9,198.0 499.9,198.0 H190.0 Z"/>
-<text class="t2" x="509.9" y="193.5" font-size="12.5">273 µs</text>
+<path class="s1" d="M190.0,160.0 H387.2 Q391.2,160.0 391.2,164.0 V174.0 Q391.2,178.0 387.2,178.0 H190.0 Z"/>
+<text class="t2" x="397.2" y="173.5" font-size="12.5">175 µs</text>
+<path class="s2" d="M190.0,180.0 H531.0 Q535.0,180.0 535.0,184.0 V194.0 Q535.0,198.0 531.0,198.0 H190.0 Z"/>
+<text class="t2" x="541.0" y="193.5" font-size="12.5">300 µs</text>
 <text class="t1" x="178" y="248.0" font-size="13.5" text-anchor="end">Tunnel, relay</text>
-<path class="s1" d="M190.0,224.0 H494.2 Q498.2,224.0 498.2,228.0 V238.0 Q498.2,242.0 494.2,242.0 H190.0 Z"/>
-<text class="t2" x="504.2" y="237.5" font-size="12.5">268 µs</text>
-<path class="s2" d="M190.0,244.0 H626.5 Q630.5,244.0 630.5,248.0 V258.0 Q630.5,262.0 626.5,262.0 H190.0 Z"/>
-<text class="t2" x="636.5" y="257.5" font-size="12.5">383 µs</text>
+<path class="s1" d="M190.0,224.0 H506.9 Q510.9,224.0 510.9,228.0 V238.0 Q510.9,242.0 506.9,242.0 H190.0 Z"/>
+<text class="t2" x="516.9" y="237.5" font-size="12.5">279 µs</text>
+<path class="s2" d="M190.0,244.0 H657.5 Q661.5,244.0 661.5,248.0 V258.0 Q661.5,262.0 657.5,262.0 H190.0 Z"/>
+<text class="t2" x="667.5" y="257.5" font-size="12.5">410 µs</text>
 </svg>

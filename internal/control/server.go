@@ -357,12 +357,13 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 		w.Write(append(b, '\n'))
 		return
 	}
-	s.streamMap(w, r, self, changed)
+	s.streamMap(w, r, self, req.Version >= protocol.DeltaVersion, changed)
 }
 
 // streamMap writes newline-delimited MapResponses until the client goes away,
 // the node is deleted, or the server shuts down.
-func (s *Server) streamMap(w http.ResponseWriter, r *http.Request, self db.Node, changed <-chan struct{}) {
+// Clients that understand deltas get only what changed after the first map.
+func (s *Server) streamMap(w http.ResponseWriter, r *http.Request, self db.Node, deltas bool, changed <-chan struct{}) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -388,8 +389,9 @@ func (s *Server) streamMap(w http.ResponseWriter, r *http.Request, self db.Node,
 	enc := json.NewEncoder(w)
 
 	var last []byte
+	var ds deltaState
 	send := func() (alive bool) {
-		b, err := s.BuildMapJSON(ctx, self.ID)
+		m, err := s.encodeMap(ctx, self.ID)
 		if errors.Is(err, db.ErrNotFound) {
 			log.Info("node removed; closing stream")
 			return false
@@ -398,10 +400,17 @@ func (s *Server) streamMap(w http.ResponseWriter, r *http.Request, self db.Node,
 			log.Error("build map", "err", err)
 			return false
 		}
-		if bytes.Equal(b, last) {
-			return true
+		var b []byte
+		if deltas {
+			if b = ds.next(m); b == nil {
+				return true
+			}
+		} else {
+			if b = m.full(); bytes.Equal(b, last) {
+				return true
+			}
+			last = b
 		}
-		last = b
 		if _, err := w.Write(append(b, '\n')); err != nil {
 			return false
 		}

@@ -48,6 +48,8 @@ After joining, `tcd` keeps one streaming request open. The server answers with a
 - a share is created, accepted or ended, or an account is suspended;
 - anything is edited from the portal, the API or the CLI.
 
+After the first map on a stream, the server sends only what changed: the peers that were added or changed, and the ones that were removed. In a 1,000-machine account that's about 0.4 KB per change instead of a 340 KB map. A change to the machine itself, the DNS settings or the relays brings a full map again. The server builds every map from one consistent read of the database, so a machine never sees a half-applied edit (such as a new access rule without the tags it refers to). Clients older than protocol version 2 always get full maps.
+
 The server notices changes made by other processes, such as the CLI, through a change counter that database triggers keep up to date, which it checks every second. Keep-alives every 30 seconds keep the stream open through middleboxes.
 
 ## Tenants

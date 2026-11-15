@@ -16,16 +16,16 @@ import os
 # tests/perf/throughput.sh (kernel TUN) and BenchmarkThroughput (userspace,
 # MB/s × 8), Mbit/s.
 THROUGHPUT = {
-    "Direct path": {"Kernel TUN": 928, "Userspace (in-process)": 374},
-    "Through the relay": {"Kernel TUN": 613, "Userspace (in-process)": 353},
+    "Direct path": {"Kernel TUN": 1075, "Userspace (in-process)": 386},
+    "Through the relay": {"Kernel TUN": 597, "Userspace (in-process)": 369},
 }
-UNDERLAY_MBIT = 20008
+UNDERLAY_MBIT = 20024
 
 # tests/perf/throughput.sh, TCP round trip in µs.
 LATENCY = {
-    "Bare network": {"p50": 30, "p99": 57},
-    "Tunnel, direct": {"p50": 156, "p99": 273},
-    "Tunnel, relay": {"p50": 268, "p99": 383},
+    "Bare network": {"p50": 31, "p99": 58},
+    "Tunnel, direct": {"p50": 175, "p99": 300},
+    "Tunnel, relay": {"p50": 279, "p99": 410},
 }
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "docs", "images")
@@ -125,7 +125,7 @@ def main():
         f"TCP over the tunnel between two machines. Bare network for reference: {UNDERLAY_MBIT:,} Mbit/s.",
         THROUGHPUT,
         [("Kernel TUN", "Kernel TUN", "s1"), ("Userspace (in-process)", "Userspace (in-process)", "s2")],
-        "Mbit/s", 1000, [0, 250, 500, 750, 1000], lambda v: f"{v:,.0f}",
+        "Mbit/s", 1250, [0, 250, 500, 750, 1000, 1250], lambda v: f"{v:,.0f}",
         "; ".join(f"{g}: " + ", ".join(f"{s} {v} Mbit/s" for s, v in d.items()) for g, d in THROUGHPUT.items()),
     )
     grouped_hbars(

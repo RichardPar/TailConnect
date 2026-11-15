@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/ipv6"
 	"golang.zx2c4.com/wireguard/conn"
 
 	"tailconnect/internal/disco"
@@ -82,7 +83,7 @@ type Conn struct {
 	relayMap  protocol.RelayMap
 	relays    map[int]*relay.Client
 	home      int
-	pconn     *net.UDPConn
+	socks     *socks        // UDP sockets; nil when closed
 	closing   chan struct{} // closed by Close; ends the current ReceiveFuncs
 	shutdown  bool
 
@@ -380,27 +381,30 @@ func (c *Conn) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if c.shutdown {
 		return nil, 0, net.ErrClosed
 	}
-	if c.pconn != nil {
+	if c.socks != nil {
 		return nil, 0, conn.ErrBindAlreadyOpen
 	}
-	pc, err := net.ListenUDP("udp", &net.UDPAddr{Port: int(port)}) // dual-stack where available
+	ss, actual, err := listenSocks(port)
 	if err != nil {
-		if pc, err = net.ListenUDP("udp4", &net.UDPAddr{Port: int(port)}); err != nil {
-			return nil, 0, err
+		return nil, 0, err
+	}
+	c.socks = ss
+	c.closing = make(chan struct{})
+	var fns []conn.ReceiveFunc
+	for _, k := range []*sock{ss.v4, ss.v6} {
+		if k != nil {
+			fns = append(fns, c.receiveUDP(k))
 		}
 	}
-	c.pconn = pc
-	c.closing = make(chan struct{})
-	actual := uint16(pc.LocalAddr().(*net.UDPAddr).Port)
-	return []conn.ReceiveFunc{c.receiveUDP(pc), c.receiveRelay(c.closing)}, actual, nil
+	return append(fns, c.receiveRelay(c.closing)), actual, nil
 }
 
 func (c *Conn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.pconn != nil {
-		c.pconn.Close()
-		c.pconn = nil
+	if c.socks != nil {
+		c.socks.close()
+		c.socks = nil
 	}
 	if c.closing != nil {
 		close(c.closing)
@@ -429,7 +433,7 @@ func (c *Conn) Shutdown() {
 }
 
 func (c *Conn) SetMark(uint32) error { return nil }
-func (c *Conn) BatchSize() int       { return 1 }
+func (c *Conn) BatchSize() int       { return batchSize }
 
 func (c *Conn) ParseEndpoint(s string) (conn.Endpoint, error) {
 	if k, err := key.ParsePublic[key.NodeKind](s); err == nil && !k.IsZero() {
@@ -453,46 +457,70 @@ func unmap(ap netip.AddrPort) netip.AddrPort {
 	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
 
-func (c *Conn) receiveUDP(pc *net.UDPConn) conn.ReceiveFunc {
+func (c *Conn) receiveUDP(k *sock) conn.ReceiveFunc {
+	bc := k.bc
+	msgs := make([]ipv6.Message, batchSize)
+	// Read as many packets per call as recently arrived, doubling under load:
+	// each call prepares (and, in race builds, annotates) every message it
+	// offers, which is wasted when one packet is waiting.
+	last := 1
 	return func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
+		want := min(len(packets), len(msgs), 2*last)
+		for i := 0; i < want; i++ {
+			msgs[i].Buffers, msgs[i].OOB = packets[i:i+1], nil
+		}
 		for {
-			n, ap, err := pc.ReadFromUDPAddrPort(packets[0])
+			n, err := bc.ReadBatch(msgs[:want], 0)
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) {
 					return 0, net.ErrClosed
 				}
 				return 0, err
 			}
-			ap = unmap(ap)
-			b := packets[0][:n]
+			last = max(n, 1)
+			// STUN and disco are handled here; WireGuard packets are passed
+			// up, compacted to the front of the batch.
+			out := 0
+			now := time.Now()
 			c.mu.Lock()
-			switch {
-			case stun.IsResponse(b):
-				c.handleSTUNLocked(b)
-				c.mu.Unlock()
-				continue
-			case disco.Looks(b):
-				c.handleDiscoLocked(b, ap, false, key.NodePublic{})
-				c.mu.Unlock()
-				continue
-			}
-			sizes[0] = n
-			if p := c.attributeLocked(b); p != nil {
-				now := time.Now()
-				// The peer's WireGuard traffic proves this path. Adopt it unless
-				// discovery has already chosen a (better) path that still works.
-				if ap == p.directAddr || !p.trusted(now) {
-					p.directAddr, p.lastDirectRecv, p.firstUnanswered = ap, now, time.Time{}
+			for i := 0; i < n; i++ {
+				b := packets[i][:msgs[i].N]
+				ua, _ := msgs[i].Addr.(*net.UDPAddr)
+				if ua == nil {
+					continue
 				}
-				if wgType(b) == wgTransport {
-					p.lastActive = now
+				ap := unmap(ua.AddrPort())
+				switch {
+				case stun.IsResponse(b):
+					c.handleSTUNLocked(b)
+					continue
+				case disco.Looks(b):
+					c.handleDiscoLocked(b, ap, false, key.NodePublic{})
+					continue
 				}
-				eps[0] = p.ep
-			} else {
-				eps[0] = &rawEndpoint{ap: ap}
+				if out != i {
+					copy(packets[out], b)
+				}
+				sizes[out] = len(b)
+				if p := c.attributeLocked(b); p != nil {
+					// The peer's WireGuard traffic proves this path. Adopt it unless
+					// discovery has already chosen a (better) path that still works.
+					if ap == p.directAddr || !p.trusted(now) {
+						p.directAddr, p.lastDirectRecv, p.firstUnanswered = ap, now, time.Time{}
+					}
+					if wgType(b) == wgTransport {
+						p.lastActive = now
+					}
+					eps[out] = p.ep
+				} else {
+					eps[out] = &rawEndpoint{ap: ap}
+				}
+				out++
 			}
 			c.mu.Unlock()
-			return 1, nil
+			if out > 0 {
+				return out, nil
+			}
 		}
 	}
 }
@@ -537,17 +565,12 @@ func (c *Conn) Send(bufs [][]byte, ep conn.Endpoint) error {
 		return c.sendPeer(e.key, bufs)
 	case *rawEndpoint:
 		c.mu.Lock()
-		pc := c.pconn
+		ss := c.socks
 		c.mu.Unlock()
-		if pc == nil {
+		if ss == nil {
 			return net.ErrClosed
 		}
-		for _, b := range bufs {
-			if _, err := pc.WriteToUDPAddrPort(b, e.ap); err != nil {
-				return err
-			}
-		}
-		return nil
+		return ss.write(bufs, e.ap)
 	default:
 		return fmt.Errorf("magicsock: unexpected endpoint type %T", ep)
 	}
@@ -560,7 +583,7 @@ func (c *Conn) sendPeer(k key.NodePublic, bufs [][]byte) error {
 		c.mu.Unlock()
 		return errNoPath
 	}
-	pc := c.pconn
+	ss := c.socks
 	now := time.Now()
 	for _, b := range bufs {
 		c.noteSentLocked(k, b, now)
@@ -575,15 +598,10 @@ func (c *Conn) sendPeer(k key.NodePublic, bufs [][]byte) error {
 		}
 		p.txDirect += uint64(len(bufs))
 		c.mu.Unlock()
-		if pc == nil {
+		if ss == nil {
 			return net.ErrClosed
 		}
-		for _, b := range bufs {
-			if _, err := pc.WriteToUDPAddrPort(b, addr); err != nil {
-				return err
-			}
-		}
-		return nil
+		return ss.write(bufs, addr)
 	}
 	// Keep trying the last working direct address (or the best guess) so the
 	// direct path recovers as soon as it works again.
@@ -597,13 +615,11 @@ func (c *Conn) sendPeer(k key.NodePublic, bufs [][]byte) error {
 
 	sent := false
 	var lastErr error = errNoPath
-	if spray.IsValid() && pc != nil {
-		for _, b := range bufs {
-			if _, err := pc.WriteToUDPAddrPort(b, spray); err == nil {
-				sent = true
-			} else {
-				lastErr = err
-			}
+	if spray.IsValid() && ss != nil {
+		if err := ss.write(bufs, spray); err == nil {
+			sent = true
+		} else {
+			lastErr = err
 		}
 	}
 	viaRelay := false

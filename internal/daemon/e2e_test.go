@@ -797,6 +797,7 @@ func TestAccessRules(t *testing.T) {
 	}
 
 	if got, err := ping(laptop, ipServer, "allowed"); err != nil || got != "pong:allowed" {
+		dump(t, laptop, server)
 		t.Fatalf("laptop → server tcp:7000 (allowed): %q %v", got, err)
 	}
 	if err := tryDial(laptop, netip.AddrPortFrom(ipServer, 7001)); err == nil {

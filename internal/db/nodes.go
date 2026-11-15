@@ -315,7 +315,11 @@ func (d *DB) GetNodeByNodeKey(ctx context.Context, nodeKey string) (Node, error)
 
 // ListNodes returns nodes ordered by ID, optionally for one user (userID 0 = all).
 func (d *DB) ListNodes(ctx context.Context, userID int64) ([]Node, error) {
-	rows, err := d.sql.QueryContext(ctx, nodeSelect+` WHERE ? = 0 OR n.user_id = ? ORDER BY n.id`, userID, userID)
+	return listNodes(ctx, d.sql, userID)
+}
+
+func listNodes(ctx context.Context, q queryer, userID int64) ([]Node, error) {
+	rows, err := q.QueryContext(ctx, nodeSelect+` WHERE ? = 0 OR n.user_id = ? ORDER BY n.id`, userID, userID)
 	if err != nil {
 		return nil, err
 	}

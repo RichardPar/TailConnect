@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -96,9 +97,13 @@ func (s *Server) currentSnapshot(ctx context.Context) (*snapshot, error) {
 	if s.snap != nil && s.snap.gen == gen && (s.snap.stale.IsZero() || time.Now().Before(s.snap.stale)) {
 		return s.snap, nil
 	}
-	// Read the generation before the data: a change racing with the build
-	// is in the snapshot or bumps the generation again, never lost.
-	snap, err := s.buildSnapshot(ctx, gen)
+	// The generation and the data come from one read transaction, so the
+	// snapshot is consistent and labelled with the generation it reflects.
+	st, err := s.db.ReadState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	snap, err := s.buildSnapshot(st)
 	if err != nil {
 		return nil, err
 	}
@@ -106,24 +111,13 @@ func (s *Server) currentSnapshot(ctx context.Context) (*snapshot, error) {
 	return snap, nil
 }
 
-func (s *Server) buildSnapshot(ctx context.Context, gen int64) (*snapshot, error) {
-	nodes, err := s.db.ListNodes(ctx, 0)
-	if err != nil {
-		return nil, err
-	}
-	shares, err := s.db.ListShares(ctx, db.ShareFilter{Accepted: true})
-	if err != nil {
-		return nil, err
-	}
+func (s *Server) buildSnapshot(st db.State) (*snapshot, error) {
+	nodes, shares, rules := st.Nodes, st.Shares, st.Rules
 	now := time.Now()
 	snap := &snapshot{
-		gen: gen, built: now, nodes: make(map[int64]*snapNode, len(nodes)), byUser: map[int64][]int64{},
+		gen: st.Generation, built: now, nodes: make(map[int64]*snapNode, len(nodes)), byUser: map[int64][]int64{},
 		sharedIn: map[int64][]int64{}, sharedTo: map[int64][]int64{}, keys: make(map[key.NodePublic]int64, len(nodes)),
 		policies: map[int64]*acl.Policy{},
-	}
-	rules, err := s.db.ListRules(ctx, 0)
-	if err != nil {
-		return nil, err
 	}
 	byAccount := map[int64][]acl.Rule{}
 	for _, r := range rules {
@@ -276,6 +270,23 @@ var peersPlaceholder = []byte(`"Peers":[]`)
 // BuildMapJSON is json.Marshal(BuildMap(ctx, id)), assembled from peer
 // encodings cached in the snapshot instead of encoding every peer again.
 func (s *Server) BuildMapJSON(ctx context.Context, id int64) ([]byte, error) {
+	m, err := s.encodeMap(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return m.full(), nil
+}
+
+// mapEnc is an encoded map in parts: the response with an empty peer list
+// at head[at:], and each peer's encoding, ordered by ID.
+type mapEnc struct {
+	head []byte
+	at   int
+	ids  []protocol.NodeID
+	encs [][]byte
+}
+
+func (s *Server) encodeMap(ctx context.Context, id int64) (*mapEnc, error) {
 	plan, err := s.planMap(ctx, id)
 	if err != nil {
 		return nil, err
@@ -290,24 +301,90 @@ func (s *Server) BuildMapJSON(ctx context.Context, id int64) ([]byte, error) {
 	if at < 0 {
 		return nil, fmt.Errorf("control: map encoding has no peer list")
 	}
-	size := len(head)
-	encs := make([][]byte, len(plan.peers))
+	m := &mapEnc{head: head, at: at, ids: make([]protocol.NodeID, len(plan.peers)), encs: make([][]byte, len(plan.peers))}
 	for i, p := range plan.peers {
-		encs[i] = p.peerJSON(plan.views[i])
-		size += len(encs[i]) + 1
+		m.ids[i] = p.proto.ID
+		m.encs[i] = p.peerJSON(plan.views[i])
+	}
+	return m, nil
+}
+
+// full assembles the complete map.
+func (m *mapEnc) full() []byte {
+	size := len(m.head)
+	for _, e := range m.encs {
+		size += len(e) + 1
 	}
 	out := make([]byte, 0, size)
-	out = append(out, head[:at]...)
-	out = append(out, `"Peers":[`...)
+	out = append(out, m.head[:m.at]...)
+	out = append(out, `"Peers":`...)
+	out = appendList(out, m.encs)
+	out = append(out, m.head[m.at+len(peersPlaceholder):]...)
+	return out
+}
+
+func appendList(out []byte, encs [][]byte) []byte {
+	out = append(out, '[')
 	for i, e := range encs {
 		if i > 0 {
 			out = append(out, ',')
 		}
 		out = append(out, e...)
 	}
-	out = append(out, ']')
-	out = append(out, head[at+len(peersPlaceholder):]...)
-	return out, nil
+	return append(out, ']')
+}
+
+// deltaState is what a map stream last sent, to send only what changed
+// (to clients of protocol.DeltaVersion or later).
+type deltaState struct {
+	head  []byte
+	peers map[protocol.NodeID][]byte
+}
+
+// next returns the message that brings the client from the last map to m:
+// the full map if anything but the peers changed (or nothing was sent yet),
+// otherwise a delta, or nil if nothing changed.
+func (d *deltaState) next(m *mapEnc) []byte {
+	cur := make(map[protocol.NodeID][]byte, len(m.ids))
+	for i, id := range m.ids {
+		cur[id] = m.encs[i]
+	}
+	defer func() { d.head, d.peers = m.head, cur }()
+	if d.peers == nil || !bytes.Equal(d.head, m.head) {
+		return m.full()
+	}
+	var changed [][]byte
+	for i, id := range m.ids {
+		if old, ok := d.peers[id]; !ok || !bytes.Equal(old, m.encs[i]) {
+			changed = append(changed, m.encs[i])
+		}
+	}
+	var removed []protocol.NodeID
+	for id := range d.peers {
+		if _, ok := cur[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	if len(changed) == 0 && len(removed) == 0 {
+		return nil
+	}
+	slices.Sort(removed)
+	out := []byte(`{"Delta":true`)
+	if len(changed) > 0 {
+		out = append(out, `,"PeersChanged":`...)
+		out = appendList(out, changed)
+	}
+	if len(removed) > 0 {
+		out = append(out, `,"PeersRemoved":[`...)
+		for i, id := range removed {
+			if i > 0 {
+				out = append(out, ',')
+			}
+			out = strconv.AppendInt(out, int64(id), 10)
+		}
+		out = append(out, ']')
+	}
+	return append(out, '}')
 }
 
 // cutOffNotice explains why machine n is cut off from the network at time

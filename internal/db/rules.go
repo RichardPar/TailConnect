@@ -19,7 +19,11 @@ type Rule struct {
 
 // ListRules lists access rules, of one account or all (userID 0).
 func (d *DB) ListRules(ctx context.Context, userID int64) ([]Rule, error) {
-	rows, err := d.sql.QueryContext(ctx, `
+	return listRules(ctx, d.sql, userID)
+}
+
+func listRules(ctx context.Context, q queryer, userID int64) ([]Rule, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT r.id, r.user_id, u.name, r.src, r.dst, r.ports, r.created_at
 		FROM acl_rules r JOIN users u ON u.id = r.user_id
 		WHERE ? = 0 OR r.user_id = ? ORDER BY r.id`, userID, userID)

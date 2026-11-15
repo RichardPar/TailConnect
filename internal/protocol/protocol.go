@@ -7,14 +7,22 @@
 package protocol
 
 import (
+	"cmp"
 	"net/netip"
+	"slices"
 	"time"
 
 	"tailconnect/internal/key"
 )
 
 // CurrentVersion is the protocol version spoken by this build.
-const CurrentVersion = 1
+//
+//	1  initial version
+//	2  map streams may send deltas (MapResponse.Delta)
+const CurrentVersion = 2
+
+// DeltaVersion is the first version whose clients understand delta maps.
+const DeltaVersion = 2
 
 // MagicDNSAddr is the in-tunnel resolver address every client serves, and
 // MagicDNSAddr6 its IPv6 equivalent (in the reserved part of the ULA range).
@@ -92,6 +100,38 @@ type MapResponse struct {
 	Peers  []Node
 	DNS    DNSConfig
 	Relays RelayMap
+
+	// Delta marks an update to the previous map on the same stream (sent
+	// only to clients of DeltaVersion or later): peers in PeersChanged were
+	// added or replaced, peers in PeersRemoved are gone, and every other
+	// field is unchanged and absent. The first map on a stream, and any map
+	// whose self, DNS, relays or notice change, is a full map.
+	Delta        bool     `json:",omitempty"`
+	PeersChanged []Node   `json:",omitempty"`
+	PeersRemoved []NodeID `json:",omitempty"`
+}
+
+// ApplyDelta returns the full map that delta d makes of the previous map
+// prev. Peers stay ordered by ID, as in full maps.
+func ApplyDelta(prev *MapResponse, d *MapResponse) *MapResponse {
+	out := *prev
+	gone := make(map[NodeID]bool, len(d.PeersRemoved)+len(d.PeersChanged))
+	for _, id := range d.PeersRemoved {
+		gone[id] = true
+	}
+	for _, n := range d.PeersChanged {
+		gone[n.ID] = true
+	}
+	peers := make([]Node, 0, len(prev.Peers)+len(d.PeersChanged))
+	for _, n := range prev.Peers {
+		if !gone[n.ID] {
+			peers = append(peers, n)
+		}
+	}
+	peers = append(peers, d.PeersChanged...)
+	slices.SortStableFunc(peers, func(a, b Node) int { return cmp.Compare(a.ID, b.ID) })
+	out.Peers = peers
+	return &out
 }
 
 // Node describes one device in the network as seen by a client.
