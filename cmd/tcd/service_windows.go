@@ -9,20 +9,18 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
-	"golang.org/x/sys/windows/svc/mgr"
 	"golang.zx2c4.com/wireguard/tun"
-
-	"tailconnect/internal/engine"
 )
 
 const serviceName = "TailConnect"
 
 // defaultTUN is the Wintun adapter name.
 const defaultTUN = "TailConnect"
+
+const dnsModeHelp = `how to point the host's DNS at MagicDNS: auto (NRPT rules: MagicDNS names only) or off`
 
 // adapterGUID gives the Wintun adapter the same identity every time, so
 // Windows keeps one network entry for it rather than adding "TailConnect 2",
@@ -43,9 +41,13 @@ func defaultStateDir() string {
 }
 
 const platformUsage = `
-Windows service:
-  tcd install [FLAGS]   install and start the TailConnect service (runs tcd FLAGS)
-  tcd uninstall         stop and remove the service
+Windows service (from an Administrator command prompt):
+  tcd install [FLAGS]   copy tcd.exe, tc.exe and wintun.dll from this folder to
+                        Program Files\TailConnect, add it to PATH, and install
+                        (or upgrade) and start the TailConnect service, which
+                        runs tcd FLAGS (default: the flags it had before)
+  tcd uninstall         stop and remove the service and the installed files
+                        (keys and settings stay in ProgramData\TailConnect)
 `
 
 // platformCommand runs `tcd install` and `tcd uninstall`.
@@ -70,68 +72,6 @@ func platformCommand(args []string) bool {
 		os.Exit(1)
 	}
 	return true
-}
-
-func installService(args []string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	m, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
-	defer m.Disconnect()
-	if s, err := m.OpenService(serviceName); err == nil {
-		s.Close()
-		return fmt.Errorf("service %s is already installed (tcd uninstall removes it)", serviceName)
-	}
-	s, err := m.CreateService(serviceName, exe, mgr.Config{
-		DisplayName: "TailConnect",
-		Description: "TailConnect mesh VPN client",
-		StartType:   mgr.StartAutomatic,
-	}, args...)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-	restart := mgr.RecoveryAction{Type: mgr.ServiceRestart, Delay: 5 * time.Second}
-	if err := s.SetRecoveryActions([]mgr.RecoveryAction{restart, restart, restart}, 24*60*60); err != nil {
-		fmt.Fprintln(os.Stderr, "tcd: warning: cannot set restart-on-failure:", err)
-	}
-	if err := s.Start(); err != nil {
-		return fmt.Errorf("installed, but starting failed: %w", err)
-	}
-	fmt.Printf("Installed and started the %s service (%s).\nLog: %s\n", serviceName, exe,
-		filepath.Join(defaultStateDir(), "tcd.log"))
-	return nil
-}
-
-func uninstallService() error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return err
-	}
-	defer m.Disconnect()
-	s, err := m.OpenService(serviceName)
-	if err != nil {
-		return fmt.Errorf("service %s is not installed", serviceName)
-	}
-	defer s.Close()
-	if st, err := s.Control(svc.Stop); err == nil {
-		for deadline := time.Now().Add(30 * time.Second); st.State != svc.Stopped && time.Now().Before(deadline); {
-			time.Sleep(300 * time.Millisecond)
-			if st, err = s.Query(); err != nil {
-				break
-			}
-		}
-	}
-	if err := s.Delete(); err != nil {
-		return err
-	}
-	engine.RemoveFirewallRules()
-	fmt.Printf("Removed the %s service.\n", serviceName)
-	return nil
 }
 
 func runningAsService() bool {

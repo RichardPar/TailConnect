@@ -1,4 +1,6 @@
-package engine
+// Package winnet has the Windows IP Helper and DNS calls missing from
+// golang.org/x/sys/windows, for the router and the DNS configurator.
+package winnet
 
 import (
 	"net/netip"
@@ -28,40 +30,40 @@ func errno(r uintptr) error {
 	return windows.Errno(r)
 }
 
-func initializeUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) {
+func InitializeUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) {
 	procInitializeUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(row)))
 }
 
-func createUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) error {
+func CreateUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) error {
 	r, _, _ := procCreateUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(row)))
 	return errno(r)
 }
 
-func deleteUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) error {
+func DeleteUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) error {
 	r, _, _ := procDeleteUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(row)))
 	return errno(r)
 }
 
-func initializeIpForwardEntry(row *windows.MibIpForwardRow2) {
+func InitializeIpForwardEntry(row *windows.MibIpForwardRow2) {
 	procInitializeIpForwardEntry.Call(uintptr(unsafe.Pointer(row)))
 }
 
-func createIpForwardEntry2(row *windows.MibIpForwardRow2) error {
+func CreateIpForwardEntry2(row *windows.MibIpForwardRow2) error {
 	r, _, _ := procCreateIpForwardEntry2.Call(uintptr(unsafe.Pointer(row)))
 	return errno(r)
 }
 
-func deleteIpForwardEntry2(row *windows.MibIpForwardRow2) error {
+func DeleteIpForwardEntry2(row *windows.MibIpForwardRow2) error {
 	r, _, _ := procDeleteIpForwardEntry2.Call(uintptr(unsafe.Pointer(row)))
 	return errno(r)
 }
 
-func setIpInterfaceEntry(row *windows.MibIpInterfaceRow) error {
+func SetIpInterfaceEntry(row *windows.MibIpInterfaceRow) error {
 	r, _, _ := procSetIpInterfaceEntry.Call(uintptr(unsafe.Pointer(row)))
 	return errno(r)
 }
 
-func interfaceAliasToLUID(alias string) (uint64, error) {
+func InterfaceAliasToLUID(alias string) (uint64, error) {
 	p, err := windows.UTF16PtrFromString(alias)
 	if err != nil {
 		return 0, err
@@ -74,7 +76,7 @@ func interfaceAliasToLUID(alias string) (uint64, error) {
 // SOCKADDR_INET conversions. RawSockaddrInet, RawSockaddrInet4 and
 // RawSockaddrInet6 share the union's 28-byte layout.
 
-func putSockaddr(sa *windows.RawSockaddrInet, a netip.Addr) {
+func PutSockaddr(sa *windows.RawSockaddrInet, a netip.Addr) {
 	*sa = windows.RawSockaddrInet{}
 	if a.Is4() {
 		s := (*windows.RawSockaddrInet4)(unsafe.Pointer(sa))
@@ -87,7 +89,7 @@ func putSockaddr(sa *windows.RawSockaddrInet, a netip.Addr) {
 	}
 }
 
-func sockaddrAddr(sa *windows.RawSockaddrInet) (netip.Addr, bool) {
+func SockaddrAddr(sa *windows.RawSockaddrInet) (netip.Addr, bool) {
 	switch sa.Family {
 	case windows.AF_INET:
 		return netip.AddrFrom4((*windows.RawSockaddrInet4)(unsafe.Pointer(sa)).Addr), true
@@ -95,4 +97,65 @@ func sockaddrAddr(sa *windows.RawSockaddrInet) (netip.Addr, bool) {
 		return netip.AddrFrom16((*windows.RawSockaddrInet6)(unsafe.Pointer(sa)).Addr), true
 	}
 	return netip.Addr{}, false
+}
+
+var (
+	procConvertInterfaceLuidToGuid = iphlpapi.NewProc("ConvertInterfaceLuidToGuid")
+	procSetInterfaceDnsSettings    = iphlpapi.NewProc("SetInterfaceDnsSettings")
+	dnsapi                         = windows.NewLazySystemDLL("dnsapi.dll")
+	procDnsFlushResolverCache      = dnsapi.NewProc("DnsFlushResolverCache")
+)
+
+// LUIDToGUID returns the interface GUID of an interface LUID.
+func LUIDToGUID(luid uint64) (windows.GUID, error) {
+	var g windows.GUID
+	r, _, _ := procConvertInterfaceLuidToGuid.Call(uintptr(unsafe.Pointer(&luid)), uintptr(unsafe.Pointer(&g)))
+	return g, errno(r)
+}
+
+// DNS_INTERFACE_SETTINGS flags.
+const (
+	DNSSettingIPv6                = 0x0001
+	DNSSettingNameServer          = 0x0002
+	DNSSettingSearchList          = 0x0004
+	DNSSettingRegistrationEnabled = 0x0008
+	DNSSettingDomain              = 0x0020
+)
+
+// DNSInterfaceSettings is DNS_INTERFACE_SETTINGS (version 1).
+type DNSInterfaceSettings struct {
+	Version             uint32
+	Flags               uint64
+	Domain              *uint16
+	NameServer          *uint16
+	SearchList          *uint16
+	RegistrationEnabled uint32
+	RegisterAdapterName uint32
+	EnableLLMNR         uint32
+	QueryAdapterName    uint32
+	ProfileNameServer   *uint16
+}
+
+// SetInterfaceDNSSettings sets the fields of s named by s.Flags on the
+// interface (Windows 10 2004 and later).
+func SetInterfaceDNSSettings(guid windows.GUID, s *DNSInterfaceSettings) error {
+	if err := procSetInterfaceDnsSettings.Find(); err != nil {
+		return err
+	}
+	s.Version = 1
+	r, _, _ := procSetInterfaceDnsSettings.Call(
+		uintptr(unsafe.Pointer(&guid)), uintptr(unsafe.Pointer(s)))
+	return errno(r)
+}
+
+// FlushResolverCache empties the DNS client's cache (ipconfig /flushdns).
+func FlushResolverCache() error {
+	if err := procDnsFlushResolverCache.Find(); err != nil {
+		return err
+	}
+	r, _, err := procDnsFlushResolverCache.Call()
+	if r == 0 { // BOOL: FALSE on failure
+		return err
+	}
+	return nil
 }

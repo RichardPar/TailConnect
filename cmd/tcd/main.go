@@ -39,7 +39,7 @@ func main() {
 	socket := flag.String("socket", localapi.DefaultSocket, "local API socket")
 	tunName := flag.String("tun", defaultTUN, `TUN interface name, or "userspace" for unprivileged in-process networking`)
 	port := flag.Uint("port", engine.DefaultPort, "WireGuard UDP port (0 = random)")
-	dnsMode := flag.String("dns", dns.ModeAuto, `how to point the host's DNS at MagicDNS: auto, systemd-resolved, file (rewrite resolv.conf) or off`)
+	dnsMode := flag.String("dns", dns.ModeAuto, dnsModeHelp)
 	resolvConf := flag.String("resolv-conf", "/etc/resolv.conf", "resolv.conf path (for -dns file)")
 	metricsListen := flag.String("metrics-listen", "", `serve metrics (Prometheus text format) at /metrics on this address, e.g. "127.0.0.1:7744" ("" = off)`)
 	verbose := flag.Bool("verbose", false, "verbose WireGuard logging")

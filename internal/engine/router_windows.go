@@ -11,6 +11,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"tailconnect/internal/winnet"
 )
 
 // Firewall rule names. tcd uninstall removes them (RemoveFirewallRules).
@@ -34,7 +36,7 @@ type windowsRouter struct {
 // NewOSRouter configures addresses and routes on the named (Wintun)
 // adapter through the IP Helper API.
 func NewOSRouter(ifname string, logf func(string, ...any)) (Router, error) {
-	luid, err := interfaceAliasToLUID(ifname)
+	luid, err := winnet.InterfaceAliasToLUID(ifname)
 	if err != nil {
 		return nil, fmt.Errorf("router: find %s: %w", ifname, err)
 	}
@@ -67,7 +69,7 @@ func (r *windowsRouter) setInterface(family uint16) error {
 	if family == windows.AF_INET {
 		row.SitePrefixLength = 0 // must be 0 for IPv4, or the call fails
 	}
-	return setIpInterfaceEntry(&row)
+	return winnet.SetIpInterfaceEntry(&row)
 }
 
 func (r *windowsRouter) Set(cfg RouterConfig) error {
@@ -89,7 +91,7 @@ func (r *windowsRouter) Set(cfg RouterConfig) error {
 		return fmt.Errorf("list addresses: %w", err)
 	}
 	for _, row := range have {
-		a, _ := sockaddrAddr((*windows.RawSockaddrInet)(unsafe.Pointer(&row.Address)))
+		a, _ := winnet.SockaddrAddr((*windows.RawSockaddrInet)(unsafe.Pointer(&row.Address)))
 		p := netip.PrefixFrom(a, int(row.OnLinkPrefixLength))
 		if a.IsLinkLocalUnicast() {
 			continue
@@ -98,18 +100,18 @@ func (r *windowsRouter) Set(cfg RouterConfig) error {
 			delete(want, p)
 			continue
 		}
-		if err := deleteUnicastIpAddressEntry(&row); err != nil {
+		if err := winnet.DeleteUnicastIpAddressEntry(&row); err != nil {
 			r.logf("router: remove stale address %s: %v", p, err)
 		}
 	}
 	for p := range want {
 		var row windows.MibUnicastIpAddressRow
-		initializeUnicastIpAddressEntry(&row)
+		winnet.InitializeUnicastIpAddressEntry(&row)
 		row.InterfaceLuid = r.luid
-		putSockaddr((*windows.RawSockaddrInet)(unsafe.Pointer(&row.Address)), p.Addr())
+		winnet.PutSockaddr((*windows.RawSockaddrInet)(unsafe.Pointer(&row.Address)), p.Addr())
 		row.OnLinkPrefixLength = uint8(p.Bits())
 		row.DadState = windows.IpDadStatePreferred // usable at once, no duplicate address detection
-		if err := createUnicastIpAddressEntry(&row); err != nil && !errors.Is(err, windows.ERROR_OBJECT_ALREADY_EXISTS) {
+		if err := winnet.CreateUnicastIpAddressEntry(&row); err != nil && !errors.Is(err, windows.ERROR_OBJECT_ALREADY_EXISTS) {
 			if p.Addr().Is6() {
 				r.logf("router: IPv6 unavailable (%v); continuing with IPv4 only", err)
 				r.v6Fail, has6 = true, false
@@ -137,24 +139,24 @@ func (r *windowsRouter) Set(cfg RouterConfig) error {
 			delete(wantR, p)
 			continue
 		}
-		if err := deleteIpForwardEntry2(&row); err != nil {
+		if err := winnet.DeleteIpForwardEntry2(&row); err != nil {
 			return fmt.Errorf("remove route %s: %w", p, err)
 		}
 	}
 	for p := range wantR {
 		var row windows.MibIpForwardRow2
-		initializeIpForwardEntry(&row)
+		winnet.InitializeIpForwardEntry(&row)
 		row.InterfaceLuid = r.luid
-		putSockaddr(&row.DestinationPrefix.Prefix, p.Addr())
+		winnet.PutSockaddr(&row.DestinationPrefix.Prefix, p.Addr())
 		row.DestinationPrefix.PrefixLength = uint8(p.Bits())
 		if p.Addr().Is4() { // on-link: next hop 0.0.0.0 or ::
-			putSockaddr(&row.NextHop, netip.IPv4Unspecified())
+			winnet.PutSockaddr(&row.NextHop, netip.IPv4Unspecified())
 		} else {
-			putSockaddr(&row.NextHop, netip.IPv6Unspecified())
+			winnet.PutSockaddr(&row.NextHop, netip.IPv6Unspecified())
 		}
 		row.Metric = 0
 		row.Protocol = windows.MIB_IPPROTO_NETMGMT
-		if err := createIpForwardEntry2(&row); err != nil && !errors.Is(err, windows.ERROR_OBJECT_ALREADY_EXISTS) {
+		if err := winnet.CreateIpForwardEntry2(&row); err != nil && !errors.Is(err, windows.ERROR_OBJECT_ALREADY_EXISTS) {
 			return fmt.Errorf("add route %s: %w", p, err)
 		}
 	}
@@ -223,7 +225,7 @@ func (r *windowsRouter) routes() ([]windows.MibIpForwardRow2, error) {
 }
 
 func routePrefix(row *windows.MibIpForwardRow2) (netip.Prefix, bool) {
-	a, ok := sockaddrAddr(&row.DestinationPrefix.Prefix)
+	a, ok := winnet.SockaddrAddr(&row.DestinationPrefix.Prefix)
 	return netip.PrefixFrom(a, int(row.DestinationPrefix.PrefixLength)), ok
 }
 

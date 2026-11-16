@@ -182,6 +182,8 @@ The client daemon. It runs as root, or with `CAP_NET_ADMIN`.
 | `-verbose` | `false` | Log WireGuard internals |
 | `-version` | | Print the version and exit |
 
+On Windows the defaults differ: `-state` `C:\ProgramData\TailConnect`, `-socket` `\\.\pipe\tailconnect`, `-tun` `TailConnect`, and `-dns` is `auto` (= `nrpt`) or `off`. `tcd install [FLAGS]` and `tcd uninstall` manage the Windows service ([details](windows.md#service-options)).
+
 ## tc
 
 | Command | Flags |
@@ -309,6 +311,9 @@ Restart the service after editing. Variables inside these files are **not** expa
 | `/etc/default/tc-control.pre-letsencrypt-*` | Settings backups made by `letsencrypt.sh` (`--restore` puts the newest back) |
 | `/etc/duckdns/duckdns.conf` | DuckDNS name and token, root only (`duckdns.sh`) |
 | `/usr/local/sbin/duckdns-update`, `/etc/systemd/system/duckdns.{service,timer}` | The DuckDNS updater and its 5-minute timer (`duckdns.sh`) |
+| `C:\Program Files\TailConnect\{tcd,tc}.exe`, `wintun.dll` | Windows programs (`tcd install`) |
+| `C:\ProgramData\TailConnect\state.json`, `tcd.log` | Windows device keys, registration and log; SYSTEM and Administrators only |
+| `\\.\pipe\tailconnect` | Windows `tc` ↔ `tcd` named pipe |
 
 ## Addresses
 

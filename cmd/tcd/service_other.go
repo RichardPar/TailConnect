@@ -12,6 +12,8 @@ import (
 
 const defaultTUN = "tc0"
 
+const dnsModeHelp = `how to point the host's DNS at MagicDNS: auto, systemd-resolved, file (rewrite resolv.conf) or off`
+
 func defaultStateDir() string { return "/var/lib/tailconnect" }
 
 const platformUsage = ""
