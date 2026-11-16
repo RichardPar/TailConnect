@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -20,10 +17,10 @@ type Server struct {
 
 func NewServer(b Backend, log *slog.Logger) *Server { return &Server{b: b, log: log} }
 
-type uidCtx struct{}
+type privCtx struct{}
 
-// Handler returns the API handler. Requests must carry the caller's UID in
-// their context (see Serve); without it, mutating calls are refused.
+// Handler returns the API handler. Requests must say in their context whether
+// the caller is privileged (see Serve); without it, mutating calls are refused.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /localapi/v1/status", func(w http.ResponseWriter, r *http.Request) {
@@ -56,35 +53,12 @@ func (s *Server) result(w http.ResponseWriter, err error) {
 
 func (s *Server) privileged(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		uid, ok := r.Context().Value(uidCtx{}).(int)
-		if !ok || (uid != 0 && uid != os.Geteuid()) {
-			writeError(w, http.StatusForbidden, "permission denied: run as root (e.g. sudo tc ...)")
+		if ok, _ := r.Context().Value(privCtx{}).(bool); !ok {
+			writeError(w, http.StatusForbidden, "permission denied: "+ElevateHint)
 			return
 		}
 		h(w, r)
 	}
-}
-
-// Listen creates the Unix socket at path (replacing a stale one). The socket
-// is world-accessible; privilege is checked per request via peer credentials.
-func Listen(path string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
-		c.Close()
-		return nil, fmt.Errorf("another tcd is already listening on %s", path)
-	}
-	_ = os.Remove(path)
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(path, 0o666); err != nil {
-		ln.Close()
-		return nil, err
-	}
-	return ln, nil
 }
 
 // Serve runs the API on ln until ctx ends.
@@ -93,8 +67,8 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
-			if uid, err := peerUID(c); err == nil {
-				return context.WithValue(ctx, uidCtx{}, uid)
+			if priv, err := peerPrivileged(c); err == nil {
+				return context.WithValue(ctx, privCtx{}, priv)
 			} else {
 				s.log.Warn("localapi: cannot read peer credentials", "err", err)
 			}
