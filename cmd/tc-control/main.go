@@ -69,7 +69,7 @@ Usage:
   tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expiration 24h]
   tc-control keys list [-user NAME] | revoke ID
   tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
-  tc-control nodes approve ID | expiry ID never|DURATION | tag ID TAG[,TAG...]
+  tc-control nodes approve ID | expiry ID never|DURATION|MONTHSmo|YYYY-MM-DD | tag ID TAG[,TAG...]
   tc-control nodes exit-node ID on|off
   tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
   tc-control relays create NAME | list | delete NAME   (tokens for standalone tc-relay servers)
@@ -1257,19 +1257,21 @@ func cmdNodes(args []string) error {
 		fmt.Printf("approved node %d\n", id)
 	case "expiry":
 		if fs.NArg() != 2 {
-			return usageError("usage: tc-control nodes expiry ID never|DURATION (e.g. 180d)")
+			return usageError("usage: tc-control nodes expiry ID never|DURATION|MONTHSmo|YYYY-MM-DD (e.g. 180d, 12mo, 2027-06-30)")
 		}
 		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 		if err != nil {
 			return usageError("bad node ID " + strconv.Quote(fs.Arg(0)))
 		}
-		d2, err := parseLongDuration(fs.Arg(1))
-		if err != nil {
-			return usageError(err.Error())
-		}
 		var at time.Time
-		if d2 > 0 {
-			at = time.Now().Add(d2)
+		if d2, err := parseLongDuration(fs.Arg(1)); err == nil {
+			if d2 > 0 {
+				at = time.Now().Add(d2)
+			}
+		} else if fs.Arg(1) == "default" {
+			return usageError("default isn't known here: give a duration (e.g. 180d), months (12mo) or a date")
+		} else if at, err = admin.NodeExpiry(fs.Arg(1), time.Now(), 0, time.Local); err != nil {
+			return usageError(err.Error())
 		}
 		if err := d.SetNodeExpiry(ctx, id, at); err != nil {
 			return err

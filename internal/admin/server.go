@@ -367,7 +367,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"machineKey": s.info.MachineKey, "baseDomain": s.info.BaseDomain, "controlURL": s.info.ControlURL, "tlsFingerprint": s.info.TLSFingerprint,
 		"version": s.info.Version, "nodes": len(nodes), "online": online, "signup": s.info.Signup,
-		"pendingMachines": pendingMachines,
+		"pendingMachines": pendingMachines, "keyExpiryDays": int(s.info.KeyExpiry / (24 * time.Hour)),
 	}
 	if p.user != nil {
 		incoming, err := s.db.ListShares(r.Context(), db.ShareFilter{RecipientID: p.user.ID})
@@ -686,8 +686,9 @@ func (s *Server) approveNode(w http.ResponseWriter, r *http.Request) {
 	s.writeNode(w, r, n.ID)
 }
 
-// setNodeExpiry sets a machine's key to never expire, or back to the
-// server's default lifetime from now.
+// setNodeExpiry sets when a machine's key expires: never, the server's
+// default lifetime from now, a number of months from now, or a date (see
+// NodeExpiry).
 func (s *Server) setNodeExpiry(w http.ResponseWriter, r *http.Request) {
 	n, ok := s.ownNode(w, r)
 	if !ok {
@@ -697,15 +698,9 @@ func (s *Server) setNodeExpiry(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	var at time.Time
-	switch req.Expiry {
-	case "never":
-	case "default":
-		if s.info.KeyExpiry > 0 {
-			at = s.now().Add(s.info.KeyExpiry)
-		}
-	default:
-		writeError(w, http.StatusBadRequest, `expiry must be "never" or "default"`)
+	at, err := NodeExpiry(req.Expiry, s.now(), s.info.KeyExpiry, time.Local)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if s.dbError(w, "set expiry", s.db.SetNodeExpiry(r.Context(), n.ID, at)) {

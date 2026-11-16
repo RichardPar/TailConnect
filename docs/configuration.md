@@ -66,7 +66,7 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 |---|---|---|
 | Name | Machines → Rename | `nodes rename ID NAME` |
 | Tags | Machines → Tags | `nodes tag ID TAG[,TAG…]` |
-| Key never expires, or normal lifetime | Machines → Never expire / Set expiry | `nodes expiry ID never\|DURATION` |
+| When a machine's key expires: 6, 12 or 24 months, the server default, a date, or never | Machines → Expiry | `nodes expiry ID never\|DURATION\|12mo\|YYYY-MM-DD` |
 | Approve | Machines → Approve | `nodes approve ID` |
 | Exit node (off by default; Linux only) | Machines → Exit node: off / on | `nodes exit-node ID on\|off` |
 | Remove | Machines → Remove | `nodes delete ID` |

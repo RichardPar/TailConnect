@@ -253,6 +253,26 @@
       </div>
     </section>
   </main>
+  <dialog id="expiry-dialog" class="dialog">
+    <form id="expiry-form" method="dialog">
+      <h2>Key expiry: <span id="expiry-name"></span></h2>
+      <p class="sub" id="expiry-current"></p>
+      <fieldset class="choices">
+        <label class="check"><input type="radio" name="expiry" value="6mo"> 6 months from now</label>
+        <label class="check"><input type="radio" name="expiry" value="12mo"> 12 months from now</label>
+        <label class="check"><input type="radio" name="expiry" value="24mo"> 24 months from now</label>
+        <label class="check"><input type="radio" name="expiry" value="default"> <span id="expiry-default">Server default</span></label>
+        <label class="check"><input type="radio" name="expiry" value="date"> On a date <input type="date" id="expiry-date"></label>
+        <label class="check"><input type="radio" name="expiry" value="never"> Never (for servers that must not drop off)</label>
+      </fieldset>
+      <p class="sub">When the key expires, the machine is cut off until it re-authenticates with <code>sudo tc up --authkey KEY</code>.</p>
+      <p class="error" id="expiry-error"></p>
+      <div class="dialog-buttons">
+        <button type="button" class="ghost" id="expiry-cancel">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </div>
 </body>

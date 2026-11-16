@@ -79,7 +79,7 @@ The machines of your account. An operator sees every account's machines, with an
 | Button | What it does |
 |---|---|
 | **Approve** | Lets a machine that's waiting for approval join (see [My account](#my-account)). The tab shows how many are waiting. |
-| **Never expire** / **Set expiry** | Lets the machine's key never expire, for example for servers that must not drop off; or gives it the server's normal key lifetime from now (`-key-expiry`, 180 days by default). |
+| **Expiry** | Chooses when the machine's key expires: 6, 12 or 24 months from now, the server's default lifetime from now (`-key-expiry`, 180 days by default), the end of a chosen date, or never (for servers that must not drop off). An expired machine comes back at once when given a later expiry. |
 | **Tags** | Sets the machine's tags, separated by commas (for example `server, db`), for [access rules](#access-rules). |
 | **Exit node: off** / **Exit node: on** | Lets the machines in its account send their internet traffic through this machine, or stops it. Off for every machine until turned on; Linux machines only. Each machine then chooses whether to use it with `tc up --exit-node NAME` (see [Exit nodes](usage.md#exit-nodes)). |
 | **Rename** | Changes its MagicDNS name. |

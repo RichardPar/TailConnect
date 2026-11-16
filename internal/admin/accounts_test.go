@@ -373,6 +373,22 @@ func TestLifecycleAPI(t *testing.T) {
 	if d := time.Until(exp); d < 179*24*time.Hour || d > 181*24*time.Hour {
 		t.Fatalf("default expiry %v away, want ~180 days", d)
 	}
+	// Months from now, and a date.
+	code, m, _ = f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/expiry", id), map[string]string{"expiry": "24mo"}, nil)
+	exp, _ = time.Parse(time.RFC3339, fmt.Sprint(m["keyExpiry"]))
+	if want := time.Now().AddDate(2, 0, 0); code != 200 || exp.Sub(want).Abs() > time.Hour {
+		t.Fatalf("expiry 24mo: %d %v", code, m)
+	}
+	at := time.Now().AddDate(0, 3, 0).UTC().Truncate(time.Second)
+	code, m, _ = f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/expiry", id), map[string]string{"expiry": at.Format(time.RFC3339)}, nil)
+	if exp, _ = time.Parse(time.RFC3339, fmt.Sprint(m["keyExpiry"])); code != 200 || !exp.Equal(at) {
+		t.Fatalf("expiry date: %d %v", code, m)
+	}
+	for _, bad := range []string{"yesterday", "0mo", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)} {
+		if code, _, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/expiry", id), map[string]string{"expiry": bad}, nil); code != 400 {
+			t.Fatalf("expiry %q: %d", bad, code)
+		}
+	}
 	if code, _, _ := f.do(globex, "POST", fmt.Sprintf("/api/v1/nodes/%d/expiry", id), map[string]string{"expiry": "never"}, nil); code != 404 {
 		t.Fatalf("expiry by another account: %d", code)
 	}

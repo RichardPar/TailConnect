@@ -58,7 +58,7 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 | Give an account its own MagicDNS domain | My account → MagicDNS domain (own), Accounts → Domain (operators) | `sudo tc-control users domain bob bob.internal` |
 | Make a machine an exit node | Machines → **Exit node: off** (Linux machines) | `sudo tc-control nodes exit-node 4 on` |
 | Send a machine's internet traffic through an exit node | | on the machine: `sudo tc up --exit-node NAME` (`--exit-node ""` stops) |
-| Keep a server from ever expiring | Machines → Never expire | `sudo tc-control nodes expiry 4 never` |
+| Keep a server from ever expiring, or choose when a machine expires | Machines → Expiry: 6, 12 or 24 months, the server default, a date, or never | `sudo tc-control nodes expiry 4 never` (or `12mo`, `2027-06-30`, `90d`) |
 | Renew an expired machine | | on the machine: `sudo tc up --authkey tc-auth-…` |
 | Stop a leaked key | Auth keys → Revoke | `sudo tc-control keys revoke 7` |
 

@@ -185,6 +185,7 @@ function stat(value, label, small) {
 
 async function loadStatus() {
   const s = await api("GET", "/api/v1/status");
+  if (typeof s.keyExpiryDays === "number") keyExpiryDays = s.keyExpiryDays;
   const stats = [stat(`${s.online} / ${s.nodes}`, "machines online")];
   if (me.operator) {
     stats.push(stat(s.users, "accounts"));
@@ -234,7 +235,7 @@ async function loadNodes() {
         el("td", {}, keyCell(n)),
         el("td", { class: "actions" },
           !n.approved && el("button", { class: "primary small", onclick: () => approveNode(n) }, "Approve"),
-          el("button", { class: "ghost", onclick: () => toggleExpiry(n) }, n.keyExpiry ? "Never expire" : "Set expiry"),
+          el("button", { class: "ghost", onclick: () => editExpiry(n) }, "Expiry"),
           el("button", { class: "ghost", onclick: () => editTags(n) }, "Tags"),
           (n.exitNode || n.os === "linux") && el("button", {
             class: "ghost", onclick: () => toggleExitNode(n),
@@ -307,17 +308,52 @@ async function approveNode(n) {
   } catch (e) { handleErr(e); }
 }
 
-async function toggleExpiry(n) {
-  const never = !!n.keyExpiry;
-  const q = never
-    ? `Let ${n.name}'s key never expire? Use this for servers that must not drop off.`
-    : `Give ${n.name} the server's normal key lifetime, starting now? It will need re-authenticating when it expires.`;
-  if (!confirm(q)) return;
+let keyExpiryDays = 180; // the server's default machine key lifetime (0 = never)
+let expiryNode = null; // the machine the expiry dialog is for
+
+// isoDate is a Date as YYYY-MM-DD in local time, for <input type=date>.
+const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+function editExpiry(n) {
+  expiryNode = n;
+  $("expiry-name").textContent = n.name;
+  $("expiry-current").textContent = n.expired ? "Expired " + fmtDate(n.keyExpiry)
+    : n.keyExpiry ? "Now expires " + fmtDate(n.keyExpiry) : "Now never expires";
+  $("expiry-default").textContent = keyExpiryDays > 0 ? `Server default (${keyExpiryDays} days from now)` : "Server default (never)";
+  const tomorrow = new Date(Date.now() + 86400000);
+  const date = $("expiry-date");
+  date.min = isoDate(tomorrow);
+  date.value = n.keyExpiry && !n.expired ? isoDate(new Date(n.keyExpiry)) : isoDate(new Date(Date.now() + 365 * 86400000));
+  const choice = n.keyExpiry ? (n.expired ? "12mo" : "date") : "never";
+  document.querySelector(`#expiry-form input[name=expiry][value="${choice}"]`).checked = true;
+  $("expiry-error").textContent = "";
+  $("expiry-dialog").showModal();
+}
+
+async function saveExpiry(ev) {
+  ev.preventDefault();
+  const n = expiryNode;
+  let expiry = document.querySelector("#expiry-form input[name=expiry]:checked").value;
+  if (expiry === "date") {
+    const v = $("expiry-date").value;
+    if (!v) { $("expiry-error").textContent = "Choose a date."; return; }
+    const [y, m, d] = v.split("-").map(Number);
+    expiry = new Date(y, m - 1, d, 23, 59, 59).toISOString(); // the end of that day, here
+  }
   try {
-    await api("POST", `/api/v1/nodes/${n.id}/expiry`, { expiry: never ? "never" : "default" });
-    toast(never ? `${n.name}'s key never expires` : `${n.name}'s key expiry set`);
+    const r = await api("POST", `/api/v1/nodes/${n.id}/expiry`, { expiry });
+    $("expiry-dialog").close();
+    toast(r.keyExpiry ? `${n.name}'s key expires ${fmtDate(r.keyExpiry)}` : `${n.name}'s key never expires`);
     refresh();
-  } catch (e) { handleErr(e); }
+  } catch (e) {
+    if (e instanceof AuthError) { $("expiry-dialog").close(); handleErr(e); }
+    else $("expiry-error").textContent = e.message;
+  }
+}
+$("expiry-form").addEventListener("submit", saveExpiry);
+$("expiry-cancel").addEventListener("click", () => $("expiry-dialog").close());
+for (const ev of ["focus", "input"]) {
+  $("expiry-date").addEventListener(ev, () => { document.querySelector('#expiry-form input[value="date"]').checked = true; });
 }
 
 async function toggleExitNode(n) {

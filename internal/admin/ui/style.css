@@ -131,6 +131,15 @@ td.actions button { margin-left: 4px; }
 h3 { font-size: 14px; margin: 8px 0 0; font-weight: 600; }
 .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; }
 
+/* Machine key expiry dialog. */
+dialog.dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); padding: 20px; width: min(440px, calc(100vw - 32px)); }
+dialog.dialog::backdrop { background: rgba(0, 0, 0, .35); }
+dialog.dialog h2 { margin-bottom: 4px; overflow-wrap: anywhere; }
+fieldset.choices { border: none; padding: 0; margin: 14px 0 10px; display: grid; gap: 8px; }
+fieldset.choices label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+fieldset.choices input[type="date"] { padding: 3px 8px; }
+.dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+
 /* Traffic: the cell is a button that opens the per-peer breakdown. */
 button.traffic-link { background: none; border: none; padding: 0; text-align: left; color: inherit; cursor: pointer; font: inherit; white-space: nowrap; }
 button.traffic-link:hover div:first-child { text-decoration: underline; }
