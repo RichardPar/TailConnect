@@ -25,18 +25,29 @@ Not yet on Windows: using or being an [exit node](usage.md#exit-nodes).
 
 ## Get the package
 
-Build the zip on any machine with Go (no Windows needed):
+Each release has, for `amd64` (most PCs) and `arm64` (Arm PCs such as the Surface Pro X):
+
+- `tailconnect-VERSION-windows-ARCH-setup.exe`: the **one-click installer**.
+- `tailconnect-VERSION-windows-ARCH.zip`: the same programs as a zip, for installing from the command line or a script.
+
+Or build them on any machine with Go (no Windows needed):
 
 ```bash
-make dist-windows                 # dist/tailconnect-VERSION-windows-amd64.zip and -arm64.zip
+make dist-windows                 # zips and installers for amd64 and arm64, in dist/
 make dist-windows ARCHES=amd64    # just one
 ```
 
-The zip contains `tcd.exe`, `tc.exe`, `TailConnect.exe` (the app), `wintun.dll` (the [Wintun](https://www.wintun.net) network driver by WireGuard LLC, with its license), a `README.txt` and these docs. The first build downloads Wintun from wintun.net once, checks it against a pinned SHA-256 hash, and keeps it in `dist/.cache/`.
+Both contain `tcd.exe`, `tc.exe`, `TailConnect.exe` (the app), `wintun.dll` (the [Wintun](https://www.wintun.net) network driver by WireGuard LLC, with its license), a `README.txt` and these docs. The installer is the app with the zip embedded (`go build -tags setup ./cmd/tc-gui`). The first build downloads Wintun from wintun.net once, checks it against a pinned SHA-256 hash, and keeps it in `dist/.cache/`.
 
-The programs are not code-signed, so Windows may warn about them when started from Explorer. Installing from a command prompt, as below, avoids that.
+The programs are not code-signed. When you open the installer, Windows SmartScreen may say **Windows protected your PC**: choose **More info**, then **Run anyway**.
 
 ## Install and join
+
+**With the installer**: double-click `tailconnect-VERSION-windows-amd64-setup.exe` and accept the Windows prompt (**Do you want to allow this app to make changes?**). It installs everything, starts the service and the app, and opens the login window: enter the server address (e.g. `https://tailconnect.example.com:8443`) and an auth key, then **Log in**. If the account requires approval of new machines, approve the PC in the portal (**Machines**) or with `sudo tc-control nodes approve ID`.
+
+Running a newer installer upgrades in place and keeps the PC logged in. TailConnect appears in **Settings → Apps → Installed apps**, from where it can be uninstalled.
+
+**From the zip** (or for scripted installs):
 
 1. Copy the zip to the PC and unzip it (right-click → **Extract All**).
 2. Open a **Command Prompt as Administrator**: Start, type `cmd`, right-click **Command Prompt**, **Run as administrator**.
@@ -47,7 +58,7 @@ The programs are not code-signed, so Windows may warn about them when started fr
    tcd install
    ```
 
-   This copies the programs to `C:\Program Files\TailConnect`, adds that folder to the system PATH, installs and starts the **TailConnect** service, and adds the TailConnect app to the Start menu and to every user's sign-in. The service starts with Windows and restarts by itself if it fails.
+   This copies the programs to `C:\Program Files\TailConnect`, adds that folder to the system PATH, installs and starts the **TailConnect** service, and adds the TailConnect app to the Start menu, to every user's sign-in, and to **Settings → Apps**. The service starts with Windows and restarts by itself if it fails.
 
 4. Join: in the TailConnect app (its icon is in the notification area by the clock; if not, start it from the Start menu), choose **Log in…**, confirm the Windows prompt, and enter the server address and auth key. Or, in a **new** Administrator Command Prompt (so it sees the new PATH):
 
@@ -55,7 +66,7 @@ The programs are not code-signed, so Windows may warn about them when started fr
    tc up --server https://tailconnect.example.com:8443 --authkey tc-auth-...
    ```
 
-   For a server with a self-signed certificate, add `--tls-fingerprint sha256:...` ([details](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed)). If the account requires approval of new machines, approve it in the portal (**Machines**) or with `sudo tc-control nodes approve ID`.
+   For a server with a self-signed certificate, add `--tls-fingerprint sha256:...` ([details](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed)), or fill in **Certificate** in the login window.
 
 ```text
 C:\> tc status
@@ -90,17 +101,17 @@ The app runs for each signed-in user and shows the connection by the clock: a te
 
 ## Upgrade
 
-Unzip the new version and run `tcd install` from it in an Administrator Command Prompt. It closes the app, stops the service, replaces the files in Program Files, keeps the service's options, and starts both again. The machine stays logged in.
+Run the new version's installer, or unzip the new version and run `tcd install` from it in an Administrator Command Prompt. Either way it closes the app, stops the service, replaces the files in Program Files, keeps the service's options, and starts both again. The machine stays logged in.
 
 ## Uninstall
 
-In an Administrator Command Prompt:
+In **Settings → Apps → Installed apps**, find **TailConnect**, choose **Uninstall**, and accept the prompts. Or, in an Administrator Command Prompt:
 
 ```bat
 tcd uninstall
 ```
 
-This closes the app and stops and removes the service, the adapter, the firewall and DNS rules, the PATH entry, the Start menu and sign-in entries, and the files in `C:\Program Files\TailConnect` (`tcd.exe` itself, which is running the uninstall, goes at the next restart). The machine's keys and settings stay in `C:\ProgramData\TailConnect`, so a later install rejoins as the same machine. Delete that folder to make the PC forget the network; to remove the machine from the network as well, run `tc logout` before uninstalling, or delete it in the portal.
+Either way, this closes the app and stops and removes the service, the adapter, the firewall and DNS rules, the PATH entry, the Start menu, sign-in and Apps entries, and the files in `C:\Program Files\TailConnect` (`tcd.exe` itself, which is running the uninstall, goes at the next restart). The machine's keys and settings stay in `C:\ProgramData\TailConnect`, so a later install rejoins as the same machine. Delete that folder to make the PC forget the network; to remove the machine from the network as well, run `tc logout` before uninstalling, or delete it in the portal.
 
 ## Service options
 

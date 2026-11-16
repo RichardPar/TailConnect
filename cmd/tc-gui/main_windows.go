@@ -6,6 +6,10 @@
 //	TailConnect.exe           the tray app (one per signed-in user)
 //	TailConnect.exe -login    the login window (started elevated by the tray app)
 //	TailConnect.exe -logout   confirm, then log out (likewise)
+//	TailConnect.exe -uninstall  confirm, then uninstall (Settings → Apps runs this)
+//
+// Built with -tags setup it is instead the one-click installer
+// (TailConnect-Setup-VERSION-ARCH.exe); see setup_windows.go.
 package main
 
 import (
@@ -55,6 +59,7 @@ func main() {
 	runtime.LockOSThread() // all windows live on this thread
 	login := flag.Bool("login", false, "show the login window")
 	logout := flag.Bool("logout", false, "log out after asking")
+	uninstall := flag.Bool("uninstall", false, "uninstall TailConnect after asking")
 	flag.Parse()
 
 	if pSetProcessDpiAwarenessContext.Find() == nil {
@@ -69,10 +74,14 @@ func main() {
 
 	c := localapi.NewClient(localapi.DefaultSocket)
 	switch {
+	case len(setupPayload) > 0:
+		runSetup(c)
 	case *login:
 		runLogin(c)
 	case *logout:
 		runLogout(c, 0)
+	case *uninstall:
+		runUninstall()
 	default:
 		runTray(c)
 	}

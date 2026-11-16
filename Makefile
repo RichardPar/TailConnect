@@ -64,7 +64,7 @@ $(WINTUN_ZIP):
 	echo "$(WINTUN_SHA256)  $@.tmp" | sha256sum -c --quiet
 	mv $@.tmp $@
 
-dist-windows: $(WINTUN_ZIP) ## dist/tailconnect-VERSION-windows-ARCH.zip (client) for each of ARCHES
+dist-windows: $(WINTUN_ZIP) ## dist/tailconnect-VERSION-windows-ARCH.zip and -setup.exe (one-click installer) for each of ARCHES
 	@for arch in $(ARCHES); do \
 		name=tailconnect-$(VERSION)-windows-$$arch; \
 		d=dist/$$name; \
@@ -80,6 +80,10 @@ dist-windows: $(WINTUN_ZIP) ## dist/tailconnect-VERSION-windows-ARCH.zip (client
 		rm -f dist/$$name.zip; (cd dist && zip -qr $$name.zip $$name) || exit 1; \
 		rm -r $$d; \
 		echo "dist/$$name.zip"; \
+		cp dist/$$name.zip cmd/tc-gui/setup-payload.zip; \
+		CGO_ENABLED=0 GOOS=windows GOARCH=$$arch go build -tags setup $(GOFLAGS) -ldflags "$(LDFLAGS) -H windowsgui" \
+			-o dist/$$name-setup.exe ./cmd/tc-gui; rc=$$?; rm -f cmd/tc-gui/setup-payload.zip; [ $$rc = 0 ] || exit 1; \
+		echo "dist/$$name-setup.exe"; \
 	done
 
 install-server: build
