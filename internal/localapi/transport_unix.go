@@ -47,11 +47,14 @@ func Listen(path string) (net.Listener, error) {
 	return ln, nil
 }
 
-// peerPrivileged reports whether the caller is root or the daemon's own user.
-func peerPrivileged(c net.Conn) (bool, error) {
+// peerAccess gives root and the daemon's own user full access, others none.
+func peerAccess(c net.Conn) (Access, error) {
 	uid, err := peerUID(c)
 	if err != nil {
-		return false, err
+		return AccessNone, err
 	}
-	return uid == 0 || uid == os.Geteuid(), nil
+	if uid == 0 || uid == os.Geteuid() {
+		return AccessAdmin, nil
+	}
+	return AccessNone, nil
 }

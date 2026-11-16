@@ -72,6 +72,7 @@ dist-windows: $(WINTUN_ZIP) ## dist/tailconnect-VERSION-windows-ARCH.zip (client
 		for c in tcd tc; do \
 			CGO_ENABLED=0 GOOS=windows GOARCH=$$arch go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$d/$$c.exe ./cmd/$$c || exit 1; \
 		done; \
+		CGO_ENABLED=0 GOOS=windows GOARCH=$$arch go build $(GOFLAGS) -ldflags "$(LDFLAGS) -H windowsgui" -o $$d/TailConnect.exe ./cmd/tc-gui || exit 1; \
 		unzip -p $(WINTUN_ZIP) wintun/bin/$$arch/wintun.dll > $$d/wintun.dll || exit 1; \
 		unzip -p $(WINTUN_ZIP) wintun/LICENSE.txt > $$d/LICENSE-wintun.txt; \
 		sed 's/$$/\r/' packaging/windows/README.txt > $$d/README.txt; \

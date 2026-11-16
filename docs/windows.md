@@ -1,10 +1,11 @@
 # Windows
 
-The Windows client puts a PC on your network like any other device: it gets a `100.64.x.y` address and a name, reaches your machines directly or through the relay, and resolves MagicDNS names in every program. It runs as a Windows service (`tcd`), controlled with the `tc` command.
+The Windows client puts a PC on your network like any other device: it gets a `100.64.x.y` address and a name, reaches your machines directly or through the relay, and resolves MagicDNS names in every program. It runs as a Windows service (`tcd`), controlled from the **TailConnect app** in the notification area or with the `tc` command.
 
 - [Requirements](#requirements)
 - [Get the package](#get-the-package)
 - [Install and join](#install-and-join)
+- [The TailConnect app](#the-tailconnect-app)
 - [Using it](#using-it)
 - [Upgrade](#upgrade)
 - [Uninstall](#uninstall)
@@ -17,10 +18,10 @@ The Windows client puts a PC on your network like any other device: it gets a `1
 ## Requirements
 
 - Windows 10 version 2004 or later, or Windows 11, 64-bit (Intel/AMD `amd64`, or Arm `arm64`).
-- An Administrator account, to install the service and to run `tc up`, `tc down` and `tc logout`.
+- An Administrator account, to install, and to log in or out (connecting and disconnecting are open to every signed-in user).
 - A TailConnect server the PC can reach, and an auth key for the account it joins (`sudo tc-control keys create -user NAME`, or **Auth keys → Generate key** in the portal).
 
-Not yet on Windows: using or being an [exit node](usage.md#exit-nodes), and a graphical app.
+Not yet on Windows: using or being an [exit node](usage.md#exit-nodes).
 
 ## Get the package
 
@@ -31,7 +32,7 @@ make dist-windows                 # dist/tailconnect-VERSION-windows-amd64.zip a
 make dist-windows ARCHES=amd64    # just one
 ```
 
-The zip contains `tcd.exe`, `tc.exe`, `wintun.dll` (the [Wintun](https://www.wintun.net) network driver by WireGuard LLC, with its license), a `README.txt` and these docs. The first build downloads Wintun from wintun.net once, checks it against a pinned SHA-256 hash, and keeps it in `dist/.cache/`.
+The zip contains `tcd.exe`, `tc.exe`, `TailConnect.exe` (the app), `wintun.dll` (the [Wintun](https://www.wintun.net) network driver by WireGuard LLC, with its license), a `README.txt` and these docs. The first build downloads Wintun from wintun.net once, checks it against a pinned SHA-256 hash, and keeps it in `dist/.cache/`.
 
 The programs are not code-signed, so Windows may warn about them when started from Explorer. Installing from a command prompt, as below, avoids that.
 
@@ -46,9 +47,9 @@ The programs are not code-signed, so Windows may warn about them when started fr
    tcd install
    ```
 
-   This copies `tcd.exe`, `tc.exe` and `wintun.dll` to `C:\Program Files\TailConnect`, adds that folder to the system PATH, and installs and starts the **TailConnect** service. The service starts with Windows and restarts by itself if it fails.
+   This copies the programs to `C:\Program Files\TailConnect`, adds that folder to the system PATH, installs and starts the **TailConnect** service, and adds the TailConnect app to the Start menu and to every user's sign-in. The service starts with Windows and restarts by itself if it fails.
 
-4. Open a **new** Administrator Command Prompt (so it sees the new PATH) and join:
+4. Join: in the TailConnect app (its icon is in the notification area by the clock; if not, start it from the Start menu), choose **Log in…**, confirm the Windows prompt, and enter the server address and auth key. Or, in a **new** Administrator Command Prompt (so it sees the new PATH):
 
    ```bat
    tc up --server https://tailconnect.example.com:8443 --authkey tc-auth-...
@@ -65,6 +66,14 @@ MagicDNS: richard.home.internal (nrpt, only .home.internal names)
 100.64.0.5   jellyfin      richard   linux     active; direct 192.168.10.112:41641 (12.0ms)
 ```
 
+## The TailConnect app
+
+The app runs for each signed-in user and shows the connection by the clock: a teal icon when connected, grey when disconnected or not logged in, amber when something needs attention (the machine awaits approval, its key expired, the service isn't running), with a notification when that starts.
+
+- **Click** the icon for the TailConnect window: the state, this PC's name and address, the server and MagicDNS domain, **Connect**/**Disconnect**, **Log in…** (or **Change server or account…**), **Log out…**, and the network's machines with their address, OS, account and connection (direct with latency, or via relay). Double-click a machine to copy its address; right-click to copy its IPv4 or IPv6 address or name. Closing the window keeps the app running.
+- **Right-click** the icon for a menu: the state, this PC's address (click to copy), Connect or Disconnect, **Copy address of** each machine (ticked when active), the window, logging in and out, and **Exit** (closes the app, not the connection).
+- **Connect** and **Disconnect** work for every signed-in user. **Log in…** and **Log out…** change this PC's network, so they ask for an Administrator (the Windows UAC prompt) and then open in an elevated copy of the app. Logging in asks for the server address, an auth key, the PC's name, and the certificate fingerprint for a server with a self-signed certificate; already logged in, leave the key empty to change only the name, or give a key to re-register.
+
 ## Using it
 
 `tc` works as on Linux ([reference](usage.md#the-tc-client)), from any Command Prompt or PowerShell window:
@@ -72,7 +81,8 @@ MagicDNS: richard.home.internal (nrpt, only .home.internal names)
 | Command | Who can run it |
 |---|---|
 | `tc status`, `tc status --json`, `tc ip PEER`, `tc version` | Any user |
-| `tc up ...`, `tc down`, `tc logout` | An Administrator prompt only; others get `permission denied: run tc from an Administrator command prompt` |
+| `tc up` (reconnect, no options), `tc down` | Any user signed in at the PC (or over Remote Desktop), as in the app |
+| `tc up --server/--authkey/--hostname/...`, `tc logout` | An Administrator prompt only; others get `permission denied: this needs an Administrator: run tc from an Administrator command prompt` |
 
 - **Names**: `ping laptop`, `ssh user@jellyfin`, `\\nas.richard.home.internal\share`, and so on, in any program. Only MagicDNS names (and reverse lookups of tunnel addresses) go to MagicDNS; every other name uses your normal DNS.
 - **Reaching this PC**: other machines on your network can reach services on it (Remote Desktop, file sharing, SSH, a web server) at its tunnel address or name, subject to your account's [access rules](usage.md#access-rules). tcd adds a firewall rule allowing traffic to the tunnel addresses; the program itself may still need to be allowed through Windows Firewall, as for any LAN connection.
@@ -80,7 +90,7 @@ MagicDNS: richard.home.internal (nrpt, only .home.internal names)
 
 ## Upgrade
 
-Unzip the new version and run `tcd install` from it in an Administrator Command Prompt. It stops the service, replaces the files in Program Files, keeps the service's options, and starts it again. The machine stays logged in.
+Unzip the new version and run `tcd install` from it in an Administrator Command Prompt. It closes the app, stops the service, replaces the files in Program Files, keeps the service's options, and starts both again. The machine stays logged in.
 
 ## Uninstall
 
@@ -90,7 +100,7 @@ In an Administrator Command Prompt:
 tcd uninstall
 ```
 
-This stops and removes the service, the adapter, the firewall and DNS rules, the PATH entry, and the files in `C:\Program Files\TailConnect` (`tcd.exe` itself, which is running the uninstall, goes at the next restart). The machine's keys and settings stay in `C:\ProgramData\TailConnect`, so a later install rejoins as the same machine. Delete that folder to make the PC forget the network; to remove the machine from the network as well, run `tc logout` before uninstalling, or delete it in the portal.
+This closes the app and stops and removes the service, the adapter, the firewall and DNS rules, the PATH entry, the Start menu and sign-in entries, and the files in `C:\Program Files\TailConnect` (`tcd.exe` itself, which is running the uninstall, goes at the next restart). The machine's keys and settings stay in `C:\ProgramData\TailConnect`, so a later install rejoins as the same machine. Delete that folder to make the PC forget the network; to remove the machine from the network as well, run `tc logout` before uninstalling, or delete it in the portal.
 
 ## Service options
 
@@ -121,7 +131,8 @@ Running `tcd install` again without flags keeps the current ones; with flags, it
 | Addresses and routes | Set through the IP Helper API: the node's `/32` and `/128` addresses, a route per peer, MTU 1280, interface metric 5. tcd only removes routes it added. |
 | DNS | [Name Resolution Policy Table](https://learn.microsoft.com/windows-server/networking/dns/deploy/nrpt/nrpt-top) rules in the registry send the account's domains and the tunnel's reverse zones to `100.100.100.100`; the adapter gets the account's domain as its DNS suffix and search list, so short names work. If the server sets upstream DNS servers, one rule for `.` sends all names to MagicDNS. |
 | Firewall | Two rules, both for all network types: *TailConnect (WireGuard)* allows inbound UDP to `tcd.exe` (direct connections); *TailConnect (tunnel)* allows inbound traffic to the node's tunnel addresses. Windows' strong host model drops packets for those addresses that arrive on other adapters, and tcd's packet filter applies the account's access rules. |
-| Local API | `tc` talks to the service over the named pipe `\\.\pipe\tailconnect`. Any signed-in user can connect; changes need a caller running as SYSTEM, as an elevated Administrator, or as the service's own user. `tc` only trusts a pipe created by SYSTEM or Administrators, so another user's program can't pose as the service to collect an auth key. |
+| Local API | `tc` and the app talk to the service over the named pipe `\\.\pipe\tailconnect`, which other computers can't open. Any user can read the status; a process of a user signed in at the PC (interactive logon) can also connect and disconnect; logging in, changing settings and logging out need a caller running as SYSTEM, as an elevated Administrator, or as the service's own user. `tc` and the app only trust a pipe created by SYSTEM or Administrators, so another user's program can't pose as the service to collect an auth key. |
+| App | `TailConnect.exe`, started at sign-in (`HKLM\...\Run`), one per user. Win32 directly, no other runtime; `TailConnect.exe -login` and `-logout` are what it runs elevated. |
 | Files | Programs in `C:\Program Files\TailConnect`. Keys, registration and `tcd.log` (rotated at 10 MB to `tcd.log.1`) in `C:\ProgramData\TailConnect`, readable only by SYSTEM and Administrators. |
 
 DNS and firewall rules left behind by a crash are removed when the service starts again.
@@ -131,8 +142,9 @@ DNS and firewall rules left behind by a crash are removed when the service start
 | Symptom | What to check |
 |---|---|
 | `tc` is not recognised | Open a new Command Prompt after installing (the PATH change only reaches new windows), or run `"C:\Program Files\TailConnect\tc.exe"`. |
-| `cannot reach tcd at \\.\pipe\tailconnect` | The service isn't running: `sc query TailConnect`, then the log. Start it with `sc start TailConnect` or in `services.msc`. |
-| `permission denied` on `tc up`/`down`/`logout` | Use a Command Prompt started with **Run as administrator**. |
+| The app's icon is amber with "service not running", or `cannot reach tcd at \\.\pipe\tailconnect` | The service isn't running: `sc query TailConnect`, then the log. Start it with `sc start TailConnect` or in `services.msc`. |
+| `permission denied` on `tc up --authkey ...` or `tc logout` | Use a Command Prompt started with **Run as administrator**. In the app, accept the Windows prompt. |
+| No TailConnect icon by the clock | Start **TailConnect** from the Start menu. Windows may hide it under the **^** arrow; drag it out to keep it visible. |
 | `refusing to use \\.\pipe\tailconnect: it was not created by the TailConnect service` | Another program holds the pipe name. Stop it (or restart Windows) and start the service. |
 | Service won't start; log says `wintun.dll` missing or `create TUN` failed | Reinstall with `tcd install` from the unzipped folder, which contains `wintun.dll`. |
 | Peers show `relay` instead of `direct` | Another firewall or security suite may be blocking UDP to `tcd.exe` (port 41641). Windows Firewall is handled by tcd's rule (`netsh advfirewall firewall show rule name="TailConnect (WireGuard)"`). |

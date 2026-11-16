@@ -13,14 +13,16 @@ Install or upgrade
      cd %USERPROFILE%\Downloads\tailconnect-...-windows-amd64
      tcd install
 
-   This copies tcd.exe, tc.exe and wintun.dll to
-   C:\Program Files\TailConnect, adds that folder to PATH, and starts the
-   TailConnect service. It starts again with Windows.
+   This copies the programs to C:\Program Files\TailConnect, adds that
+   folder to PATH, starts the TailConnect service (it starts again with
+   Windows), and adds the TailConnect app to the Start menu and sign-in.
    Running "tcd install" from a newer version upgrades in place and keeps
    this machine's login.
 
-4. Open a NEW Administrator Command Prompt (so it sees the new PATH) and join
-   your network:
+4. Join your network: click the TailConnect icon by the clock (or start
+   TailConnect from the Start menu), choose "Log in...", accept the Windows
+   prompt, and enter the server address and auth key.
+   Or, in a NEW Administrator Command Prompt (so it sees the new PATH):
 
      tc up --server https://YOUR-SERVER:8443 --authkey tc-auth-...
 
@@ -29,9 +31,12 @@ Install or upgrade
 
 Use
 ---
+The TailConnect app (icon by the clock) shows the connection and the
+network's machines, and connects or disconnects. Or with the command line:
+
   tc status          peers, paths and MagicDNS
   tc ip PEER         a peer's tunnel address
-  tc down / tc up    disconnect / reconnect   (Administrator prompt)
+  tc down / tc up    disconnect / reconnect   (any signed-in user)
   tc logout          leave the network        (Administrator prompt)
 
 Names like "laptop" and "laptop.you.home.internal" work in any program;

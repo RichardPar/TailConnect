@@ -14,13 +14,16 @@ import (
 const DefaultSocket = `\\.\pipe\tailconnect`
 
 // ElevateHint says how to run a privileged command.
-const ElevateHint = "run tc from an Administrator command prompt"
+const ElevateHint = "this needs an Administrator: run tc from an Administrator command prompt"
 
 // SudoPrefix goes before example privileged commands.
 const SudoPrefix = ""
 
 // pipeSDDL lets SYSTEM and Administrators do anything with the pipe and any
-// signed-in user connect to it. Privilege is checked per request.
+// authenticated user connect to it; access is checked per request. (Users
+// signed in over SSH count as network logons, so they must not be denied
+// here. Other computers can't connect: namedpipe creates the pipe with
+// FILE_PIPE_REJECT_REMOTE_CLIENTS.)
 const pipeSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
 
 type handler interface{ Handle() windows.Handle }
@@ -75,51 +78,59 @@ func Listen(path string) (net.Listener, error) {
 	return ln, err
 }
 
-// peerPrivileged reports whether the process at the other end of the pipe
-// runs as SYSTEM, has the Administrators group enabled (an Administrator
-// prompt; not a UAC-filtered or "basic user" token, where the group is
-// deny-only), or runs as the daemon's own user.
-func peerPrivileged(c net.Conn) (bool, error) {
+// peerAccess gives full access to a process running as SYSTEM, with the
+// Administrators group enabled (an Administrator prompt; not a UAC-filtered
+// or "basic user" token, where the group is deny-only), or as the daemon's
+// own user; connect/disconnect to one of a signed-in (interactive) user;
+// nothing to others (services, network logons).
+func peerAccess(c net.Conn) (Access, error) {
 	h, ok := c.(handler)
 	if !ok {
-		return false, errors.New("not a named pipe")
+		return AccessNone, errors.New("not a named pipe")
 	}
 	var pid uint32
 	if err := windows.GetNamedPipeClientProcessId(h.Handle(), &pid); err != nil {
-		return false, err
+		return AccessNone, err
 	}
 	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		return false, err
+		return AccessNone, err
 	}
 	defer windows.CloseHandle(p)
 	var tok windows.Token
 	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY, &tok); err != nil {
-		return false, err
+		return AccessNone, err
 	}
 	defer tok.Close()
 	peer, err := tok.GetTokenUser()
 	if err != nil {
-		return false, err
+		return AccessNone, err
 	}
 	if peer.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
-		return true, nil
+		return AccessAdmin, nil
 	}
 	self, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return false, err
+		return AccessNone, err
 	}
 	if windows.EqualSid(peer.User.Sid, self.User.Sid) {
-		return true, nil
+		return AccessAdmin, nil
 	}
 	groups, err := tok.GetTokenGroups()
 	if err != nil {
-		return false, err
+		return AccessNone, err
 	}
+	enabled := func(g windows.SIDAndAttributes) bool {
+		return g.Attributes&windows.SE_GROUP_ENABLED != 0 && g.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0
+	}
+	a := AccessNone
 	for _, g := range groups.AllGroups() {
-		if g.Sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
-			return g.Attributes&windows.SE_GROUP_ENABLED != 0 && g.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0, nil
+		switch {
+		case g.Sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) && enabled(g):
+			return AccessAdmin, nil
+		case g.Sid.IsWellKnown(windows.WinInteractiveSid) && enabled(g):
+			a = AccessUser
 		}
 	}
-	return false, nil
+	return a, nil
 }

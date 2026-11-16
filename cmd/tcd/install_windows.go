@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,10 +17,18 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"tailconnect/internal/engine"
+	"tailconnect/internal/trayicon"
 )
 
 // installFiles are what `tcd install` copies into the install directory.
-var installFiles = []string{"tcd.exe", "tc.exe", "wintun.dll"}
+var installFiles = []string{"tcd.exe", "tc.exe", "TailConnect.exe", "wintun.dll"}
+
+// trayExe is the tray app; trayIcon (written by install) is its shortcut's icon.
+const (
+	trayExe  = "TailConnect.exe"
+	trayIcon = "TailConnect.ico"
+	runKey   = `SOFTWARE\Microsoft\Windows\CurrentVersion\Run`
+)
 
 // installDir is Program Files\TailConnect.
 func installDir() string {
@@ -62,6 +71,8 @@ func installService(args []string) error {
 			return err
 		}
 	}
+	// Running tray apps hold TailConnect.exe; they are started again below.
+	trayWasRunning := stopTrayApps()
 	// An uninstall without a restart since would delete the new files.
 	if err := cancelPendingDeletes(dst); err != nil {
 		fmt.Fprintln(os.Stderr, "tcd: warning: cannot cancel the pending removal of the old install:", err)
@@ -100,6 +111,9 @@ func installService(args []string) error {
 	if err := addToPath(dst); err != nil {
 		fmt.Fprintf(os.Stderr, "tcd: warning: cannot add %s to PATH: %v\n", dst, err)
 	}
+	if err := installTrayApp(dst); err != nil {
+		fmt.Fprintln(os.Stderr, "tcd: warning: tray app:", err)
+	}
 	if err := s.Start(); err != nil {
 		return fmt.Errorf("installed, but starting the service failed: %w", err)
 	}
@@ -107,11 +121,14 @@ func installService(args []string) error {
 	if upgrade {
 		verb = "Upgraded"
 	}
+	if !upgrade || trayWasRunning {
+		startTrayApp(filepath.Join(dst, trayExe))
+	}
 	fmt.Printf("%s and started the %s service (%s).\n", verb, serviceName, target)
 	fmt.Printf("Log: %s\n", filepath.Join(defaultStateDir(), "tcd.log"))
 	if !upgrade {
-		fmt.Println("If this machine hasn't joined yet, open a new Administrator command prompt")
-		fmt.Println("(so PATH is updated) and run: tc up --server URL --authkey KEY")
+		fmt.Println("The TailConnect app is in the Start menu and the notification area; log in from")
+		fmt.Println("there, or in a new Administrator command prompt: tc up --server URL --authkey KEY")
 	}
 	return nil
 }
@@ -134,6 +151,8 @@ func uninstallService() error {
 		return err
 	}
 	engine.RemoveFirewallRules()
+	stopTrayApps()
+	removeTrayApp()
 	dir := installDir()
 	if err := removeFromPath(dir); err != nil {
 		fmt.Fprintf(os.Stderr, "tcd: warning: cannot remove %s from PATH: %v\n", dir, err)
@@ -229,7 +248,7 @@ func copyFile(from, to string) error {
 // restart what can't be deleted now (the running tcd.exe, when uninstall
 // runs from there). It reports whether anything was scheduled.
 func removeInstallDir(dir string) (later bool) {
-	for _, f := range append(slices.Clone(installFiles), "") {
+	for _, f := range append(slices.Clone(installFiles), trayIcon, "") {
 		p := filepath.Join(dir, f)
 		if f == "" {
 			p = dir
@@ -355,4 +374,68 @@ func commandLine(exe string, args []string) string {
 		parts = append(parts, windows.EscapeArg(a))
 	}
 	return strings.Join(parts, " ")
+}
+
+// ---- the tray app ----
+
+// installTrayApp writes the app's icon, a Start menu shortcut, and starts
+// the app at every user's sign-in.
+func installTrayApp(dir string) error {
+	exe, ico := filepath.Join(dir, trayExe), filepath.Join(dir, trayIcon)
+	if err := os.WriteFile(ico, trayicon.ICO(trayicon.Connected, 16, 20, 24, 32, 40, 48, 64, 256), 0o644); err != nil {
+		return err
+	}
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, runKey, registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	if err := k.SetStringValue("TailConnect", windows.EscapeArg(exe)); err != nil {
+		return err
+	}
+	// A .lnk is a COM object; the Windows Script Host makes one without
+	// any code of ours for COM.
+	script := fmt.Sprintf(`$s = (New-Object -ComObject WScript.Shell).CreateShortcut(%s); `+
+		`$s.TargetPath = %s; $s.IconLocation = %s; $s.Description = 'TailConnect mesh VPN'; $s.Save()`,
+		psQuote(shortcutPath()), psQuote(exe), psQuote(ico+",0"))
+	if out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput(); err != nil {
+		return fmt.Errorf("Start menu shortcut: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func removeTrayApp() {
+	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, runKey, registry.SET_VALUE); err == nil {
+		_ = k.DeleteValue("TailConnect")
+		k.Close()
+	}
+	_ = os.Remove(shortcutPath())
+}
+
+// shortcutPath is the Start menu shortcut, for all users.
+func shortcutPath() string {
+	dir, err := windows.KnownFolderPath(windows.FOLDERID_CommonPrograms, 0)
+	if err != nil {
+		dir = filepath.Join(os.Getenv("ProgramData"), `Microsoft\Windows\Start Menu\Programs`)
+	}
+	return filepath.Join(dir, "TailConnect.lnk")
+}
+
+func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// stopTrayApps closes every user's tray app, reporting whether any ran.
+func stopTrayApps() bool {
+	out, _ := exec.Command("taskkill", "/F", "/IM", trayExe).CombinedOutput()
+	ran := strings.Contains(string(out), "SUCCESS")
+	if ran {
+		time.Sleep(500 * time.Millisecond) // let Windows release the file
+	}
+	return ran
+}
+
+// startTrayApp starts the app for the signed-in user. tcd install runs
+// elevated, and the app must not: Explorer starts it as the user, unelevated.
+// (Other signed-in users get it at their next sign-in.)
+func startTrayApp(exe string) {
+	_ = exec.Command("explorer.exe", exe).Start()
 }

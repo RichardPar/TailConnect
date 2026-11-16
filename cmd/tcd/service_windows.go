@@ -42,12 +42,13 @@ func defaultStateDir() string {
 
 const platformUsage = `
 Windows service (from an Administrator command prompt):
-  tcd install [FLAGS]   copy tcd.exe, tc.exe and wintun.dll from this folder to
-                        Program Files\TailConnect, add it to PATH, and install
-                        (or upgrade) and start the TailConnect service, which
-                        runs tcd FLAGS (default: the flags it had before)
-  tcd uninstall         stop and remove the service and the installed files
-                        (keys and settings stay in ProgramData\TailConnect)
+  tcd install [FLAGS]   copy tcd.exe, tc.exe, TailConnect.exe and wintun.dll from
+                        this folder to Program Files\TailConnect, add it to PATH,
+                        install (or upgrade) and start the TailConnect service,
+                        which runs tcd FLAGS (default: the flags it had before),
+                        and add the TailConnect app to the Start menu and sign-in
+  tcd uninstall         stop and remove the service, the app and the installed
+                        files (keys and settings stay in ProgramData\TailConnect)
 `
 
 // platformCommand runs `tcd install` and `tcd uninstall`.
