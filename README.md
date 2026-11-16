@@ -1,18 +1,14 @@
 # TailConnect
 
-A self-hosted mesh VPN built on WireGuard, for Linux, Windows and Android. One small coordination server hands out addresses and keys. Devices then talk to each other directly over WireGuard, even when both are behind NAT, and reach each other by name. One server can host many separate networks (tenants), which can share individual machines with each other.
+A self-hosted mesh VPN built on WireGuard. A small coordination server hands out addresses and keys; devices then connect to each other directly over WireGuard, through NAT where possible and via a relay where not, and find each other by name. One server can host several separate networks (accounts), which can share individual machines with each other.
 
-**Status:** the server, the Linux client and the Android app are complete:
-- encrypted control channel, WireGuard mesh, and NAT traversal with relay fallback;
-- MagicDNS;
-- multi-tenant accounts with one-way sharing, and access rules;
-- exit nodes;
-- machine approval and key expiry;
-- automatic HTTPS, and metrics.
+## Status
 
-Windows is next (see [Roadmap](#roadmap)).
+Supported platforms: Linux (server and client) and Android (client).
 
-**New here? Start with the [Quick start](QUICKSTART.md).**
+**Windows is not done yet.** The code compiles for Windows, but there is no working client: the Wintun device, Windows service and DNS (NRPT) integration are still to be written. See the [roadmap](#roadmap).
+
+To get started, see the [quick start](QUICKSTART.md).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/portal-machines-dark.png">
@@ -23,20 +19,20 @@ Windows is next (see [Roadmap](#roadmap)).
 
 ## Features
 
-- **One coordination server** (`tc-control`): a single static binary with an embedded SQLite database, a web portal and CLI, a relay and a STUN server. It runs happily on a Raspberry Pi.
-- **Accounts and tenants:** every account is its own private network. Sign-up can be off, by invite, with operator approval, or open. Accounts' machines never see each other.
-- **One-way sharing:** an account can share a single machine with another account. The other account's machines can then connect to it, but it can't connect back.
-- **Direct WireGuard paths** between devices, found by STUN and hole punching through NAT. When no direct path exists, traffic goes through the built-in relay, still end-to-end encrypted. Switching between the two takes about 3 seconds.
-- **MagicDNS:** every machine is reachable as `name.account.your-domain`, or just `name`. An account can choose its own domain instead (`laptop.acme.internal`). Split DNS through systemd-resolved, with a `resolv.conf` fallback.
-- **Exit nodes:** turn on a Linux machine as an exit node, and other machines in its account can send all their internet traffic through it (`tc up --exit-node NAME`). Off for every machine until turned on.
-- **Access rules** within an account: tag machines, then allow *from → to on ports* (for example, laptops may reach the servers on SSH only).
-- **Machine lifecycle:** keys that expire after 180 days (or never, per machine), optional approval of new machines, and automatic removal of ephemeral machines.
-- **Pre-auth keys** for joining devices: single-use or reusable, ephemeral or pre-approved, with an expiry and revocation.
-- **HTTPS built in:** automatic certificates from Let's Encrypt, or, on a LAN, a self-signed certificate that devices pin by fingerprint. No web server, proxy or certbot.
-- **Android app** for phones and tablets, with the same client inside.
-- **Standalone relays** near your machines, checked against the server; **metrics** for monitoring.
-- **Userspace mode** for containers and machines without root.
-- **Secure by default:** the control channel uses Noise IK, every request is tied to the device's machine key, passwords are hashed with argon2id, other secrets are stored only as hashes, and relays can't read traffic.
+- `tc-control`, the coordination server: one static binary with an embedded SQLite database, web portal, admin CLI, relay and STUN server. Runs on a Raspberry Pi.
+- Accounts: each account is an isolated network. Sign-up can be off, invite-only, operator-approved or open.
+- One-way sharing: an account can share a single machine with another account. The other account's machines can connect to it; it can't connect back.
+- Direct WireGuard paths found with STUN and hole punching. Without a direct path, traffic goes through a relay, still end-to-end encrypted. Failover between the two takes about 3 seconds.
+- MagicDNS: machines resolve as `name.account.domain` or just `name`. An account can set its own domain. Split DNS through systemd-resolved, with a `resolv.conf` fallback.
+- Exit nodes: a Linux machine can route internet traffic for the other machines in its account (`tc up --exit-node NAME`). Off by default.
+- Access rules within an account: tag machines and allow traffic from one tag to another on given ports.
+- Machine lifecycle: key expiry (180 days by default, or never per machine), optional approval of new machines, removal of ephemeral machines.
+- Pre-auth keys: single-use or reusable, ephemeral or pre-approved, with expiry and revocation.
+- HTTPS without a web server or certbot: Let's Encrypt (HTTP-01, or DNS-01 through DuckDNS), or a self-signed certificate that clients pin by fingerprint.
+- Android app containing the same Go client.
+- Standalone relays (`tc-relay`), authorised by the server; Prometheus metrics.
+- Userspace mode for containers and machines without root.
+- Security: Noise IK control channel, requests bound to the machine key, argon2id password hashes, other secrets stored only as hashes, relays see only encrypted traffic.
 
 ## Quick start
 
@@ -53,7 +49,7 @@ sudo ./packaging/linux/install.sh client     # asks for the server URL and the k
 tc status
 ```
 
-There are no settings files to edit. **[QUICKSTART.md](QUICKSTART.md)** walks through it all, including HTTPS, Android and the web portal, in about ten minutes.
+No settings files need editing. [QUICKSTART.md](QUICKSTART.md) covers the full setup, including HTTPS, Android and the web portal.
 
 ## Documentation
 
@@ -75,12 +71,18 @@ There are no settings files to edit. **[QUICKSTART.md](QUICKSTART.md)** walks th
 
 ## Roadmap
 
-1. ✅ Coordination server, pre-auth keys, admin CLI and admin web UI
-2. ✅ Linux client (`tcd`/`tc`), Noise control channel, streaming network map, WireGuard mesh, userspace mode, systemd units
-3. ✅ magicsock, relay fallback (built into `tc-control`, plus standalone `tc-relay`), ~3s failover
-4. ✅ NAT traversal: STUN, authenticated disco pings, CallMeMaybe hole punching, latency-based home relay
-5. ✅ MagicDNS: in-tunnel resolver, split DNS via systemd-resolved, resolv.conf fallback, reverse lookups, optional upstream forwarding
-6. ✅ Multi-tenant: accounts with passwords, sign-up modes and approval, isolated networks per account, one-way machine sharing with an in-tunnel packet filter
-7. Windows port (Wintun, Windows service, NRPT)
-8. ✅ Android app: the Go client with a VpnService and a phone/tablet GUI, built with the SDK's own tools (no Gradle or NDK)
-9. ✅ Hardening: key expiry, machine approval and ephemeral cleanup; access rules with tags; batched UDP and delta maps; standalone relays checked against the server; MagicDNS over TCP; built-in HTTPS from Let's Encrypt; metrics
+Done:
+
+- M1: Coordination server, pre-auth keys, admin CLI and web UI
+- M2: Linux client (`tcd`/`tc`), Noise control channel, streaming network map, WireGuard mesh, userspace mode, systemd units
+- M3: magicsock and relay fallback (built into `tc-control`, plus standalone `tc-relay`)
+- M4: NAT traversal: STUN, authenticated disco pings, CallMeMaybe hole punching, latency-based home relay
+- M5: MagicDNS: in-tunnel resolver, split DNS via systemd-resolved, `resolv.conf` fallback, reverse lookups, optional upstream forwarding
+- M6: Multi-tenant accounts: passwords, sign-up modes, isolated networks, one-way sharing enforced by an in-tunnel packet filter
+- M8: Android app: the Go client behind a VpnService, built with the SDK tools only (no Gradle or NDK)
+- M9: Hardening: key expiry, machine approval, ephemeral cleanup, tag-based access rules, batched UDP, delta map updates, relay authorisation, MagicDNS over TCP, built-in Let's Encrypt, metrics
+
+Not done:
+
+- M7: Windows client: Wintun, Windows service, NRPT for DNS
+- UDP GSO/GRO for higher throughput
