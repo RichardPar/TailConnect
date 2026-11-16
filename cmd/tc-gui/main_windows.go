@@ -35,6 +35,8 @@ var osExecutable = os.Executable
 
 const appTitle = "TailConnect"
 
+const serviceHint = "Start the TailConnect service (services.msc), or reinstall with tcd install."
+
 // App messages.
 const (
 	wmAppStatus = wmApp + 1 // new status in app.st

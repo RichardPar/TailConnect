@@ -30,6 +30,7 @@ To get started, see the [quick start](QUICKSTART.md).
 - Pre-auth keys: single-use or reusable, ephemeral or pre-approved, with expiry and revocation.
 - HTTPS without a web server or certbot: Let's Encrypt (HTTP-01, or DNS-01 through DuckDNS), or a self-signed certificate that clients pin by fingerprint.
 - Windows client: a service with the Wintun driver and a tray app, with a one-click installer.
+- Linux desktop app: a panel icon and status window (GTK 3, still built without cgo).
 - Android app containing the same Go client.
 - Standalone relays (`tc-relay`), authorised by the server; Prometheus metrics.
 - Userspace mode for containers and machines without root.
@@ -63,6 +64,7 @@ No settings files need editing. [QUICKSTART.md](QUICKSTART.md) covers the full s
 | [HTTPS with Let's Encrypt](docs/lets-encrypt.md) | Free certificates, obtained and renewed by the server itself: setup, testing, renewals, troubleshooting |
 | [HOWTO: DuckDNS and Let's Encrypt](docs/duckdns.md) | A home server reachable from anywhere with a free DuckDNS name and a trusted certificate, step by step, with two scripts that do the work |
 | [Windows](docs/windows.md) | The Windows client and tray app: package, install, join, use, upgrade, uninstall |
+| [Linux desktop app](docs/linux-app.md) | The panel icon and window on a Linux desktop: install, use, who may connect, troubleshooting |
 | [Android](docs/android.md) | The Android app: build, install over USB, join, use |
 | [LAN and internet setups](docs/network-setups.md) | Where to put the server: LAN only, on the internet, or at home reachable from outside; settings, ports and pitfalls |
 | [Configuration](docs/configuration.md) | Settings at a glance, then every flag, settings file, environment variable, port and file path |

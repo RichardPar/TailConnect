@@ -9,6 +9,9 @@ import (
 	"tailconnect/internal/trayicon"
 )
 
+// titleNoService is the title when tcd can't be reached.
+const titleNoService = "TailConnect service not running"
+
 // view is what the tray and the window show for one status, worked out
 // without any Win32 so it can be tested anywhere.
 type view struct {
@@ -40,8 +43,7 @@ func (p peerRow) Addr() string {
 
 func makeView(st *localapi.Status, err error) view {
 	if err != nil || st == nil {
-		return view{Icon: trayicon.Problem, Title: "TailConnect service not running",
-			Detail: "Start the TailConnect service (services.msc), or reinstall with tcd install."}
+		return view{Icon: trayicon.Problem, Title: titleNoService, Detail: serviceHint}
 	}
 	v := view{Server: st.ControlURL, LoggedIn: st.State != localapi.StateNeedsLogin}
 	if st.DNS != nil {

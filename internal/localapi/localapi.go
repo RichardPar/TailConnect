@@ -9,8 +9,9 @@
 //
 // "Admin" means the caller's UID (from SO_PEERCRED) is root or the daemon's
 // own UID; on Windows, the calling process runs as SYSTEM, as an elevated
-// Administrator, or as the daemon's own user. "User" adds, on Windows only,
-// any signed-in (interactive) user; on Linux it is the same as admin.
+// Administrator, or as the daemon's own user. "User" adds any signed-in
+// (interactive) user on Windows, and members of the "tailconnect" group
+// (OperatorGroup) on Linux.
 package localapi
 
 import (

@@ -2,7 +2,7 @@
 # Install or remove TailConnect on a systemd Linux host.
 #
 #   sudo packaging/linux/install.sh server            # tc-control: asks a few questions, then starts it
-#   sudo packaging/linux/install.sh client            # tcd + tc: asks for the server and a key, then joins
+#   sudo packaging/linux/install.sh client            # tcd + tc (+ the desktop app): asks for the server and a key, then joins
 #   sudo packaging/linux/install.sh relay             # tc-relay binary only
 #   sudo packaging/linux/install.sh uninstall-client [--purge]
 #   sudo packaging/linux/install.sh uninstall-server [--purge]
@@ -295,6 +295,37 @@ server_finish() {
 
 # ---- client setup ----
 
+GUI_FILES="$PREFIX/bin/tc-gui $PREFIX/share/applications/tailconnect.desktop /etc/xdg/autostart/tailconnect.desktop
+	/usr/share/polkit-1/actions/org.tailconnect.gui.policy $PREFIX/share/icons/hicolor/256x256/apps/tailconnect.png"
+
+# install_gui: the desktop app (tc-gui), where there is a desktop (GTK 3).
+# Members of the tailconnect group may connect and disconnect; the user who
+# ran sudo is added to it.
+install_gui() {
+	[ -x "$BIN_DIR/tc-gui" ] || return 0
+	if ! ldconfig -p 2>/dev/null | grep -q 'libgtk-3\.so\.0'; then
+		echo "No desktop (GTK 3) found: skipped the TailConnect app."
+		return 0
+	fi
+	install -m755 "$BIN_DIR/tc-gui" "$PREFIX/bin/"
+	install -d "$PREFIX/share/applications" "$PREFIX/share/icons/hicolor/256x256/apps" /etc/xdg/autostart /usr/share/polkit-1/actions
+	"$PREFIX/bin/tc-gui" -icon "$PREFIX/share/icons/hicolor/256x256/apps/tailconnect.png"
+	sed "s|@PREFIX@|$PREFIX|g" "$HERE/tailconnect.desktop" >"$PREFIX/share/applications/tailconnect.desktop"
+	sed "s|@PREFIX@|$PREFIX|g" "$HERE/tailconnect-autostart.desktop" >/etc/xdg/autostart/tailconnect.desktop
+	sed "s|@PREFIX@|$PREFIX|g" "$HERE/org.tailconnect.gui.policy" >/usr/share/polkit-1/actions/org.tailconnect.gui.policy
+	chmod 644 "$PREFIX/share/applications/tailconnect.desktop" /etc/xdg/autostart/tailconnect.desktop /usr/share/polkit-1/actions/org.tailconnect.gui.policy
+	command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+	getent group tailconnect >/dev/null || groupadd --system tailconnect
+	if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+		if ! id -nG "$SUDO_USER" | tr ' ' '\n' | grep -qx tailconnect; then
+			usermod -aG tailconnect "$SUDO_USER"
+			echo "Added $SUDO_USER to the tailconnect group (may connect and disconnect)."
+		fi
+	fi
+	echo "TailConnect app installed: open it from the applications menu; it starts at login."
+	echo "  Others who may connect/disconnect:  sudo usermod -aG tailconnect NAME"
+}
+
 client_join() {
 	echo
 	echo "== Join a network"
@@ -348,6 +379,7 @@ main() {
 		install_docs
 		start tcd
 		echo "tcd is running ($("$PREFIX/bin/tcd" -version))."
+		install_gui
 		joined=yes
 		"$PREFIX/bin/tc" status 2>/dev/null | grep -q '^Logged out' && joined=no
 		if interactive && { [ "$joined" = no ] || [ "$setup" = always ]; }; then
@@ -396,11 +428,13 @@ main() {
 		# Stopping tcd removes the interface and restores DNS settings. The node
 		# stays registered; run `tc logout` first to remove it from the network.
 		systemctl disable --now tcd 2>/dev/null || true
-		rm -f "$UNIT_DIR/tcd.service" "$PREFIX/bin/tcd" "$PREFIX/bin/tc"
+		rm -f "$UNIT_DIR/tcd.service" "$PREFIX/bin/tcd" "$PREFIX/bin/tc" $GUI_FILES
+		pkill -x tc-gui 2>/dev/null || true
 		systemctl daemon-reload
 		drop_docs
 		if [ "$purge" = yes ]; then
 			rm -rf /var/lib/tailconnect "$DEFAULTS/tcd" /etc/systemd/system/tcd.service.d
+			getent group tailconnect >/dev/null && groupdel tailconnect
 			echo "removed tcd, its keys and settings"
 		else
 			echo "removed tcd (keys kept in /var/lib/tailconnect, settings in $DEFAULTS/tcd; --purge deletes them)"
