@@ -14,12 +14,25 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+	"golang.zx2c4.com/wireguard/tun"
+
+	"tailconnect/internal/engine"
 )
 
 const serviceName = "TailConnect"
 
 // defaultTUN is the Wintun adapter name.
 const defaultTUN = "TailConnect"
+
+// adapterGUID gives the Wintun adapter the same identity every time, so
+// Windows keeps one network entry for it rather than adding "TailConnect 2",
+// "TailConnect 3", ... and its settings stick.
+var adapterGUID = windows.GUID{Data1: 0x7c7c0e1a, Data2: 0x7c0e, Data3: 0x4a1e, Data4: [8]byte{0x8a, 0x5c, 0x74, 0x63, 0x6f, 0x6e, 0x6e, 0x31}}
+
+func init() {
+	tun.WintunTunnelType = "TailConnect"
+	tun.WintunStaticRequestedGUID = &adapterGUID
+}
 
 func defaultStateDir() string {
 	dir, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
@@ -116,6 +129,7 @@ func uninstallService() error {
 	if err := s.Delete(); err != nil {
 		return err
 	}
+	engine.RemoveFirewallRules()
 	fmt.Printf("Removed the %s service.\n", serviceName)
 	return nil
 }
