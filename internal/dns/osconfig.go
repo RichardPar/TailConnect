@@ -8,11 +8,13 @@ import (
 	"strings"
 )
 
-// DNS configuration modes (Linux; other platforms support auto and off).
+// DNS configuration modes. Linux: auto, systemd-resolved, file, off.
+// Windows: auto (= nrpt), nrpt, off. Elsewhere: auto (= off), off.
 const (
 	ModeAuto     = "auto"             // systemd-resolved if it manages resolv.conf, else ModeFile
 	ModeResolved = "systemd-resolved" // per-link split DNS via resolvectl
 	ModeFile     = "file"             // rewrite resolv.conf (no split DNS)
+	ModeNRPT     = "nrpt"             // Windows Name Resolution Policy Table rules (split DNS)
 	ModeOff      = "off"
 )
 

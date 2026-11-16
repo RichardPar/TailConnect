@@ -9,13 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
-// DefaultSocket is where tcd listens by default on Linux.
-const DefaultSocket = "/run/tailconnect/tcd.sock"
-
-// Client talks to tcd over its Unix socket.
+// Client talks to tcd over its Unix socket (named pipe on Windows).
 type Client struct {
 	Socket string
 	hc     *http.Client
@@ -28,8 +26,7 @@ func NewClient(socket string) *Client {
 			Timeout: 60 * time.Second, // `up` waits for registration
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var d net.Dialer
-					return d.DialContext(ctx, "unix", socket)
+					return dial(ctx, socket)
 				},
 			},
 		},
@@ -54,6 +51,9 @@ func (c *Client) call(ctx context.Context, method, path string, body any) (Statu
 		var ne *net.OpError
 		if errors.As(err, &ne) {
 			return Status{}, fmt.Errorf("cannot reach tcd at %s (is it running?): %w", c.Socket, err)
+		}
+		if ue, ok := err.(*url.Error); ok {
+			err = ue.Err // drop the meaningless "Get http://tcd/..."
 		}
 		return Status{}, err
 	}

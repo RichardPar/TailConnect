@@ -9,6 +9,7 @@ make build          # bin/tc-control, bin/tcd, bin/tc, bin/tc-relay (version fro
 make test           # go vet + go test -race ./...
 make e2e            # network-namespace tests (below)
 make cross          # compile checks for Windows and Android
+make dist-windows   # Windows client zips (downloads Wintun once; see docs/windows.md)
 make dist           # release tarballs in dist/
 ```
 

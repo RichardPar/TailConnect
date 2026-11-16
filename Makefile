@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := -trimpath
 ARCHES  ?= amd64 arm64
 
-.PHONY: build test e2e bench perf perf-budget cross dist android android-install install-server install-client clean
+.PHONY: build test e2e bench perf perf-budget cross dist dist-windows android android-install install-server install-client clean
 
 build: ## bin/tc-control, bin/tcd, bin/tc, bin/tc-relay
 	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/ ./cmd/...
@@ -50,6 +50,36 @@ dist: ## dist/tailconnect-VERSION-linux-ARCH.tar.gz for each of ARCHES
 		tar -C dist -czf dist/$$name.tar.gz $$name; \
 		rm -r dist/$$name; \
 		echo "dist/$$name.tar.gz"; \
+	done
+
+# Wintun (the Windows TUN driver, from wintun.net) ships next to tcd.exe. Its
+# license allows that; the zip is downloaded once and checked against this hash.
+WINTUN_VERSION := 0.14.1
+WINTUN_SHA256  := 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+WINTUN_ZIP     := dist/.cache/wintun-$(WINTUN_VERSION).zip
+
+$(WINTUN_ZIP):
+	@mkdir -p $(dir $@)
+	curl -fsSL -o $@.tmp https://www.wintun.net/builds/wintun-$(WINTUN_VERSION).zip
+	echo "$(WINTUN_SHA256)  $@.tmp" | sha256sum -c --quiet
+	mv $@.tmp $@
+
+dist-windows: $(WINTUN_ZIP) ## dist/tailconnect-VERSION-windows-ARCH.zip (client) for each of ARCHES
+	@for arch in $(ARCHES); do \
+		name=tailconnect-$(VERSION)-windows-$$arch; \
+		d=dist/$$name; \
+		rm -rf $$d; mkdir -p $$d; \
+		for c in tcd tc; do \
+			CGO_ENABLED=0 GOOS=windows GOARCH=$$arch go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$d/$$c.exe ./cmd/$$c || exit 1; \
+		done; \
+		CGO_ENABLED=0 GOOS=windows GOARCH=$$arch go build $(GOFLAGS) -ldflags "$(LDFLAGS) -H windowsgui" -o $$d/TailConnect.exe ./cmd/tc-gui || exit 1; \
+		unzip -p $(WINTUN_ZIP) wintun/bin/$$arch/wintun.dll > $$d/wintun.dll || exit 1; \
+		unzip -p $(WINTUN_ZIP) wintun/LICENSE.txt > $$d/LICENSE-wintun.txt; \
+		sed 's/$$/\r/' packaging/windows/README.txt > $$d/README.txt; \
+		cp -r docs $$d/; \
+		rm -f dist/$$name.zip; (cd dist && zip -qr $$name.zip $$name) || exit 1; \
+		rm -r $$d; \
+		echo "dist/$$name.zip"; \
 	done
 
 install-server: build

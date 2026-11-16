@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"runtime"
 	"strconv"
 	"sync"
 
@@ -17,7 +18,8 @@ import (
 
 // batchSize is how many packets WireGuard hands magicsock per call, and
 // magicsock reads per system call: sendmmsg/recvmmsg on Linux. Elsewhere
-// x/net falls back to one packet per call, which is still correct.
+// x/net falls back to one packet per call, which is still correct, except
+// on Windows, where it has no fallback (see singleConn).
 const batchSize = conn.IdealBatchSize
 
 // socketBuffer is the requested UDP socket buffer size, as in wireguard-go.
@@ -52,10 +54,16 @@ func listenSocks(port uint16) (*socks, uint16, error) {
 	pc4, err4 := listen("udp4", port)
 	if err4 == nil {
 		s.v4 = &sock{pc: pc4, bc: ipv4.NewPacketConn(pc4)}
+		if runtime.GOOS == "windows" {
+			s.v4.bc = &singleConn{pc: pc4}
+		}
 		port = uint16(pc4.LocalAddr().(*net.UDPAddr).Port)
 	}
 	if pc6, err6 := listen("udp6", port); err6 == nil {
 		s.v6 = &sock{pc: pc6, bc: ipv6.NewPacketConn(pc6)}
+		if runtime.GOOS == "windows" {
+			s.v6.bc = &singleConn{pc: pc6}
+		}
 		if s.v4 == nil {
 			port = uint16(pc6.LocalAddr().(*net.UDPAddr).Port)
 		}
@@ -138,4 +146,43 @@ func writeBatch(pc *net.UDPConn, bc batchConn, bufs [][]byte, to netip.AddrPort)
 		start += n
 	}
 	return nil
+}
+
+// singleConn is batchConn one packet per call, for Windows, where x/net's
+// ReadBatch and WriteBatch return "not implemented". Only one reader may use
+// it (each socket has one receive loop); the address it returns is reused by
+// the next ReadBatch.
+type singleConn struct {
+	pc   *net.UDPConn
+	ip   [16]byte
+	addr net.UDPAddr
+}
+
+func (c *singleConn) ReadBatch(ms []ipv6.Message, _ int) (int, error) {
+	if len(ms) == 0 {
+		return 0, nil
+	}
+	n, ap, err := c.pc.ReadFromUDPAddrPort(ms[0].Buffers[0])
+	if err != nil {
+		return 0, err
+	}
+	c.ip = ap.Addr().As16()
+	c.addr.IP, c.addr.Port = c.ip[:], int(ap.Port())
+	ms[0].N, ms[0].NN, ms[0].Flags, ms[0].Addr = n, 0, 0, &c.addr
+	return 1, nil
+}
+
+func (c *singleConn) WriteBatch(ms []ipv6.Message, _ int) (int, error) {
+	for i := range ms {
+		ua, _ := ms[i].Addr.(*net.UDPAddr)
+		if ua == nil {
+			return i, errors.New("magicsock: no destination")
+		}
+		n, err := c.pc.WriteToUDPAddrPort(ms[i].Buffers[0], ua.AddrPort())
+		if err != nil {
+			return i, err
+		}
+		ms[i].N = n
+	}
+	return len(ms), nil
 }

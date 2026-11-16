@@ -207,8 +207,8 @@ func cmdStatus(c *localapi.Client, args []string) error {
 	}
 	if st.Self != nil && st.Self.KeyExpiry != nil {
 		if left := time.Until(*st.Self.KeyExpiry); left > 0 && left < 14*24*time.Hour {
-			fmt.Printf("Warning: this machine's key expires %s (in %s); renew with: sudo tc up --authkey KEY\n",
-				st.Self.KeyExpiry.Local().Format("2006-01-02 15:04"), humanDays(left))
+			fmt.Printf("Warning: this machine's key expires %s (in %s); renew with: %stc up --authkey KEY\n",
+				st.Self.KeyExpiry.Local().Format("2006-01-02 15:04"), humanDays(left), localapi.SudoPrefix)
 		}
 	}
 	printExitNode(&st)

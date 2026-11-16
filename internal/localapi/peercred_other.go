@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package localapi
 
@@ -7,8 +7,7 @@ import (
 	"net"
 )
 
-// peerUID is unimplemented here, so privileged calls are refused. Windows
-// will use a named pipe with an ACL instead (milestone 6).
+// peerUID is unimplemented here, so privileged calls are refused.
 func peerUID(net.Conn) (int, error) {
 	return -1, errors.New("peer credentials not supported on this OS")
 }

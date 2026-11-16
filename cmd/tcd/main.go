@@ -1,18 +1,16 @@
 // Command tcd is the TailConnect client daemon. It must run as root (or with
-// CAP_NET_ADMIN) to create the TUN interface and configure routes.
+// CAP_NET_ADMIN) to create the TUN interface and configure routes. On
+// Windows it runs as the TailConnect service (tcd install).
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/netip"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -29,11 +27,19 @@ import (
 var version = "dev"
 
 func main() {
-	stateDir := flag.String("state", "/var/lib/tailconnect", "state directory (keys and registration)")
+	if platformCommand(os.Args[1:]) {
+		return
+	}
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: tcd [FLAGS]\n")
+		flag.PrintDefaults()
+		fmt.Fprint(flag.CommandLine.Output(), platformUsage)
+	}
+	stateDir := flag.String("state", defaultStateDir(), "state directory (keys and registration)")
 	socket := flag.String("socket", localapi.DefaultSocket, "local API socket")
-	tunName := flag.String("tun", "tc0", `TUN interface name, or "userspace" for unprivileged in-process networking`)
+	tunName := flag.String("tun", defaultTUN, `TUN interface name, or "userspace" for unprivileged in-process networking`)
 	port := flag.Uint("port", engine.DefaultPort, "WireGuard UDP port (0 = random)")
-	dnsMode := flag.String("dns", dns.ModeAuto, `how to point the host's DNS at MagicDNS: auto, systemd-resolved, file (rewrite resolv.conf) or off`)
+	dnsMode := flag.String("dns", dns.ModeAuto, dnsModeHelp)
 	resolvConf := flag.String("resolv-conf", "/etc/resolv.conf", "resolv.conf path (for -dns file)")
 	metricsListen := flag.String("metrics-listen", "", `serve metrics (Prometheus text format) at /metrics on this address, e.g. "127.0.0.1:7744" ("" = off)`)
 	verbose := flag.Bool("verbose", false, "verbose WireGuard logging")
@@ -49,7 +55,11 @@ func main() {
 	}
 	daemon.Version = version
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := secureStateDir(*stateDir); err != nil {
+		fmt.Fprintln(os.Stderr, "tcd: state directory:", err)
+		os.Exit(1)
+	}
+	log := slog.New(slog.NewTextHandler(logOutput(*stateDir), nil))
 	logf := func(f string, a ...any) { log.Info(fmt.Sprintf(f, a...)) }
 
 	d, err := daemon.New(daemon.Options{
@@ -111,8 +121,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx, stop, finish := serviceContext()
+	defer finish()
 
 	ln, err := localapi.Listen(*socket)
 	if err != nil {

@@ -1,14 +1,16 @@
 // Package localapi is the local control interface between the tc CLI (or a
-// GUI) and the tcd daemon: HTTP over a Unix socket (named pipe on Windows,
-// milestone 6).
+// GUI) and the tcd daemon: HTTP over a Unix socket, or a named pipe on
+// Windows.
 //
 //	GET  /localapi/v1/status   anyone with socket access
-//	POST /localapi/v1/up       privileged
-//	POST /localapi/v1/down     privileged
-//	POST /localapi/v1/logout   privileged
+//	POST /localapi/v1/up       admin; user if it only reconnects (no fields set)
+//	POST /localapi/v1/down     user
+//	POST /localapi/v1/logout   admin
 //
-// "Privileged" means the caller's UID (from SO_PEERCRED) is root or the
-// daemon's own UID.
+// "Admin" means the caller's UID (from SO_PEERCRED) is root or the daemon's
+// own UID; on Windows, the calling process runs as SYSTEM, as an elevated
+// Administrator, or as the daemon's own user. "User" adds, on Windows only,
+// any signed-in (interactive) user; on Linux it is the same as admin.
 package localapi
 
 import (
