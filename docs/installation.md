@@ -325,7 +325,7 @@ Connected as laptop.alice.home.internal (100.64.0.2, fd7c:7c0e:a1e0::6440:2)
 
 If joining fails (a mistyped key, say), it shows why and offers to try again. To join a different server later, run it with `--reconfigure`. Without a terminal, or with `--no-setup`, it only installs; then join with `sudo tc up --server URL --authkey KEY`.
 
-The installer copies `tcd` and `tc` to `/usr/local/bin`, then installs and starts the `tcd` unit. That unit runs as root with only `CAP_NET_ADMIN` and `CAP_NET_RAW`, and keeps its keys in `/var/lib/tailconnect`. It also creates `/etc/default/tcd` for options.
+The installer copies `tcd` and `tc` to `/usr/local/bin`, then installs and starts the `tcd` unit. On a desktop (GTK 3), it also installs the [TailConnect app](linux-app.md) and adds you to the `tailconnect` group, whose members may connect and disconnect without `sudo`. That unit runs as root with only `CAP_NET_ADMIN` and `CAP_NET_RAW`, and keeps its keys in `/var/lib/tailconnect`. It also creates `/etc/default/tcd` for options.
 
 `tc up`:
 - registers the device in the auth key's account;

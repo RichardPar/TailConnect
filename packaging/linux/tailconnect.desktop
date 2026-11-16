@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TailConnect
+GenericName=Private network
+Comment=Connect to your TailConnect network and see its machines
+Exec=@PREFIX@/bin/tc-gui
+Icon=tailconnect
+Terminal=false
+Categories=Network;
+Keywords=VPN;network;mesh;
+StartupWMClass=tailconnect

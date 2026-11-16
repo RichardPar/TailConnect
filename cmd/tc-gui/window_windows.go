@@ -249,7 +249,7 @@ func (w *statusWindow) update(v view) {
 	default:
 		setText(w.toggle, "Connect")
 	}
-	enable(w.toggle, v.CanUp || v.CanDown || (!v.LoggedIn && v.Title != "TailConnect service not running"))
+	enable(w.toggle, v.CanUp || v.CanDown || (!v.LoggedIn && v.Title != titleNoService))
 	if v.LoggedIn {
 		setText(w.login, "Change server or account…")
 	} else {

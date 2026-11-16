@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- The TailConnect app runs `tc-gui -helper` as root through pkexec to log
+     this computer in or out (and to connect, for users outside the
+     tailconnect group). Installed by install.sh. -->
+<policyconfig>
+  <vendor>TailConnect</vendor>
+  <action id="org.tailconnect.gui.helper">
+    <description>Change this computer's TailConnect login</description>
+    <message>Authentication is needed to change this computer's TailConnect network settings</message>
+    <icon_name>tailconnect</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">@PREFIX@/bin/tc-gui</annotate>
+  </action>
+</policyconfig>

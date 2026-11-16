@@ -20,6 +20,9 @@ const ElevateHint = "run as root (e.g. sudo tc ...)"
 // SudoPrefix goes before example privileged commands.
 const SudoPrefix = "sudo "
 
+// OperatorGroup's members may connect and disconnect (Linux).
+const OperatorGroup = "tailconnect"
+
 func dial(ctx context.Context, path string) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, "unix", path)
@@ -45,16 +48,4 @@ func Listen(path string) (net.Listener, error) {
 		return nil, err
 	}
 	return ln, nil
-}
-
-// peerAccess gives root and the daemon's own user full access, others none.
-func peerAccess(c net.Conn) (Access, error) {
-	uid, err := peerUID(c)
-	if err != nil {
-		return AccessNone, err
-	}
-	if uid == 0 || uid == os.Geteuid() {
-		return AccessAdmin, nil
-	}
-	return AccessNone, nil
 }

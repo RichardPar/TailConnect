@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TailConnect
+Comment=TailConnect icon in the panel
+Exec=@PREFIX@/bin/tc-gui -tray
+Icon=tailconnect
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
