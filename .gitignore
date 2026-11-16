@@ -4,3 +4,4 @@
 *.db-wal
 /dist/
 /android/build/
+/cmd/tc-gui/setup-payload.zip

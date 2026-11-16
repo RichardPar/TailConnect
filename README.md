@@ -29,7 +29,7 @@ To get started, see the [quick start](QUICKSTART.md).
 - Machine lifecycle: key expiry (180 days by default, or never per machine), optional approval of new machines, removal of ephemeral machines.
 - Pre-auth keys: single-use or reusable, ephemeral or pre-approved, with expiry and revocation.
 - HTTPS without a web server or certbot: Let's Encrypt (HTTP-01, or DNS-01 through DuckDNS), or a self-signed certificate that clients pin by fingerprint.
-- Windows client: a service with the Wintun driver and a tray app, installed from a zip with `tcd install`.
+- Windows client: a service with the Wintun driver and a tray app, with a one-click installer.
 - Android app containing the same Go client.
 - Standalone relays (`tc-relay`), authorised by the server; Prometheus metrics.
 - Userspace mode for containers and machines without root.

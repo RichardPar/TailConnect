@@ -114,6 +114,9 @@ func installService(args []string) error {
 	if err := installTrayApp(dst); err != nil {
 		fmt.Fprintln(os.Stderr, "tcd: warning: tray app:", err)
 	}
+	if err := registerUninstall(dst); err != nil {
+		fmt.Fprintln(os.Stderr, "tcd: warning: cannot add TailConnect to Apps & features:", err)
+	}
 	if err := s.Start(); err != nil {
 		return fmt.Errorf("installed, but starting the service failed: %w", err)
 	}
@@ -153,6 +156,7 @@ func uninstallService() error {
 	engine.RemoveFirewallRules()
 	stopTrayApps()
 	removeTrayApp()
+	_ = registry.DeleteKey(registry.LOCAL_MACHINE, uninstallKey)
 	dir := installDir()
 	if err := removeFromPath(dir); err != nil {
 		fmt.Fprintf(os.Stderr, "tcd: warning: cannot remove %s from PATH: %v\n", dir, err)
@@ -424,8 +428,10 @@ func shortcutPath() string {
 func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // stopTrayApps closes every user's tray app, reporting whether any ran.
+// The app that started us (TailConnect.exe -uninstall, or the setup
+// program) is spared: it reports the result.
 func stopTrayApps() bool {
-	out, _ := exec.Command("taskkill", "/F", "/IM", trayExe).CombinedOutput()
+	out, _ := exec.Command("taskkill", "/F", "/IM", trayExe, "/FI", fmt.Sprintf("PID ne %d", os.Getppid())).CombinedOutput()
 	ran := strings.Contains(string(out), "SUCCESS")
 	if ran {
 		time.Sleep(500 * time.Millisecond) // let Windows release the file
@@ -437,5 +443,46 @@ func stopTrayApps() bool {
 // elevated, and the app must not: Explorer starts it as the user, unelevated.
 // (Other signed-in users get it at their next sign-in.)
 func startTrayApp(exe string) {
-	_ = exec.Command("explorer.exe", exe).Start()
+	cmd := exec.Command("explorer.exe", exe)
+	cmd.Dir = filepath.Dir(exe) // not ours: the setup program deletes its folder
+	_ = cmd.Start()
+}
+
+// uninstallKey lists TailConnect in Settings → Apps (and Programs and
+// Features). Its uninstall runs the app's -uninstall, which elevates,
+// confirms and runs tcd uninstall.
+const uninstallKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TailConnect`
+
+func registerUninstall(dir string) error {
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, uninstallKey, registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	var size uint32 // KB
+	for _, f := range installFiles {
+		if fi, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			size += uint32(fi.Size() / 1024)
+		}
+	}
+	app := windows.EscapeArg(filepath.Join(dir, trayExe))
+	for name, v := range map[string]string{
+		"DisplayName":          "TailConnect",
+		"DisplayVersion":       strings.TrimPrefix(version, "v"),
+		"Publisher":            "TailConnect",
+		"DisplayIcon":          filepath.Join(dir, trayIcon),
+		"InstallLocation":      dir,
+		"UninstallString":      app + " -uninstall",
+		"QuietUninstallString": windows.EscapeArg(filepath.Join(dir, "tcd.exe")) + " uninstall",
+	} {
+		if err := k.SetStringValue(name, v); err != nil {
+			return err
+		}
+	}
+	for name, v := range map[string]uint32{"NoModify": 1, "NoRepair": 1, "EstimatedSize": size} {
+		if err := k.SetDWordValue(name, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
