@@ -44,9 +44,10 @@ Open it the first time from the applications menu (**TailConnect**), or with `tc
 - the state, and this computer's name and address (click to copy the address);
 - **Connect** or **Disconnect**;
 - **Copy address of** → each machine on the network;
+- **Exit node: None** (or the one in use) → **None** or one of the account's [exit nodes](usage.md#exit-nodes), to send all internet traffic through it. Shown while connected, when the account has an exit node. Users outside the `tailconnect` group are asked for a password;
 - **Open TailConnect**, **Log in…** (or **Change server or account…**), **Log out…**, **Quit**.
 
-**The window** shows the state, this computer's name and address, the server and the MagicDNS domain, the Connect/Disconnect, login and logout buttons, and every machine with its address, OS, account and connection (`direct, 5 ms`, `via relay`, `idle`, `shared with you`, …). Double-click a machine to copy its address; right-click to copy its IPv4 or IPv6 address or its name. Closing the window keeps the app running in the panel; **Quit** in the menu ends it.
+**The window** shows the state, this computer's name and address, the server and the MagicDNS domain, the Connect/Disconnect, login and logout buttons, an **Exit node** button (when the account has one), and every machine with its address, OS, account and connection (`direct, 5 ms`, `via relay`, `idle`, `shared with you`, …). Double-click a machine to copy its address; right-click to copy its IPv4 or IPv6 address or its name. Closing the window keeps the app running in the panel; **Quit** in the menu ends it.
 
 **Log in…** asks for the server address, an auth key, this computer's name and, only for a server with a self-signed certificate, its fingerprint (`sha256:…`). When already logged in, leave the key empty to change only the name.
 

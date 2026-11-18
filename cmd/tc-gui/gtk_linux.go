@@ -408,6 +408,18 @@ func menuItem(menu uintptr, text string, enabled bool, f func()) uintptr {
 	return it
 }
 
+// checkMenuItem is a menu item with a check mark, ticked if active.
+func checkMenuItem(menu uintptr, text string, active bool, f func()) uintptr {
+	it := gtk_check_menu_item_new_with_label(text)
+	isMenuItem[it] = true
+	gtk_check_menu_item_set_active(it, active) // before onClick: setting it activates the item
+	if f != nil {
+		onClick(it, f)
+	}
+	gtk_menu_shell_append(menu, it)
+	return it
+}
+
 func menuSeparator(menu uintptr) {
 	gtk_menu_shell_append(menu, gtk_separator_menu_item_new())
 }

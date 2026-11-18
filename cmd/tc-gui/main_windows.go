@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -358,7 +357,7 @@ func (a *app) menu() {
 		}
 		add(m, mfPopup, sub, "Copy address of")
 	}
-	if v.CanDown && (len(v.Exits) > 0 || v.ExitChose != "") {
+	if v.ShowExit() {
 		sub, _, _ := pCreatePopupMenu.Call()
 		flags := uint32(mfString)
 		if v.ExitChose == "" {
@@ -367,19 +366,12 @@ func (a *app) menu() {
 		add(sub, flags, idExitNone, "None")
 		for i, name := range v.Exits {
 			flags := uint32(mfString)
-			if strings.EqualFold(name, v.ExitChose) || strings.HasPrefix(strings.ToLower(v.ExitChose), strings.ToLower(name)+".") {
+			if v.ExitIs(name) {
 				flags |= mfChecked
 			}
 			add(sub, flags, uintptr(idExitNodeBase+i), name)
 		}
-		label := "Exit node: None"
-		switch {
-		case v.ExitChose != "" && v.ExitInUse:
-			label = "Exit node: " + v.ExitChose
-		case v.ExitChose != "":
-			label = "Exit node: " + v.ExitChose + " (not working)"
-		}
-		add(m, mfPopup, sub, label)
+		add(m, mfPopup, sub, v.ExitLabel())
 	}
 	add(m, mfSeparator, 0, "")
 	add(m, mfString, idOpen, "Open TailConnect")

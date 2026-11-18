@@ -100,6 +100,31 @@ func makeView(st *localapi.Status, err error) view {
 	return v
 }
 
+// ShowExit reports whether to offer the exit node choice: while connected,
+// when the account has an exit node (or one is chosen).
+func (v view) ShowExit() bool { return v.CanDown && (len(v.Exits) > 0 || v.ExitChose != "") }
+
+// ExitLabel is the exit node menu's title: "Exit node: None", "Exit node:
+// jellyfin", or "... (not working)" when the chosen one can't be used.
+func (v view) ExitLabel() string {
+	switch {
+	case v.ExitChose == "":
+		return "Exit node: None"
+	case v.ExitInUse:
+		return "Exit node: " + v.ExitChose
+	default:
+		return "Exit node: " + v.ExitChose + " (not working)"
+	}
+}
+
+// ExitIs reports whether name (a short name from Exits) is the chosen exit
+// node, which may have been given as a short or full MagicDNS name.
+func (v view) ExitIs(name string) bool {
+	c := strings.ToLower(v.ExitChose)
+	n := strings.ToLower(name)
+	return c != "" && (c == n || strings.HasPrefix(c, n+"."))
+}
+
 // Tip is the tray icon's tooltip (at most 127 characters).
 func (v view) Tip() string {
 	t := "TailConnect: " + v.Title

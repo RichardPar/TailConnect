@@ -198,7 +198,7 @@ Every machine's exit node role is **off** until you turn it on, and each machine
 
 1. **Turn it on.** In the portal's Machines tab, click **Exit node: off** on a Linux machine (or run `tc-control nodes exit-node ID on`). Within a second, that machine enables IP forwarding and NAT for traffic from the tunnel. Its `tc status` says `Exit node: this machine forwards internet traffic for its account`.
 2. **Use it.**
-   - **Linux:** `sudo tc up --exit-node NAME` (a short name, MagicDNS name, hostname or tunnel IP). `tc status` shows `Exit node: internet traffic goes through NAME`, and lists it as `exit node (in use)`.
+   - **Linux:** the desktop app's **Exit node** menu (or button in its window), or `sudo tc up --exit-node NAME` (a short name, MagicDNS name, hostname or tunnel IP). `tc status` shows `Exit node: internet traffic goes through NAME`, and lists it as `exit node (in use)`.
    - **Android:** in the app, tap **Exit node: None** under Connect and pick the machine.
    - **Windows:** right-click the tray icon → **Exit node** → pick the machine.
 3. **Stop using it.** Pick **None** in the app or tray menu, or `sudo tc up --exit-node ""`. The choice is remembered across restarts and reboots until changed.

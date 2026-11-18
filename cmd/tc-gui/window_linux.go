@@ -15,6 +15,7 @@ type statusWindow struct {
 	a                           *app
 	win                         uintptr
 	title, self, server, detail uintptr
+	exit                        uintptr // the exit node button (shown when there's a choice)
 	toggle, login, logout       uintptr
 	store, tree, hint           uintptr
 	rows                        []peerRow
@@ -80,6 +81,11 @@ func newStatusWindow(a *app) *statusWindow {
 	gtk_box_pack_start(buttons, w.toggle, false, false, 0)
 	gtk_box_pack_start(buttons, w.login, false, false, 0)
 	gtk_box_pack_start(buttons, w.logout, false, false, 0)
+	w.exit = button("Exit node: None", func() {
+		gtk_menu_popup_at_pointer(w.a.exitMenu(w.a.v), 0)
+	})
+	gtk_widget_set_no_show_all(w.exit, true)
+	gtk_box_pack_start(buttons, w.exit, false, false, 0)
 	gtk_box_pack_start(box, buttons, false, false, 0)
 
 	w.store = newListStore(5)
@@ -191,6 +197,12 @@ func (w *statusWindow) update(v view) {
 	}
 	gtk_widget_set_sensitive(w.login, v.Title != titleNoService)
 	gtk_widget_set_sensitive(w.logout, v.LoggedIn)
+	if v.ShowExit() {
+		gtk_button_set_label(w.exit, v.ExitLabel())
+		gtk_widget_show(w.exit)
+	} else {
+		gtk_widget_hide(w.exit)
+	}
 	gtk_window_set_icon_from_file(w.win, iconPath(w.a.icons, v.Icon), 0)
 
 	if !slices.Equal(v.Peers, w.rows) {

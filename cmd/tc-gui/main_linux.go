@@ -224,7 +224,7 @@ func (a *app) update(v view) {
 // menuKey is what the menu depends on (not latencies, which change often).
 func menuKey(v view) string {
 	var b strings.Builder
-	fmt.Fprintln(&b, v.Title, v.Self, v.CanUp, v.CanDown, v.LoggedIn)
+	fmt.Fprintln(&b, v.Title, v.Self, v.CanUp, v.CanDown, v.LoggedIn, v.Exits, v.ExitChose, v.ExitInUse)
 	for _, p := range v.Peers {
 		fmt.Fprintln(&b, p.Name, p.Addr())
 	}
@@ -254,6 +254,10 @@ func (a *app) menu(v view) (menu, def uintptr) {
 		it := menuItem(m, "Copy address of", true, nil)
 		gtk_menu_item_set_submenu(it, sub)
 	}
+	if v.ShowExit() {
+		it := menuItem(m, v.ExitLabel(), true, nil)
+		gtk_menu_item_set_submenu(it, a.exitMenu(v))
+	}
 	menuSeparator(m)
 	def = menuItem(m, "Open TailConnect", true, a.openWindow)
 	if v.LoggedIn {
@@ -266,6 +270,36 @@ func (a *app) menu(v view) (menu, def uintptr) {
 	menuItem(m, "Version "+version, false, nil)
 	menuItem(m, "Quit", true, gtk_main_quit)
 	return m, def
+}
+
+// exitMenu lists the exit node choices: None, then the account's exit nodes.
+func (a *app) exitMenu(v view) uintptr {
+	m := gtk_menu_new()
+	checkMenuItem(m, "None", v.ExitChose == "", func() { a.setExitNode("") })
+	for _, name := range v.Exits {
+		checkMenuItem(m, name, v.ExitIs(name), func() { a.setExitNode(name) })
+	}
+	gtk_widget_show_all(m)
+	return m
+}
+
+// setExitNode sends this computer's internet traffic through the exit node
+// name ("" = none), asking for a password if this user may not.
+func (a *app) setExitNode(name string) {
+	a.do("Exit node", func(ctx context.Context) error {
+		req := localapi.UpRequest{ExitNode: &name}
+		st, err := a.c.Up(ctx, req)
+		if isDenied(err) {
+			st, err = privileged(ctx, helperRequest{Op: "up", Up: req})
+		}
+		if err != nil {
+			return err
+		}
+		if name != "" && st.ExitNode != nil && st.ExitNode.Using == "" && st.ExitNode.Error != "" {
+			return fmt.Errorf("%s isn't carrying internet traffic yet: %s", name, st.ExitNode.Error)
+		}
+		return nil
+	})
 }
 
 func (a *app) openWindow() {

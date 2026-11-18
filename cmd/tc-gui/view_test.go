@@ -65,3 +65,30 @@ func TestMakeView(t *testing.T) {
 		t.Errorf("tip is %d runes", n)
 	}
 }
+
+func TestExitNodeView(t *testing.T) {
+	st := &localapi.Status{
+		State: localapi.StateRunning, Domain: "richard.home.internal",
+		Peers: []localapi.PeerStatus{
+			{Name: "jellyfin.richard.home.internal", ExitNode: true},
+			{Name: "laptop.richard.home.internal"},
+		},
+	}
+	v := makeView(st, nil)
+	if !v.ShowExit() || len(v.Exits) != 1 || v.Exits[0] != "jellyfin" || v.ExitLabel() != "Exit node: None" {
+		t.Fatalf("no exit node chosen: show=%v exits=%v label=%q", v.ShowExit(), v.Exits, v.ExitLabel())
+	}
+	st.ExitNode = &localapi.ExitStatus{Chosen: "jellyfin", Using: "jellyfin.richard.home.internal"}
+	if v = makeView(st, nil); v.ExitLabel() != "Exit node: jellyfin" || !v.ExitIs("jellyfin") || v.ExitIs("laptop") {
+		t.Fatalf("in use: label=%q", v.ExitLabel())
+	}
+	st.ExitNode = &localapi.ExitStatus{Chosen: "jellyfin.richard.home.internal", Error: "offline"}
+	if v = makeView(st, nil); v.ExitLabel() != "Exit node: jellyfin.richard.home.internal (not working)" || !v.ExitIs("jellyfin") {
+		t.Fatalf("chosen by full name, not in use: label=%q", v.ExitLabel())
+	}
+	// Not connected: no choice offered.
+	st.State, st.ExitNode = localapi.StateStopped, nil
+	if makeView(st, nil).ShowExit() {
+		t.Fatal("exit node offered while disconnected")
+	}
+}
