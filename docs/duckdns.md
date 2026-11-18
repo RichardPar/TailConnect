@@ -16,7 +16,7 @@ This is the [home server reachable from outside](network-setups.md#home-server-r
 
 ## Before you start
 
-- **A public address at home.** Compare the WAN address on your router's status page with `curl -4 ifconfig.me`. If they differ (often a WAN address starting with `100.64`–`100.127`, `10.` or `192.168.`), your provider shares one address between customers (carrier-grade NAT). Nothing from outside can reach you then, and DuckDNS can't change that: ask your provider for a public address, or put the server on a small cloud VM instead ([on the internet](network-setups.md#on-the-internet)).
+- **A public address at home.** Compare the WAN address on your router's status page, your provider shares one address between customers (carrier-grade NAT). Nothing from outside can reach you then, and DuckDNS can't change that: ask your provider for a public address, or put the server on a small cloud VM instead ([on the internet](network-setups.md#on-the-internet)).
 - **A fixed LAN address for the server**, set as a DHCP reservation on your router. This guide uses `192.168.1.10`.
 - **`tc-control` installed** on it ([installation](installation.md#install-the-control-server)).
 
