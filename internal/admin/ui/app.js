@@ -819,6 +819,7 @@ function handleErr(e) {
 // Initial load: fetch public settings, probe the session, then poll while visible.
 (async () => {
   config = await api("GET", "/api/config").catch(() => config);
+  document.querySelectorAll(".version").forEach((e) => (e.textContent = config.version || "dev"));
   try {
     await enterApp();
   } catch (e) {

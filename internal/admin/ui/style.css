@@ -64,6 +64,8 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
   padding: 10px 24px; background: var(--surface); border-bottom: 1px solid var(--border);
 }
 .brand { font-weight: 700; font-size: 16px; }
+.version-tag { font-weight: 400; font-size: 12px; color: var(--muted); }
+.version-foot { position: fixed; bottom: 8px; left: 0; right: 0; margin: 0; text-align: center; font-size: 12px; }
 .tabs { display: flex; gap: 4px; flex: 1; }
 .tabs button { border: none; background: transparent; padding: 6px 12px; color: var(--muted); }
 .tabs button.active { color: var(--text); background: var(--code-bg); }

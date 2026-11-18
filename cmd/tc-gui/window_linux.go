@@ -29,7 +29,7 @@ var titleColors = map[trayicon.State]string{
 func newStatusWindow(a *app) *statusWindow {
 	w := &statusWindow{a: a}
 	w.win = gtk_window_new(gtkWindowToplevel)
-	gtk_window_set_title(w.win, appTitle)
+	gtk_window_set_title(w.win, appTitle+" "+version)
 	gtk_window_set_default_size(w.win, 700, 500)
 	gtk_window_set_position(w.win, gtkWinPosCenter)
 	connect(w.win, "delete-event", 2, func([]uintptr) uintptr {

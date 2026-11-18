@@ -263,6 +263,7 @@ func (a *app) menu(v view) (menu, def uintptr) {
 		menuItem(m, "Log in…", v.Title != titleNoService, a.login)
 	}
 	menuSeparator(m)
+	menuItem(m, "Version "+version, false, nil)
 	menuItem(m, "Quit", true, gtk_main_quit)
 	return m, def
 }

@@ -363,6 +363,7 @@ func (a *app) menu() {
 		add(m, mfString, idLogin, "Log in…")
 	}
 	add(m, mfSeparator, 0, "")
+	add(m, mfString|mfGrayed, 0, "Version "+version)
 	add(m, mfString, idExit, "Exit")
 	pSetMenuDefaultItem.Call(m, idOpen, 0)
 

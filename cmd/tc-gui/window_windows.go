@@ -47,7 +47,7 @@ func newStatusWindow(a *app) *statusWindow {
 	w := &statusWindow{a: a}
 	dpi := dpiFor(0)
 	sc := func(v int32) int32 { return v * dpi / 96 }
-	w.hwnd = createWindow(wsExControlParent, classWindow, appTitle, wsOverlappedWindow,
+	w.hwnd = createWindow(wsExControlParent, classWindow, appTitle+" "+version, wsOverlappedWindow,
 		cwUseDefault, cwUseDefault, sc(660), sc(500), 0, 0)
 	w.dpi = dpiFor(w.hwnd)
 	handlers[w.hwnd] = w.handle
