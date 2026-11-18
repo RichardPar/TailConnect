@@ -7,6 +7,7 @@ import (
 
 	"tailconnect/internal/key"
 	"tailconnect/internal/protocol"
+	"tailconnect/internal/stun"
 )
 
 func TestTrusted(t *testing.T) {
@@ -170,5 +171,41 @@ func TestRelayReceiveWithdrawsTrust(t *testing.T) {
 	q := peer{directAddr: addr, lastDirectRecv: now.Add(-200 * time.Millisecond)}
 	if q.noteRelayRecv(now) || !q.trusted(now) {
 		t.Fatal("recent direct traffic: trust must be kept")
+	}
+}
+
+func TestSTUNIgnoresHairpin(t *testing.T) {
+	c := New(Options{PrivateKey: key.NewPrivate[key.NodeKind]()})
+	defer c.Shutdown()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	answer := func(server, mapped string) {
+		tx := stun.NewTxID()
+		c.stunTx[tx] = stunRequest{region: 1, server: netip.MustParseAddr(server), sent: time.Now()}
+		c.handleSTUNLocked(stun.Response(tx, netip.MustParseAddrPort(mapped)))
+	}
+	cases := []struct {
+		server, mapped string
+		want           bool
+	}{
+		{"90.192.119.100", "78.86.136.87:58537", true},   // public server, public answer
+		{"90.192.119.100", "192.168.10.254:2482", false}, // NAT loopback: router's LAN side
+		{"90.192.119.100", "100.70.1.2:2482", false},     // CGNAT space is not public either
+		{"192.168.10.131", "192.168.10.205:41641", true}, // LAN STUN server: trust it
+		{"10.200.0.1", "10.200.0.2:41641", true},         // lab NAT setup
+	}
+	for _, tc := range cases {
+		delete(c.stunAddrs, 1)
+		answer(tc.server, tc.mapped)
+		got, ok := c.stunAddrs[1]
+		if ok != tc.want || (ok && got != netip.MustParseAddrPort(tc.mapped)) {
+			t.Errorf("server %s mapped %s: stored=%v (%v), want stored=%v", tc.server, tc.mapped, ok, got, tc.want)
+		}
+	}
+	// A hairpin answer after a real one withdraws the stale address.
+	answer("90.192.119.100", "78.86.136.87:58537")
+	answer("90.192.119.100", "192.168.10.254:9999")
+	if a, ok := c.stunAddrs[1]; ok {
+		t.Errorf("hairpin answer left %v advertised", a)
 	}
 }

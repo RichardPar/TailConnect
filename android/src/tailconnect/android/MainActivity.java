@@ -41,7 +41,9 @@ import java.nio.file.Files;
 import java.text.DateFormat;
 import java.util.Date;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -57,7 +59,13 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     private static final int REQ_VPN = 1, REQ_QR = 2;
     private static final long POLL_MS = 1500;
-    private static final int GREEN = 0xFF2E9E5B, AMBER = 0xFFE0A030, GREY = 0xFF8A8A8A, RED = 0xFFD9453B;
+    // A peer counts as busy (brighter panel) when more than this many bytes
+    // moved since the previous poll; a lone 32-byte keepalive doesn't count.
+    private static final long BUSY_BYTES = 100;
+    /** Each peer's Rx+Tx byte total at the previous poll, by node key. */
+    private final Map<String, Long> lastBytes = new HashMap<>();
+    private static final int GREEN = 0xFF2E9E5B, AMBER = 0xFFE0A030, GREY = 0xFF8A8A8A, RED = 0xFFD9453B,
+            BLUE = 0xFF3B7DD8;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -572,8 +580,12 @@ public class MainActivity extends Activity {
     private View peerRow(JSONObject p) {
         LinearLayout row = column();
         row.setPadding(dp(16), dp(12), dp(16), dp(12));
-        // The panel's colour is the path from this device: grey idle, green direct, amber relay.
-        String[] path = path(p);
+        // The panel's colour is the path from this device: grey idle, green
+        // direct, blue relay; brighter while traffic is flowing.
+        long total = p.optLong("RxBytes") + p.optLong("TxBytes");
+        Long prev = lastBytes.put(p.optString("NodeKey"), total);
+        boolean busy = prev != null && total - prev > BUSY_BYTES;
+        String[] path = path(p, busy);
         GradientDrawable bg = new GradientDrawable();
         bg.setCornerRadius(dp(12));
         bg.setColor(Integer.parseInt(path[1]));
@@ -608,17 +620,19 @@ public class MainActivity extends Activity {
 
     /**
      * The path from this device to a peer, for screen readers, and its panel
-     * colour: a light tint of grey (idle), green (direct) or amber (relay).
+     * colour: a light tint of grey (idle), green (direct) or blue (relay),
+     * stronger when busy (traffic flowed since the last poll).
      */
-    private static String[] path(JSONObject p) {
+    private static String[] path(JSONObject p, boolean busy) {
         if (!p.optBoolean("Active")) return new String[]{"idle", String.valueOf(0x14808080)};
+        int alpha = busy ? 0x90000000 : 0x40000000;
         String ep = p.optString("CurrentEndpoint");
         if (!ep.isEmpty()) {
             double ms = p.optDouble("LatencyMS", 0);
             String label = ms > 0 ? String.format(Locale.ROOT, "direct, %.0f ms", ms) : "direct";
-            return new String[]{label, String.valueOf(GREEN & 0x00FFFFFF | 0x40000000)};
+            return new String[]{label, String.valueOf(GREEN & 0x00FFFFFF | alpha)};
         }
-        return new String[]{"through the relay", String.valueOf(AMBER & 0x00FFFFFF | 0x40000000)};
+        return new String[]{"through the relay", String.valueOf(BLUE & 0x00FFFFFF | alpha)};
     }
 
     private static List<String> addresses(JSONObject n) {

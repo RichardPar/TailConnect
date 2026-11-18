@@ -61,7 +61,18 @@ type pendingPing struct {
 
 type stunRequest struct {
 	region int
+	server netip.Addr
 	sent   time.Time
+}
+
+// cgnatPrefix is the shared address space (RFC 6598) carriers use for CGNAT.
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// isPublicAddr reports whether a is globally routable: not private, CGNAT,
+// loopback, link-local or unspecified.
+func isPublicAddr(a netip.Addr) bool {
+	a = a.Unmap()
+	return a.IsValid() && a.IsGlobalUnicast() && !a.IsPrivate() && !cgnatPrefix.Contains(a)
 }
 
 // debugDisco logs every disco message when TC_DISCO_DEBUG is set.
@@ -344,7 +355,7 @@ func (c *Conn) sendSTUN(targets []stunTarget) {
 		c.mu.Lock()
 		ss := c.socks
 		if ss != nil {
-			c.stunTx[tx] = stunRequest{region: t.region, sent: time.Now()}
+			c.stunTx[tx] = stunRequest{region: t.region, server: ip, sent: time.Now()}
 		}
 		c.mu.Unlock()
 		if ss != nil {
@@ -366,9 +377,19 @@ func (c *Conn) handleSTUNLocked(b []byte) {
 	c.regionLatency[sr.region] = time.Since(sr.sent)
 	mapped = unmap(mapped)
 	before := c.endpointsLocked()
-	c.stunAddrs[sr.region] = mapped
-	if !slices.Equal(before, c.endpointsLocked()) {
-		c.logf("magicsock: public address %v (via relay region %d STUN)", mapped, sr.region)
+	if isPublicAddr(sr.server) && !isPublicAddr(mapped.Addr()) {
+		// A public STUN server that sees a private source address was
+		// reached through the router's NAT loopback (hairpin): the address
+		// is the router's LAN side, not ours on the internet, and its port
+		// changes every query. Advertising it would only churn endpoints.
+		delete(c.stunAddrs, sr.region)
+	} else {
+		c.stunAddrs[sr.region] = mapped
+	}
+	if after := c.endpointsLocked(); !slices.Equal(before, after) {
+		if a, ok := c.stunAddrs[sr.region]; ok {
+			c.logf("magicsock: public address %v (via relay region %d STUN)", a, sr.region)
+		}
 		c.notifyEndpointsLocked()
 	}
 	c.updateRelaysLocked()
