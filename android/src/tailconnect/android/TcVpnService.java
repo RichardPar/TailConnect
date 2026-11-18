@@ -451,6 +451,24 @@ public class TcVpnService extends VpnService {
             }
 
             @Override
+            public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                worker.execute(() -> {
+                    // On mobile data and Wi-Fi (or Ethernet) is now up and
+                    // reaches the internet (validated, so not a sign-in page):
+                    // move to it. Mobile data stays up, so onLost never fires,
+                    // and the relay connection would otherwise stay on mobile.
+                    if (defaultNet == null || netLost || network.equals(defaultNet)) return;
+                    if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return;
+                    if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                            && !caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return;
+                    NetworkCapabilities cur = cm.getNetworkCapabilities(defaultNet);
+                    if (cur == null || !cur.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return;
+                    addLog("Wi-Fi is available; moving off mobile data");
+                    useNetwork(cm, network, "Wi-Fi is available");
+                });
+            }
+
+            @Override
             public void onLinkPropertiesChanged(Network network, LinkProperties lp) {
                 worker.execute(() -> {
                     if (network.equals(defaultNet)) sendNetwork(lp);
