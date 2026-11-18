@@ -281,6 +281,21 @@ CREATE TRIGGER users_gen_dns AFTER UPDATE OF dns_domain ON users
 	WHEN OLD.dns_domain IS NOT NEW.dns_domain
 	BEGIN UPDATE generation SET value = value + 1; END;
 `,
+	// 12: machine aliases: extra MagicDNS names (labels, JSON array) that
+	// resolve to the machine. Unique within the account alongside names
+	// (checked in Go); they affect maps.
+	`
+ALTER TABLE nodes ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]';
+CREATE TRIGGER nodes_gen_aliases AFTER UPDATE OF aliases ON nodes
+	WHEN OLD.aliases IS NOT NEW.aliases
+	BEGIN UPDATE generation SET value = value + 1; END;
+`,
+	// 13: port limits on shares: what the recipient account's machines may
+	// open on the shared machine, in access-rule syntax ('*' = everything,
+	// as before). Changing them affects maps (shares_gen_upd).
+	`
+ALTER TABLE shares ADD COLUMN ports TEXT NOT NULL DEFAULT '*';
+`,
 }
 
 // Generation returns a counter that increases whenever nodes or users change

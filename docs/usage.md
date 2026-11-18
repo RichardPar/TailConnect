@@ -46,10 +46,12 @@ How to run a TailConnect server once it's [installed](installation.md): accounts
 | Join a device | Auth keys → Generate key, then on the device `sudo tc up --server URL --authkey tc-auth-…` | `sudo tc-control keys create -user bob` |
 | Join many devices (fleet, CI) | tick *Reusable* | `… keys create -user ci -reusable -expiration 720h` |
 | Share a machine with another account | Sharing → Share (by name) or Create link | `sudo tc-control shares create NODE_ID ACCOUNT` |
+| Share only some ports (e.g. a web server) | Sharing → *ports* box when sharing, or **Ports** on the share | `sudo tc-control shares create NODE_ID ACCOUNT tcp:80,tcp:443`, `… shares ports ID tcp:443` |
 | Accept a share | Sharing → Accept, or paste a link under "Shared with me" | `sudo tc-control shares accept ID` |
 | End a share | Sharing → Revoke (owner) or Remove (recipient) | `sudo tc-control shares revoke ID` |
 | Limit which machines reach which | Machines → Tags, then Access rules → Add rule | `… nodes tag 4 server`, `… rules add -user bob tag:staff tag:server tcp:22,443` |
 | Rename a machine | Machines → Rename | `sudo tc-control nodes rename 4 build-server` |
+| Give a machine extra names | Machines → Aliases | `sudo tc-control nodes alias 4 nas,media` (`""` removes them) |
 | Remove a machine | Machines → Remove (or `sudo tc logout` on it) | `sudo tc-control nodes delete 4` |
 | Cut an account off | Accounts → Suspend | `sudo tc-control users suspend bob` |
 | Reset a forgotten password | Accounts → Reset password | `sudo tc-control users passwd bob` |
@@ -120,10 +122,42 @@ How they behave:
 - Rules only add permissions, and they're one-way: `tag:staff → tag:server on tcp:22` lets laptops open SSH to servers, not the reverse. Replies always flow back, so the SSH session works.
 - Machines that no rule lets talk in either direction don't see each other at all (not in `tc status`, no name, no relay).
 - In `tc status`, a limited peer shows what it may open on this machine: `rules: can open tcp:22,443 here`, or `rules: can't open connections here`.
-- Rules apply within the account. They don't change [shares](#sharing-a-machine): a machine shared with you is reachable as the share says.
+- Rules apply within the account. They don't change [shares](#sharing-a-machine): a machine shared with another account is reachable there on the share's ports.
 - Changes take effect on every machine within a second.
 
 Rules are enforced by each receiving machine's packet filter, the same one that makes sharing one-way ([how](how-it-works.md#access-rules-and-the-packet-filter)).
+
+### Example: a web server shared between accounts
+
+richard runs a web server, `web`, and wants his own laptops to reach it on HTTP/HTTPS only, and the accounts `alice` and `bob` to use the website too, without seeing his other machines.
+
+**1. Inside richard's account: rules.** Tag the machines, then allow the laptops onto the web ports:
+
+```
+sudo tc-control nodes tag 4 server            # web (ID 4)
+sudo tc-control nodes tag 1 staff             # devbox
+sudo tc-control nodes tag 9 staff             # laptop
+sudo tc-control rules add -user richard tag:staff tag:server tcp:80,tcp:443
+```
+
+richard's laptops can now open `http://web` and `https://web`, but not SSH to it. `web` can't open connections to the laptops, and richard's untagged machines (the tablet, say) don't see `web` at all.
+
+**2. Other accounts: shares, limited to the web ports.** Share `web` with each account for `tcp:80,tcp:443` only (Sharing → *Shared by me* → pick `web`, type the account name, put `tcp:80,tcp:443` in *ports*, **Share**):
+
+```
+sudo tc-control shares create 4 alice tcp:80,tcp:443
+sudo tc-control shares create 4 bob tcp:80,tcp:443
+```
+
+Each of them accepts under Sharing → *Shared with me* (or an operator runs `sudo tc-control shares list`, then `shares accept ID`). Within a second, every machine in alice's and bob's accounts reaches the site as `http://web.richard` (short for `web.richard.home.internal`), but not SSH or anything else on `web`. Neither sees richard's other machines, `web` can't open connections into their accounts, and alice and bob don't see each other's machines.
+
+| | Reaches `web` on | `web` can open connections to it |
+|---|---|---|
+| richard's `staff` machines | tcp 80, 443 (the rule) | no |
+| richard's other machines | nothing (doesn't see it) | no |
+| alice's and bob's machines | tcp 80, 443 (the shares) | no |
+
+On `web`, `tc status` shows their machines as `has access to this machine on tcp:80,tcp:443`. To change a share's ports later: **Ports** on the share in Sharing → *Shared by me*, or `sudo tc-control shares ports ID tcp:443` (`*` gives everything again). A share made without ports gives every port, as before.
 
 ---
 
@@ -137,10 +171,12 @@ Share a machine when someone in another account should be able to use it (a file
 2. **They accept.** A share by name appears under *Shared with me* in their portal, with a badge on the Sharing tab; they click **Accept**. A link is accepted by pasting it into *Shared with me* and clicking **Add**.
 3. **It's in effect.** Within a second, all of their machines can connect to yours, by name: `nas.alice` (short for `nas.alice.tc.internal`).
 
+**Limiting the ports.** By default a share lets the other account open anything on the machine. To allow only some ports, type them in the *ports* box when sharing (or click **Ports** on an existing share), in the same form as [access rules](#access-rules): `tcp:80,tcp:443` for a web server, `445` for file sharing, `icmp` to allow ping. CLI: `sudo tc-control shares create NODE_ID ACCOUNT tcp:80,tcp:443`, `shares link NODE_ID tcp:443`, `shares ports ID PORTS`. Changes take effect within a second. Only the machine's owner (or an operator) can change them. The shared machine's packet filter enforces them, and machines on older versions of `tcd` enforce them too.
+
 | | Their machines → your shared machine | Your shared machine → their machines | Your other machines |
 |---|---|---|---|
 | Visible | yes | yes, so replies work | no |
-| Can connect | **yes** | **no**: only replies to their connections | no |
+| Can connect | **yes**, on the share's ports (all unless you limit them) | **no**: only replies to their connections | no |
 
 On the recipient's machines, `tc status` shows the machine as `shared with you`; on your shared machine, their machines show as `has access to this machine`:
 
@@ -262,6 +298,7 @@ curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://SERVER:7741/api/v1/nodes
 | `POST /api/v1/nodes/{id}/rename` | `{"name"}` | |
 | `POST /api/v1/nodes/{id}/approve` | | approves a machine waiting for approval |
 | `POST /api/v1/nodes/{id}/tags` | `{"tags": ["server", "db"]}` | replaces the machine's tags |
+| `POST /api/v1/nodes/{id}/aliases` | `{"aliases": ["nas", "media"]}` | replaces the machine's aliases (`[]` removes them) |
 | `POST /api/v1/nodes/{id}/exit-node` | `{"enabled": true}` | turns the machine's [exit node](#exit-nodes) role on or off; turning it on is refused (400) for machines that don't run Linux |
 | `GET /api/v1/rules` | | the account's rules `[{id, user, src, dst, ports, created}]`; operators: `?user=NAME`, or all with the admin token |
 | `POST /api/v1/rules` | `{"src", "dst", "ports", "user"}` | 201 the rule (ports normalised); `user` only for operators |
@@ -271,9 +308,10 @@ curl -H "Authorization: Bearer $TC_ADMIN_TOKEN" http://SERVER:7741/api/v1/nodes
 | `GET /api/v1/keys` | | `[{id, prefix, user, reusable, ephemeral, uses, created, expires, revoked, usable}]` |
 | `POST /api/v1/keys` | `{"ttl": "24h", "reusable", "ephemeral", "preapproved", "user"}` | 201 `{key, info}`; `user` defaults to you (operators may name any account). TTL up to 2160h. |
 | `DELETE /api/v1/keys/{id}` | | revokes |
-| `GET /api/v1/shares` | | `{outgoing: [...], incoming: [...]}`; each `{id, nodeId, machine, fqdn, owner, recipient, status, inEffect, link, linkPrefix, created, acceptedAt, expires}` |
-| `POST /api/v1/nodes/{id}/shares` | `{"recipient"}` | 201 the pending share |
-| `POST /api/v1/nodes/{id}/share-links` | `{"ttl": "168h"}` | 201 `{code, share}`; TTL up to 720h |
+| `GET /api/v1/shares` | | `{outgoing: [...], incoming: [...]}`; each `{id, nodeId, machine, fqdn, owner, recipient, status, ports, inEffect, link, linkPrefix, created, acceptedAt, expires}` |
+| `POST /api/v1/nodes/{id}/shares` | `{"recipient", "ports": "tcp:80,tcp:443"}` | 201 the pending share; `ports` optional (default `*`, everything) |
+| `POST /api/v1/nodes/{id}/share-links` | `{"ttl": "168h", "ports": "tcp:443"}` | 201 `{code, share}`; TTL up to 720h; `ports` optional |
+| `POST /api/v1/shares/{id}/ports` | `{"ports": "tcp:443"}` | the machine's owner changes what the recipient may open (`*` = everything) |
 | `POST /api/v1/shares/{id}/accept` | | the recipient accepts |
 | `POST /api/v1/shares/redeem` | `{"code"}` | the share behind a link |
 | `DELETE /api/v1/shares/{id}` | | revoke, decline or leave |
@@ -356,6 +394,8 @@ Every machine is reachable as `machine.account.domain`, where the domain is the 
 - No two accounts may share a domain or have one inside the other, and an account's domain can't be inside the server's `-domain` (where every account's default lives).
 - Short names work as before inside the account (`laptop`). Machines shared from an account with its own domain have no short form: use the full name, `nas.acme.internal`.
 - Machines need this version of `tcd` (and of the Android app) to resolve names under an account's own domain; older ones only answer names under `-domain`. On Android, a domain change applies to short names the next time the VPN starts.
+
+**Aliases.** A machine can have extra names that resolve to the same address, so `jellyfin` can also be `nas` (`nas.richard.home.internal`, or just `nas` inside the account). Set them under **Machines → Aliases** or with `sudo tc-control nodes alias ID nas,media`. An alias can't be the name or alias of another machine in the same account, and a new machine that joins with a hostname already used as an alias gets a numbered name (`nas-2`). Aliases are dropped when a machine moves to another account. Reverse lookups still give the machine's own name. Machines need this version of `tcd` (and of the Android app) to resolve aliases.
 
 Reverse lookups of tunnel addresses return names, and renames reach every machine within a few seconds.
 

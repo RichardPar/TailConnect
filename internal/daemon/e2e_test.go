@@ -621,7 +621,7 @@ func TestSharingIsOneWay(t *testing.T) {
 
 	// Alice shares her nas with bob; it takes effect once bob accepts.
 	nasID := nodeID(t, cdb, "nas", "alice")
-	sh, err := cdb.ShareWith(context.Background(), nasID, "bob")
+	sh, err := cdb.ShareWith(context.Background(), nasID, "bob", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -837,4 +837,75 @@ func TestAccessRules(t *testing.T) {
 	}
 	waitFor(t, "all three see each other again", func() bool { return running(printer, 2)() && running(server, 2)() })
 	waitFor(t, "server → laptop allowed again", func() bool { return tryDial(server, netip.AddrPortFrom(ipLaptop, 7000)) == nil })
+}
+
+// A share limited to some ports: the recipient's machines may open only
+// those on the shared machine, enforced by the shared machine's filter.
+func TestSharePortLimits(t *testing.T) {
+	cdb, url, aliceKey := newControl(t)
+	bob, _ := cdb.CreateUser(context.Background(), "bob")
+	bobKey, _, _ := cdb.CreatePreAuthKey(context.Background(), db.CreatePreAuthKeyParams{UserID: bob.ID, TTL: time.Hour})
+	web, laptop := newTestNode(t, "alice-web"), newTestNode(t, "bob-laptop")
+	if err := web.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: aliceKey, Hostname: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := laptop.d.Up(localapi.UpRequest{ControlURL: url, AuthKey: bobKey, Hostname: "laptop"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both running", func() bool { return running(web, 0)() && running(laptop, 0)() })
+	ipWeb := selfIP(t, web)
+	echo(t, web, ipWeb) // tcp 7000
+	ln, err := web.tnet().ListenTCPAddrPort(netip.AddrPortFrom(ipWeb, 7001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	sh, err := cdb.ShareWith(context.Background(), nodeID(t, cdb, "web", "alice"), "bob", "tcp:7000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cdb.AcceptShare(context.Background(), sh.ID, bob.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "share in both maps", func() bool { return running(web, 1)() && running(laptop, 1)() })
+	if np := web.d.Status().Peers[0]; !np.Shared || !np.NoInitiate || len(np.Inbound) != 1 || np.Inbound[0].First != 7000 {
+		t.Fatalf("web's view of bob's laptop: %+v", np)
+	}
+	if got, err := ping(laptop, ipWeb, "allowed"); err != nil || got != "pong:allowed" {
+		t.Fatalf("bob → web on the shared port: %q %v", got, err)
+	}
+	dial := func(port uint16) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		c, err := laptop.tnet().DialContextTCPAddrPort(ctx, netip.AddrPortFrom(ipWeb, port))
+		if err == nil {
+			c.Close()
+		}
+		return err
+	}
+	if dial(7001) == nil {
+		t.Fatal("bob opened a port the share doesn't include")
+	}
+
+	// Widening the share to everything lets 7001 through.
+	if err := cdb.SetSharePorts(context.Background(), sh.ID, 0, "*"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "unlimited share in web's map", func() bool {
+		p := web.d.Status().Peers
+		return len(p) == 1 && !p[0].NoInitiate
+	})
+	if err := dial(7001); err != nil {
+		t.Fatalf("bob → web:7001 after widening: %v", err)
+	}
 }

@@ -242,6 +242,8 @@ func cmdStatus(c *localapi.Client, args []string) error {
 		}
 		detail := state
 		switch {
+		case p.Shared && p.NoInitiate && len(p.Inbound) > 0:
+			detail = "has access to this machine on " + acl.FormatPorts(acl.Access{Ranges: p.Inbound}) + "; " + state
 		case p.Shared && p.NoInitiate:
 			detail = "shared with you; " + state
 		case p.Shared:

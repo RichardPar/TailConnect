@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"strings"
 
+	"tailconnect/internal/acl"
 	"tailconnect/internal/localapi"
 	"tailconnect/internal/trayicon"
 )
@@ -119,6 +120,8 @@ func connection(p localapi.PeerStatus) string {
 		parts = append(parts, "idle")
 	}
 	switch {
+	case p.Shared && p.NoInitiate && len(p.Inbound) > 0:
+		parts = append(parts, "has access to this machine on "+acl.FormatPorts(acl.Access{Ranges: p.Inbound}))
 	case p.Shared && p.NoInitiate:
 		parts = append(parts, "shared with you")
 	case p.Shared:

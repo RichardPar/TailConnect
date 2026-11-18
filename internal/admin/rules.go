@@ -53,6 +53,23 @@ func (s *Server) setNodeTags(w http.ResponseWriter, r *http.Request) {
 	s.writeNode(w, r, n.ID)
 }
 
+func (s *Server) setNodeAliases(w http.ResponseWriter, r *http.Request) {
+	n, ok := s.ownNode(w, r)
+	if !ok {
+		return
+	}
+	var req struct{ Aliases []string }
+	if !decode(w, r, &req) {
+		return
+	}
+	aliases, err := s.db.SetNodeAliases(r.Context(), n.ID, req.Aliases)
+	if s.dbError(w, "set aliases", err) {
+		return
+	}
+	s.log.Info("machine aliases set", "node", n.GivenName, "user", n.UserName, "aliases", aliases, "by", principalFrom(r.Context()).name())
+	s.writeNode(w, r, n.ID)
+}
+
 // ruleAccount is the account a rules request is about: a tenant's own, or
 // for operators the ?user= / body account (empty = all, for listing).
 func (s *Server) ruleAccount(w http.ResponseWriter, r *http.Request, name string) (db.User, bool) {

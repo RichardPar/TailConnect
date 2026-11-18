@@ -517,3 +517,51 @@ func TestTenantDNSDomainAPI(t *testing.T) {
 		t.Fatalf("operator reset: %d %v", code, m)
 	}
 }
+
+func TestAliasesAPI(t *testing.T) {
+	f := newFx(t)
+	acme := f.account("acme", db.RoleTenant)
+	globex := f.account("globex", db.RoleTenant)
+	id := f.machine("acme", "jellyfin")
+	other := f.machine("acme", "laptop")
+	code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/aliases", id), map[string]any{"aliases": []string{"NAS", " media"}}, nil)
+	if code != 200 || fmt.Sprint(m["aliases"]) != "[media nas]" {
+		t.Fatalf("aliases: %d %v", code, m)
+	}
+	if fq := fmt.Sprint(m["aliasFqdns"]); !strings.Contains(fq, "nas.acme.") {
+		t.Fatalf("alias FQDNs: %s", fq)
+	}
+	if code, _, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/aliases", other), map[string]any{"aliases": []string{"nas"}}, nil); code != 409 {
+		t.Fatalf("alias taken by another machine: %d", code)
+	}
+	if code, _, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/aliases", id), map[string]any{"aliases": []string{"bad name"}}, nil); code != 400 {
+		t.Fatalf("bad alias: %d", code)
+	}
+	if code, _, _ := f.do(globex, "POST", fmt.Sprintf("/api/v1/nodes/%d/aliases", id), map[string]any{"aliases": []string{"x"}}, nil); code != 404 {
+		t.Fatalf("aliasing another account's machine: %d", code)
+	}
+}
+
+func TestSharePortsAPI(t *testing.T) {
+	f := newFx(t)
+	acme := f.account("acme", db.RoleTenant)
+	globex := f.account("globex", db.RoleTenant)
+	web := f.machine("acme", "web")
+	if code, _, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/shares", web), map[string]string{"recipient": "globex", "ports": "tcp:99999"}, nil); code != 400 {
+		t.Fatalf("bad ports: %d", code)
+	}
+	code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/shares", web), map[string]string{"recipient": "globex", "ports": " TCP:80, tcp:443"}, nil)
+	if code != 201 || m["ports"] != "tcp:80,tcp:443" {
+		t.Fatalf("share with ports: %d %v", code, m)
+	}
+	id := int(m["id"].(float64))
+	if code, _, _ := f.do(globex, "POST", fmt.Sprintf("/api/v1/shares/%d/ports", id), map[string]string{"ports": "*"}, nil); code != 404 {
+		t.Fatalf("recipient widened the share: %d", code)
+	}
+	if code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/shares/%d/ports", id), map[string]string{"ports": ""}, nil); code != 200 || m["ports"] != "*" {
+		t.Fatalf("owner reset ports: %d %v", code, m)
+	}
+	if code, m, _ := f.do(acme, "POST", fmt.Sprintf("/api/v1/nodes/%d/share-links", web), map[string]string{"ttl": "1h", "ports": "443"}, nil); code != 201 || m["share"].(map[string]any)["ports"] != "443" {
+		t.Fatalf("link with ports: %d %v", code, m)
+	}
+}

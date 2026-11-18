@@ -136,7 +136,7 @@ By default, every machine in an account can reach every other. Once an account h
 | From, To | `*` (any of the account's machines), `tag:NAME` (machines with that [tag](#machines)), or a machine name |
 | Ports | `*` (everything, including ping), or a list such as `22`, `8000-8100`, `tcp:443`, `udp:53`, `icmp` |
 
-The example above: machines tagged `staff` (devbox, laptop) may reach everything; others, such as the tablet, may reach nothing in the account; and the media server can't open connections to anyone. Rules don't affect [shared machines](#sharing). More in [Access rules](usage.md#access-rules).
+The example above: machines tagged `staff` (devbox, laptop) may reach everything; others, such as the tablet, may reach nothing in the account; and the media server can't open connections to anyone. Rules don't affect [shared machines](#sharing); a share has its own ports. More in [Access rules](usage.md#access-rules), including [a web server shared between accounts](usage.md#example-a-web-server-shared-between-accounts).
 
 ## Sharing
 

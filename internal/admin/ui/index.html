@@ -137,30 +137,31 @@
           <thead><tr><th>From</th><th>To</th><th>Ports</th><th>Added</th><th></th></tr></thead>
           <tbody id="rules-body"></tbody>
         </table></div>
-        <p class="sub">From and To: <code>*</code> (any of the account's machines), <code>tag:NAME</code>, or a machine name. Ports: <code>*</code> (everything, including ping), or a list of <code>22</code>, <code>8000-8100</code>, <code>tcp:443</code>, <code>udp:53</code>, <code>icmp</code>. Replies always flow back. Rules don't affect shared machines.</p>
+        <p class="sub">From and To: <code>*</code> (any of the account's machines), <code>tag:NAME</code>, or a machine name. Ports: <code>*</code> (everything, including ping), or a list of <code>22</code>, <code>8000-8100</code>, <code>tcp:443</code>, <code>udp:53</code>, <code>icmp</code>. Replies always flow back. Rules don't affect shared machines: limit those with the share's ports.</p>
       </div>
     </section>
 
     <section data-panel="sharing" hidden>
       <div class="card">
         <div class="card-head"><h2>Shared with me</h2></div>
-        <p class="muted intro">Machines other accounts have shared with you. Your machines can connect to them; they can't connect to yours.</p>
+        <p class="muted intro">Machines other accounts have shared with you. Your machines can connect to them (on the ports shown); they can't connect to yours.</p>
         <form id="redeem-form" class="inline-form">
           <input id="redeem-code" placeholder="tc-share-… (a share link you received)" spellcheck="false" autocomplete="off" aria-label="Share link" size="44" required>
           <button type="submit" class="ghost">Add</button>
         </form>
         <div class="table-wrap"><table>
-          <thead><tr><th>Machine</th><th>Owner</th><th>Status</th><th>Since</th><th></th></tr></thead>
+          <thead><tr><th>Machine</th><th>Owner</th><th>Ports</th><th>Status</th><th>Since</th><th></th></tr></thead>
           <tbody id="incoming-body"></tbody>
         </table></div>
         <p class="empty" id="incoming-empty" hidden>Nothing shared with you yet.</p>
       </div>
       <div class="card">
         <div class="card-head"><h2>Shared by me</h2></div>
-        <p class="muted intro">Let another account's machines connect to one of yours. Your machine can't connect back to theirs.</p>
+        <p class="muted intro">Let another account's machines connect to one of yours, on every port or only the ports you give (for a web server: <code>tcp:80,tcp:443</code>). Your machine can't connect back to theirs.</p>
         <form id="share-form" class="inline-form">
           <label>Machine <select id="share-machine" required></select></label>
           <input id="share-recipient" placeholder="account name" spellcheck="false" autocapitalize="none" aria-label="Share with account">
+          <label>ports <input id="share-ports" placeholder="* (everything)" spellcheck="false" autocapitalize="none" size="14" title="What their machines may open on yours, like access rules: * (everything), or e.g. tcp:80,tcp:443, 22, icmp"></label>
           <button type="submit" class="primary">Share</button>
           <span class="muted">or</span>
           <label>link valid for
@@ -177,7 +178,7 @@
           <div class="copy-row"><code id="new-share-link-value"></code><button class="ghost" data-copy="new-share-link-value">Copy</button></div>
         </div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Machine</th><th>Shared with</th><th>Status</th><th>Created</th><th></th></tr></thead>
+          <thead><tr><th>Machine</th><th>Shared with</th><th>Ports</th><th>Status</th><th>Created</th><th></th></tr></thead>
           <tbody id="outgoing-body"></tbody>
         </table></div>
         <p class="empty" id="outgoing-empty" hidden>You haven't shared any machines.</p>

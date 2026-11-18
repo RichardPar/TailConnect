@@ -47,6 +47,9 @@ type Config struct {
 	// Hosts maps lowercase fully-qualified names (no trailing dot) under
 	// Domain or Domains to their addresses.
 	Hosts map[string][]netip.Addr
+	// Aliases are further names, like Hosts, that are not used to answer
+	// reverse lookups (those give the Hosts name).
+	Aliases map[string][]netip.Addr
 	// ReversePrefixes are the address ranges whose reverse (PTR) lookups are
 	// answered locally (the tunnel's address pools).
 	ReversePrefixes []netip.Prefix
@@ -84,7 +87,10 @@ func NewResolver(logf func(string, ...any)) *Resolver {
 
 // SetConfig replaces what the resolver answers.
 func (r *Resolver) SetConfig(c Config) {
-	hosts := make(map[string][]netip.Addr, len(c.Hosts))
+	hosts := make(map[string][]netip.Addr, len(c.Hosts)+len(c.Aliases))
+	for name, addrs := range c.Aliases {
+		hosts[canonical(name)] = addrs
+	}
 	ptr := map[netip.Addr]string{}
 	for name, addrs := range c.Hosts {
 		fq := canonical(name)

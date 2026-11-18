@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ type Node struct {
 	Ephemeral  bool
 	Approved   bool     // false: the account requires approval and nobody has given it yet
 	Tags       []string // access-rule tags
+	Aliases    []string // extra MagicDNS labels that resolve to this machine
 	ExitNode   bool     // may carry its account's internet traffic (off by default)
 	CreatedAt  time.Time
 	LastSeen   time.Time // zero = never
@@ -112,7 +114,12 @@ func applyAuthKey(ctx context.Context, tx *sql.Tx, id int64, key string, now tim
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, given_name = ?, ephemeral = ?, preauth_key_id = ? WHERE id = ?`,
+	// Aliases belong to the account's namespace: moving drops them.
+	aliasesSQL := "aliases"
+	if curUser != k.UserID {
+		aliasesSQL = "'[]'"
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, given_name = ?, ephemeral = ?, preauth_key_id = ?, aliases = `+aliasesSQL+` WHERE id = ?`,
 		k.UserID, name, k.Ephemeral, k.ID, id)
 	return err
 }
@@ -261,16 +268,16 @@ func (d *DB) TouchNode(ctx context.Context, id int64) error {
 
 const nodeSelect = `
 	SELECT n.id, n.user_id, u.name, u.status, u.dns_domain, n.machine_key, n.node_key, n.disco_key, n.hostname, n.given_name,
-	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.approved, n.tags, n.exit_node, n.created_at, n.last_seen, n.expires_at
+	       n.hostinfo, n.ipv4, n.ipv6, n.endpoints, n.home_relay, n.ephemeral, n.approved, n.tags, n.aliases, n.exit_node, n.created_at, n.last_seen, n.expires_at
 	FROM nodes n JOIN users u ON u.id = n.user_id`
 
 func scanNode(r rowScanner) (Node, error) {
 	var n Node
-	var v4, v6, eps, tags string
+	var v4, v6, eps, tags, aliases string
 	var created int64
 	var lastSeen, expires sql.NullInt64
 	err := r.Scan(&n.ID, &n.UserID, &n.UserName, &n.UserStatus, &n.UserDomain, &n.MachineKey, &n.NodeKey, &n.DiscoKey, &n.Hostname,
-		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &n.Approved, &tags, &n.ExitNode, &created, &lastSeen, &expires)
+		&n.GivenName, &n.Hostinfo, &v4, &v6, &eps, &n.HomeRelay, &n.Ephemeral, &n.Approved, &tags, &aliases, &n.ExitNode, &created, &lastSeen, &expires)
 	if err != nil {
 		return Node{}, err
 	}
@@ -285,6 +292,9 @@ func scanNode(r rowScanner) (Node, error) {
 	}
 	if err := json.Unmarshal([]byte(tags), &n.Tags); err != nil {
 		return Node{}, fmt.Errorf("node %d: bad tags: %w", n.ID, err)
+	}
+	if err := json.Unmarshal([]byte(aliases), &n.Aliases); err != nil {
+		return Node{}, fmt.Errorf("node %d: bad aliases: %w", n.ID, err)
 	}
 	n.CreatedAt = fromUnix(created)
 	n.LastSeen = fromNullUnix(lastSeen)
@@ -348,23 +358,95 @@ func (d *DB) DeleteNode(ctx context.Context, id int64) error {
 	return nil
 }
 
-// RenameNode sets a node's MagicDNS name. name must already be a valid DNS label.
+// RenameNode sets a node's MagicDNS name. name must already be a valid DNS
+// label, not used by another machine in the account as a name or alias. If
+// it is one of the machine's own aliases, that alias is dropped.
 func (d *DB) RenameNode(ctx context.Context, id int64, name string) error {
 	if SanitizeName(name) != name {
 		return fmt.Errorf("%w: name %q: use lowercase letters, digits and '-' (max 63)", ErrInvalid, name)
 	}
-	res, err := d.sql.ExecContext(ctx, `UPDATE nodes SET given_name = ? WHERE id = ?`, name, id)
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	n, err := getNodeTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	taken, err := takenNames(ctx, tx, n.UserID, id)
+	if err != nil {
+		return err
+	}
+	if taken[name] {
+		return fmt.Errorf("name %q: %w", name, ErrExists)
+	}
+	aliases := slices.DeleteFunc(slices.Clone(n.Aliases), func(a string) bool { return a == name })
+	if aliases == nil {
+		aliases = []string{}
+	}
+	b, _ := json.Marshal(aliases)
+	_, err = tx.ExecContext(ctx, `UPDATE nodes SET given_name = ?, aliases = ? WHERE id = ?`, name, string(b), id)
 	if isUniqueViolation(err) {
 		return fmt.Errorf("name %q: %w", name, ErrExists)
 	}
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("node %d: %w", id, ErrNotFound)
-	}
-	return nil
+	return tx.Commit()
 }
+
+// SetNodeAliases replaces a machine's aliases: extra MagicDNS labels that
+// resolve to it. Each must be a valid DNS label, not the machine's own name,
+// and not a name or alias of another machine in the account. Duplicates are
+// dropped and the list is sorted.
+func (d *DB) SetNodeAliases(ctx context.Context, id int64, aliases []string) ([]string, error) {
+	out := []string{}
+	for _, a := range aliases {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if a == "" {
+			continue
+		}
+		if SanitizeName(a) != a {
+			return nil, fmt.Errorf("%w: alias %q: use lowercase letters, digits and '-' (max 63)", ErrInvalid, a)
+		}
+		out = append(out, a)
+	}
+	slices.Sort(out)
+	out = slices.Compact(out)
+	if len(out) > MaxAliases {
+		return nil, fmt.Errorf("%w: at most %d aliases per machine", ErrInvalid, MaxAliases)
+	}
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	n, err := getNodeTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	taken, err := takenNames(ctx, tx, n.UserID, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range out {
+		if a == n.GivenName {
+			return nil, fmt.Errorf("%w: alias %q is the machine's own name", ErrInvalid, a)
+		}
+		if taken[a] {
+			return nil, fmt.Errorf("alias %q is already used by another machine: %w", a, ErrExists)
+		}
+	}
+	b, _ := json.Marshal(out)
+	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET aliases = ? WHERE id = ?`, string(b), id); err != nil {
+		return nil, err
+	}
+	return out, tx.Commit()
+}
+
+// MaxAliases bounds a machine's aliases.
+const MaxAliases = 16
 
 func usedIPv4s(ctx context.Context, q querier) (map[netip.Addr]bool, error) {
 	rows, err := q.QueryContext(ctx, `SELECT ipv4 FROM nodes`)
@@ -392,21 +474,8 @@ func uniqueGivenName(ctx context.Context, q querier, userID int64, base string, 
 	// One query for the account's names, then pick in memory: probing
 	// candidates one query at a time made a fleet of N same-named machines
 	// cost O(N²) queries to join.
-	rows, err := q.QueryContext(ctx, `SELECT given_name FROM nodes WHERE user_id = ? AND id != ?`, userID, selfID)
+	taken, err := takenNames(ctx, q, userID, selfID)
 	if err != nil {
-		return "", err
-	}
-	taken := map[string]bool{}
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			rows.Close()
-			return "", err
-		}
-		taken[n] = true
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return "", err
 	}
 	for i := 1; ; i++ {
@@ -419,6 +488,30 @@ func uniqueGivenName(ctx context.Context, q querier, userID int64, base string, 
 			return cand, nil
 		}
 	}
+}
+
+// takenNames returns the names and aliases of userID's nodes other than
+// selfID: the labels a name or alias of selfID may not use.
+func takenNames(ctx context.Context, q querier, userID, selfID int64) (map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT given_name, aliases FROM nodes WHERE user_id = ? AND id != ?`, userID, selfID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	taken := map[string]bool{}
+	for rows.Next() {
+		var n, al string
+		if err := rows.Scan(&n, &al); err != nil {
+			return nil, err
+		}
+		taken[n] = true
+		var as []string
+		_ = json.Unmarshal([]byte(al), &as)
+		for _, a := range as {
+			taken[a] = true
+		}
+	}
+	return taken, rows.Err()
 }
 
 // SanitizeName turns an arbitrary hostname into a DNS label: lowercase

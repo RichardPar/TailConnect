@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"tailconnect/internal/acl"
 	"tailconnect/internal/db"
 )
 
@@ -20,6 +21,7 @@ type apiShare struct {
 	Owner      string     `json:"owner"`
 	Recipient  string     `json:"recipient,omitempty"` // "" for an unredeemed link
 	Status     string     `json:"status"`
+	Ports      string     `json:"ports"` // what the recipient may open: "*" = everything
 	InEffect   bool       `json:"inEffect"`
 	Link       bool       `json:"link"`
 	LinkPrefix string     `json:"linkPrefix,omitempty"`
@@ -32,7 +34,7 @@ func (s *Server) toAPIShare(sh db.Share) apiShare {
 	out := apiShare{
 		ID: sh.ID, NodeID: sh.NodeID, Machine: sh.NodeName,
 		FQDN:  sh.NodeName + "." + db.TenantDomain(sh.OwnerName, sh.OwnerDomain, s.info.BaseDomain),
-		Owner: sh.OwnerName, Recipient: sh.RecipientName, Status: sh.Status, InEffect: sh.InEffect(),
+		Owner: sh.OwnerName, Recipient: sh.RecipientName, Status: sh.Status, Ports: sh.Ports, InEffect: sh.InEffect(),
 		Link: sh.Link, LinkPrefix: sh.LinkPrefix, Created: sh.CreatedAt,
 	}
 	if !sh.AcceptedAt.IsZero() {
@@ -83,11 +85,15 @@ func (s *Server) shareNode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req struct{ Recipient string }
+	var req struct{ Recipient, Ports string }
 	if !decode(w, r, &req) {
 		return
 	}
-	sh, err := s.db.ShareWith(r.Context(), n.ID, strings.ToLower(strings.TrimSpace(req.Recipient)))
+	ports, ok := sharePortsArg(w, req.Ports)
+	if !ok {
+		return
+	}
+	sh, err := s.db.ShareWith(r.Context(), n.ID, strings.ToLower(strings.TrimSpace(req.Recipient)), ports)
 	if s.dbError(w, "share", err) {
 		return
 	}
@@ -100,8 +106,12 @@ func (s *Server) createShareLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req struct{ TTL string }
+	var req struct{ TTL, Ports string }
 	if !decode(w, r, &req) {
+		return
+	}
+	ports, ok := sharePortsArg(w, req.Ports)
+	if !ok {
 		return
 	}
 	ttl, err := time.ParseDuration(req.TTL)
@@ -109,12 +119,50 @@ func (s *Server) createShareLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ttl must be a duration between 1s and 720h (30 days)")
 		return
 	}
-	code, sh, err := s.db.CreateShareLink(r.Context(), n.ID, ttl)
+	code, sh, err := s.db.CreateShareLink(r.Context(), n.ID, ttl, ports)
 	if s.dbError(w, "share link", err) {
 		return
 	}
 	s.log.Info("share link created", "machine", n.GivenName, "owner", n.UserName, "by", principalFrom(r.Context()).name())
 	writeJSON(w, http.StatusCreated, map[string]any{"code": code, "share": s.toAPIShare(sh)})
+}
+
+// sharePortsArg validates a share's ports field ("" = everything) and
+// returns its canonical form, or writes a 400.
+func sharePortsArg(w http.ResponseWriter, spec string) (string, bool) {
+	a, err := acl.ParsePorts(spec)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "ports: "+err.Error())
+		return "", false
+	}
+	return acl.FormatPorts(a), true
+}
+
+// setSharePorts changes what a share's recipient may open on the machine.
+// Only the machine's owner (or an operator) may.
+func (s *Server) setSharePorts(w http.ResponseWriter, r *http.Request) {
+	p := principalFrom(r.Context())
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req struct{ Ports string }
+	if !decode(w, r, &req) {
+		return
+	}
+	ports, ok := sharePortsArg(w, req.Ports)
+	if !ok {
+		return
+	}
+	if s.dbError(w, "share ports", s.db.SetSharePorts(r.Context(), id, p.scope(), ports)) {
+		return
+	}
+	sh, err := s.db.GetShare(r.Context(), id)
+	if s.dbError(w, "share ports", err) {
+		return
+	}
+	s.log.Info("share ports set", "machine", sh.NodeName, "owner", sh.OwnerName, "recipient", sh.RecipientName, "ports", ports, "by", p.name())
+	writeJSON(w, http.StatusOK, s.toAPIShare(sh))
 }
 
 func (s *Server) acceptShare(w http.ResponseWriter, r *http.Request) {

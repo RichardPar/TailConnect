@@ -107,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/nodes/{id}/approve", s.approveNode)
 	api.HandleFunc("POST /api/v1/nodes/{id}/expiry", s.setNodeExpiry)
 	api.HandleFunc("POST /api/v1/nodes/{id}/tags", s.setNodeTags)
+	api.HandleFunc("POST /api/v1/nodes/{id}/aliases", s.setNodeAliases)
 	api.HandleFunc("POST /api/v1/nodes/{id}/exit-node", s.setNodeExitNode)
 	api.HandleFunc("GET /api/v1/rules", s.listRules)
 	api.HandleFunc("POST /api/v1/rules", s.addRule)
@@ -117,6 +118,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/v1/nodes/{id}/share-links", s.createShareLink)
 	api.HandleFunc("GET /api/v1/shares", s.listShares)
 	api.HandleFunc("POST /api/v1/shares/{id}/accept", s.acceptShare)
+	api.HandleFunc("POST /api/v1/shares/{id}/ports", s.setSharePorts)
 	api.HandleFunc("POST /api/v1/shares/redeem", s.redeemShareLink)
 	api.HandleFunc("DELETE /api/v1/shares/{id}", s.deleteShare)
 	// Operators only.
@@ -263,6 +265,8 @@ type apiNode struct {
 	Ephemeral bool             `json:"ephemeral"`
 	Approved  bool             `json:"approved"`
 	Tags      []string         `json:"tags"`
+	Aliases   []string         `json:"aliases"`    // labels, e.g. "nas"
+	AliasFQDN []string         `json:"aliasFqdns"` // the same, fully qualified
 	ExitNode  bool             `json:"exitNode"`
 	KeyExpiry *time.Time       `json:"keyExpiry,omitempty"` // absent = never expires
 	Expired   bool             `json:"expired"`
@@ -330,6 +334,12 @@ func (s *Server) toAPINode(n db.Node) apiNode {
 	}
 	if out.Tags == nil {
 		out.Tags = []string{}
+	}
+	out.Aliases, out.AliasFQDN = []string{}, []string{}
+	dom := db.TenantDomain(n.UserName, n.UserDomain, s.info.BaseDomain)
+	for _, a := range n.Aliases {
+		out.Aliases = append(out.Aliases, a)
+		out.AliasFQDN = append(out.AliasFQDN, a+"."+dom)
 	}
 	if !n.ExpiresAt.IsZero() {
 		t := n.ExpiresAt

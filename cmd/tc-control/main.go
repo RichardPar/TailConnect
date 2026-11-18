@@ -64,13 +64,13 @@ Usage:
   tc-control users role NAME operator|tenant | machine-approval NAME on|off
   tc-control users domain NAME [DOMAIN|default]
   tc-control invites create [-expiration 168h] | list | revoke ID
-  tc-control shares list [-user NAME] | create NODE_ID ACCOUNT | link NODE_ID [-expiration 168h]
-  tc-control shares accept ID | revoke ID
+  tc-control shares list [-user NAME] | create NODE_ID ACCOUNT [PORTS] | link NODE_ID [-expiration 168h] [PORTS]
+  tc-control shares accept ID | revoke ID | ports ID PORTS   (PORTS like access rules, e.g. tcp:80,tcp:443; * = everything)
   tc-control keys create -user NAME [-reusable] [-ephemeral] [-preapproved] [-expiration 24h]
   tc-control keys list [-user NAME] | revoke ID
   tc-control nodes list [-user NAME] | delete ID | rename ID NEWNAME
   tc-control nodes approve ID | expiry ID never|DURATION|MONTHSmo|YYYY-MM-DD | tag ID TAG[,TAG...]
-  tc-control nodes exit-node ID on|off
+  tc-control nodes exit-node ID on|off | alias ID NAME[,NAME...]
   tc-control rules list [-user NAME] | add -user NAME FROM TO [PORTS] | delete ID
   tc-control relays create NAME | list | delete NAME   (tokens for standalone tc-relay servers)
   tc-control version
@@ -843,7 +843,7 @@ func cmdShares(args []string) error {
 		if *asJSON {
 			return printJSON(list)
 		}
-		tw := table("ID", "MACHINE", "OWNER", "SHARED WITH", "STATUS")
+		tw := table("ID", "MACHINE", "OWNER", "SHARED WITH", "PORTS", "STATUS")
 		for _, sh := range list {
 			with, status := sh.RecipientName, sh.Status
 			if sh.RecipientID == 0 {
@@ -852,33 +852,60 @@ func cmdShares(args []string) error {
 			} else if sh.Status == db.ShareAccepted && !sh.InEffect() {
 				status = "accepted (an account is not active)"
 			}
-			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", sh.ID, sh.NodeName, sh.OwnerName, with, status)
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", sh.ID, sh.NodeName, sh.OwnerName, with, sh.Ports, status)
 		}
 		return tw.Flush()
 	case "create":
-		if fs.NArg() != 2 {
-			return usageError("usage: tc-control shares create NODE_ID ACCOUNT")
+		if fs.NArg() != 2 && fs.NArg() != 3 {
+			return usageError("usage: tc-control shares create NODE_ID ACCOUNT [PORTS]   (e.g. tcp:80,tcp:443; default * = everything)")
 		}
 		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 		if err != nil {
 			return usageError("bad node ID " + strconv.Quote(fs.Arg(0)))
 		}
-		sh, err := d.ShareWith(ctx, id, fs.Arg(1))
+		ports, err := sharePortsArg(fs.Arg(2))
 		if err != nil {
 			return err
 		}
-		fmt.Printf("offered %s (owner %s) to %s as share %d; it takes effect when they accept\n", sh.NodeName, sh.OwnerName, sh.RecipientName, sh.ID)
+		sh, err := d.ShareWith(ctx, id, fs.Arg(1), ports)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("offered %s (owner %s) to %s as share %d, ports %s; it takes effect when they accept\n", sh.NodeName, sh.OwnerName, sh.RecipientName, sh.ID, sh.Ports)
 	case "link":
-		id, err := idArg(fs, "shares link NODE_ID [-expiration 168h]")
+		if fs.NArg() != 1 && fs.NArg() != 2 {
+			return usageError("usage: tc-control shares link NODE_ID [-expiration 168h] [PORTS]")
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil {
+			return usageError("bad node ID " + strconv.Quote(fs.Arg(0)))
+		}
+		ports, err := sharePortsArg(fs.Arg(1))
 		if err != nil {
 			return err
 		}
-		code, sh, err := d.CreateShareLink(ctx, id, *expiration)
+		code, sh, err := d.CreateShareLink(ctx, id, *expiration, ports)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "share link for %s, single use, expires %s (shown once):\n", sh.NodeName, sh.ExpiresAt.Local().Format(time.DateTime))
+		fmt.Fprintf(os.Stderr, "share link for %s, ports %s, single use, expires %s (shown once):\n", sh.NodeName, sh.Ports, sh.ExpiresAt.Local().Format(time.DateTime))
 		fmt.Println(code)
+	case "ports":
+		if fs.NArg() != 2 {
+			return usageError("usage: tc-control shares ports ID PORTS   (e.g. tcp:80,tcp:443; * = everything)")
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil {
+			return usageError("bad share ID " + strconv.Quote(fs.Arg(0)))
+		}
+		ports, err := sharePortsArg(fs.Arg(1))
+		if err != nil {
+			return err
+		}
+		if err := d.SetSharePorts(ctx, id, 0, ports); err != nil {
+			return err
+		}
+		fmt.Printf("share %d ports: %s\n", id, ports)
 	case "accept":
 		id, err := idArg(fs, "shares accept ID")
 		if err != nil {
@@ -1135,6 +1162,16 @@ func cmdKeys(args []string) error {
 	return nil
 }
 
+// sharePortsArg validates a share's PORTS argument ("" = everything) and
+// returns its canonical form.
+func sharePortsArg(spec string) (string, error) {
+	a, err := acl.ParsePorts(spec)
+	if err != nil {
+		return "", usageError("bad ports: " + err.Error())
+	}
+	return acl.FormatPorts(a), nil
+}
+
 // ---- nodes ----
 
 func cmdNodes(args []string) error {
@@ -1196,6 +1233,9 @@ func cmdNodes(args []string) error {
 			if n.ExitNode {
 				status += ", exit node"
 			}
+			if len(n.Aliases) > 0 {
+				status += ", aka " + strings.Join(n.Aliases, ",")
+			}
 			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n.ID, n.GivenName, n.UserName, n.IPv4, n.Hostname, seen, expires, status)
 		}
 		return tw.Flush()
@@ -1224,6 +1264,23 @@ func cmdNodes(args []string) error {
 			return err
 		}
 		fmt.Printf("node %d tags: %s\n", id, strings.Join(tags, ","))
+	case "alias":
+		if fs.NArg() != 2 {
+			return usageError(`usage: tc-control nodes alias ID NAME[,NAME...]   ("" removes all aliases)`)
+		}
+		id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+		if err != nil {
+			return usageError("bad node ID " + strconv.Quote(fs.Arg(0)))
+		}
+		aliases, err := d.SetNodeAliases(ctx, id, strings.Split(fs.Arg(1), ","))
+		if err != nil {
+			return err
+		}
+		if len(aliases) == 0 {
+			fmt.Printf("node %d has no aliases\n", id)
+		} else {
+			fmt.Printf("node %d aliases: %s\n", id, strings.Join(aliases, ","))
+		}
 	case "exit-node":
 		if fs.NArg() != 2 || (fs.Arg(1) != "on" && fs.Arg(1) != "off") {
 			return usageError("usage: tc-control nodes exit-node ID on|off")

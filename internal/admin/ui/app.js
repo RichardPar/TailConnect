@@ -224,6 +224,7 @@ async function loadNodes() {
       el("tr", {},
         el("td", {}, el("span", { class: "dot" + (n.online ? " on" : ""), title: n.online ? "online" : "offline" })),
         el("td", {}, el("div", {}, n.name), el("div", { class: "sub" }, n.fqdn),
+          n.aliasFqdns.map((f) => el("div", { class: "sub", title: "alias" }, "also " + f)),
           n.ephemeral && el("span", { class: "badge" }, "ephemeral"),
           n.exitNode && el("span", { class: "badge", title: "Machines in this account can send their internet traffic through it" }, "exit node"),
           n.tags.length > 0 && el("div", { class: "tags" }, n.tags.map((t) => el("span", { class: "badge" }, "tag:" + t)))),
@@ -237,6 +238,7 @@ async function loadNodes() {
           !n.approved && el("button", { class: "primary small", onclick: () => approveNode(n) }, "Approve"),
           el("button", { class: "ghost", onclick: () => editExpiry(n) }, "Expiry"),
           el("button", { class: "ghost", onclick: () => editTags(n) }, "Tags"),
+          el("button", { class: "ghost", onclick: () => editAliases(n) }, "Aliases"),
           (n.exitNode || n.os === "linux") && el("button", {
             class: "ghost", onclick: () => toggleExitNode(n),
             title: n.exitNode ? "Stop carrying this account's internet traffic" : "Let this account's machines send their internet traffic through this machine",
@@ -375,6 +377,16 @@ async function editTags(n) {
   try {
     const r = await api("POST", `/api/v1/nodes/${n.id}/tags`, { tags: v.split(",") });
     toast(r.tags.length ? `${n.name}: ${r.tags.map((t) => "tag:" + t).join(", ")}` : `Removed ${n.name}'s tags`);
+    refresh();
+  } catch (e) { handleErr(e); }
+}
+
+async function editAliases(n) {
+  const v = prompt(`Other names for ${n.name}, separated by commas (e.g. nas, media). Each also resolves to ${n.ipv4}:`, n.aliases.join(", "));
+  if (v === null) return;
+  try {
+    const r = await api("POST", `/api/v1/nodes/${n.id}/aliases`, { aliases: v.split(",") });
+    toast(r.aliases.length ? `${n.name} is also ${r.aliasFqdns.join(", ")}` : `Removed ${n.name}'s aliases`);
     refresh();
   } catch (e) { handleErr(e); }
 }
@@ -530,6 +542,7 @@ async function loadSharing() {
     return el("tr", {},
       el("td", {}, el("div", {}, s.machine), el("div", { class: "sub" }, s.fqdn)),
       el("td", {}, s.owner),
+      el("td", { class: "mono" }, portsText(s.ports)),
       el("td", {}, el("span", { class: "badge " + st[1] }, st[0])),
       el("td", {}, s.acceptedAt ? fmtDate(s.acceptedAt) : "–"),
       el("td", { class: "actions" }, actions));
@@ -541,10 +554,26 @@ async function loadSharing() {
     return el("tr", {},
       el("td", {}, el("div", {}, s.machine), el("div", { class: "sub" }, me.operator && s.owner !== me.login ? `owner: ${s.owner}` : s.fqdn)),
       el("td", {}, who, s.expires && el("div", { class: "sub" }, "expires " + fmtDate(s.expires))),
+      el("td", { class: "mono" }, portsText(s.ports)),
       el("td", {}, el("span", { class: "badge " + st[1] }, st[0])),
       el("td", {}, fmtDate(s.created)),
-      el("td", { class: "actions" }, el("button", { class: "danger", onclick: () => removeShare(s, `Stop sharing ${s.machine}${s.recipient ? " with " + s.recipient : ""}? Access ends immediately.`) }, "Revoke")));
+      el("td", { class: "actions" },
+        el("button", { class: "ghost", onclick: () => editSharePorts(s) }, "Ports"),
+        el("button", { class: "danger", onclick: () => removeShare(s, `Stop sharing ${s.machine}${s.recipient ? " with " + s.recipient : ""}? Access ends immediately.`) }, "Revoke")));
   }));
+}
+
+const portsText = (p) => !p || p === "*" ? "all" : p;
+
+async function editSharePorts(s) {
+  const who = s.recipient || "whoever redeems the link";
+  const v = prompt(`Ports ${who} may open on ${s.machine}: * for everything, or e.g. tcp:80,tcp:443, 22, icmp`, s.ports || "*");
+  if (v === null) return;
+  try {
+    const r = await api("POST", `/api/v1/shares/${s.id}/ports`, { ports: v });
+    toast(r.ports === "*" ? `${who} may open anything on ${s.machine}` : `${who} may open ${r.ports} on ${s.machine}`);
+    refresh();
+  } catch (e) { handleErr(e); }
 }
 
 async function acceptShare(s) {
@@ -569,8 +598,8 @@ $("share-form").addEventListener("submit", async (ev) => {
   const recipient = $("share-recipient").value.trim().toLowerCase();
   if (!recipient) return toast("Enter an account name, or create a link", true);
   try {
-    const s = await api("POST", `/api/v1/nodes/${$("share-machine").value}/shares`, { recipient });
-    $("share-recipient").value = "";
+    const s = await api("POST", `/api/v1/nodes/${$("share-machine").value}/shares`, { recipient, ports: $("share-ports").value });
+    $("share-recipient").value = $("share-ports").value = "";
     toast(`Offered ${s.machine} to ${s.recipient}. It takes effect when they accept.`);
     refresh();
   } catch (e) { handleErr(e); }
@@ -579,7 +608,7 @@ $("share-form").addEventListener("submit", async (ev) => {
 $("share-link").addEventListener("click", async () => {
   if (!$("share-machine").value) return toast("You have no machines to share", true);
   try {
-    const r = await api("POST", `/api/v1/nodes/${$("share-machine").value}/share-links`, { ttl: $("share-link-ttl").value });
+    const r = await api("POST", `/api/v1/nodes/${$("share-machine").value}/share-links`, { ttl: $("share-link-ttl").value, ports: $("share-ports").value });
     $("new-share-link-value").textContent = r.code;
     $("new-share-link").hidden = false;
     refresh();

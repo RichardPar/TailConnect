@@ -136,8 +136,11 @@ func ApplyDelta(prev *MapResponse, d *MapResponse) *MapResponse {
 
 // Node describes one device in the network as seen by a client.
 type Node struct {
-	ID        NodeID
-	Name      string // fully-qualified MagicDNS name, e.g. "laptop.acme.home.internal"
+	ID   NodeID
+	Name string // fully-qualified MagicDNS name, e.g. "laptop.acme.home.internal"
+	// Aliases are further fully-qualified names that resolve to the machine
+	// (e.g. "nas.acme.home.internal"). Reverse lookups give Name.
+	Aliases   []string `json:",omitempty"`
 	User      string
 	NodeKey   key.NodePublic
 	DiscoKey  key.DiscoPublic

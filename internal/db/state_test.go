@@ -15,7 +15,7 @@ func TestReadState(t *testing.T) {
 	if _, err := d.AddRule(ctx, alice.ID, "*", "tag:web", "tcp:443"); err != nil {
 		t.Fatal(err)
 	}
-	sh, err := d.ShareWith(ctx, r.Node.ID, "bob")
+	sh, err := d.ShareWith(ctx, r.Node.ID, "bob", "")
 	if err != nil {
 		t.Fatal(err)
 	}

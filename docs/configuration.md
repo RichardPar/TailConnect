@@ -66,11 +66,13 @@ Every setting, and where to change it. *Server options* go in `/etc/default/tc-c
 |---|---|---|
 | Name | Machines → Rename | `nodes rename ID NAME` |
 | Tags | Machines → Tags | `nodes tag ID TAG[,TAG…]` |
+| Aliases (extra MagicDNS names) | Machines → Aliases | `nodes alias ID NAME[,NAME…]` |
 | When a machine's key expires: 6, 12 or 24 months, the server default, a date, or never | Machines → Expiry | `nodes expiry ID never\|DURATION\|12mo\|YYYY-MM-DD` |
 | Approve | Machines → Approve | `nodes approve ID` |
 | Exit node (off by default; Linux only) | Machines → Exit node: off / on | `nodes exit-node ID on\|off` |
 | Remove | Machines → Remove | `nodes delete ID` |
-| Share with another account | Sharing | `shares create ID ACCOUNT`, `shares link ID`, `shares accept ID`, `shares revoke ID` |
+| Share with another account | Sharing | `shares create ID ACCOUNT [PORTS]`, `shares link ID [PORTS]`, `shares accept ID`, `shares revoke ID` |
+| Ports a share allows (default `*`, everything) | Sharing → ports / **Ports** | `shares ports ID tcp:80,tcp:443` |
 
 **Joining:**
 

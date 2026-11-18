@@ -37,11 +37,15 @@ type Share struct {
 	RecipientName   string
 	RecipientStatus string
 	Status          string
-	Link            bool   // created as a share link
-	LinkPrefix      string // display prefix of the link code
-	CreatedAt       time.Time
-	AcceptedAt      time.Time
-	ExpiresAt       time.Time // links only: when an unredeemed link stops working
+	// Ports the recipient's machines may open on the machine, in
+	// access-rule syntax, validated and made canonical by the caller
+	// (acl.ParsePorts, acl.FormatPorts). "*" = everything.
+	Ports      string
+	Link       bool   // created as a share link
+	LinkPrefix string // display prefix of the link code
+	CreatedAt  time.Time
+	AcceptedAt time.Time
+	ExpiresAt  time.Time // links only: when an unredeemed link stops working
 }
 
 // InEffect reports whether the share currently lets traffic through: it was
@@ -53,7 +57,7 @@ func (s Share) InEffect() bool {
 const shareSelect = `
 	SELECT s.id, s.node_id, n.given_name, n.user_id, o.name, o.status, o.dns_domain,
 	       COALESCE(s.recipient_id, 0), COALESCE(r.name, ''), COALESCE(r.status, ''),
-	       s.status, s.invite_prefix, s.created_at, s.accepted_at, s.expires_at
+	       s.status, s.ports, s.invite_prefix, s.created_at, s.accepted_at, s.expires_at
 	FROM shares s
 	JOIN nodes n ON n.id = s.node_id
 	JOIN users o ON o.id = n.user_id
@@ -65,7 +69,7 @@ func scanShare(r rowScanner) (Share, error) {
 	var accepted, expires sql.NullInt64
 	err := r.Scan(&s.ID, &s.NodeID, &s.NodeName, &s.OwnerID, &s.OwnerName, &s.OwnerStatus, &s.OwnerDomain,
 		&s.RecipientID, &s.RecipientName, &s.RecipientStatus,
-		&s.Status, &s.LinkPrefix, &created, &accepted, &expires)
+		&s.Status, &s.Ports, &s.LinkPrefix, &created, &accepted, &expires)
 	s.CreatedAt = fromUnix(created)
 	if accepted.Valid {
 		s.AcceptedAt = fromUnix(accepted.Int64)
@@ -130,9 +134,18 @@ func listShares(ctx context.Context, db queryer, f ShareFilter) ([]Share, error)
 	return out, rows.Err()
 }
 
-// ShareWith offers node nodeID to the account named recipient. The share is
-// pending until the recipient accepts it.
-func (d *DB) ShareWith(ctx context.Context, nodeID int64, recipient string) (Share, error) {
+// sharePorts is how a ports field is stored: "" means everything.
+func sharePorts(ports string) string {
+	if ports == "" {
+		return "*"
+	}
+	return ports
+}
+
+// ShareWith offers node nodeID to the account named recipient, for ports
+// ("" or "*" = everything). The share is pending until the recipient
+// accepts it.
+func (d *DB) ShareWith(ctx context.Context, nodeID int64, recipient, ports string) (Share, error) {
 	n, err := d.GetNode(ctx, nodeID)
 	if err != nil {
 		return Share{}, err
@@ -147,8 +160,8 @@ func (d *DB) ShareWith(ctx context.Context, nodeID int64, recipient string) (Sha
 	if !r.Active() {
 		return Share{}, fmt.Errorf("%w: account %s is not active", ErrInvalid, r.Name)
 	}
-	res, err := d.sql.ExecContext(ctx, `INSERT INTO shares(node_id, recipient_id, status, created_at) VALUES(?, ?, ?, ?)`,
-		nodeID, r.ID, SharePending, unix(d.now()))
+	res, err := d.sql.ExecContext(ctx, `INSERT INTO shares(node_id, recipient_id, status, ports, created_at) VALUES(?, ?, ?, ?, ?)`,
+		nodeID, r.ID, SharePending, sharePorts(ports), unix(d.now()))
 	if isUniqueViolation(err) {
 		return Share{}, fmt.Errorf("%s is already shared with %s: %w", n.GivenName, r.Name, ErrExists)
 	}
@@ -161,8 +174,8 @@ func (d *DB) ShareWith(ctx context.Context, nodeID int64, recipient string) (Sha
 
 // CreateShareLink makes a single-use link code for node nodeID, valid for
 // ttl. The first other account to redeem it gets the share (already
-// accepted: redeeming is accepting).
-func (d *DB) CreateShareLink(ctx context.Context, nodeID int64, ttl time.Duration) (string, Share, error) {
+// accepted: redeeming is accepting), for ports ("" or "*" = everything).
+func (d *DB) CreateShareLink(ctx context.Context, nodeID int64, ttl time.Duration, ports string) (string, Share, error) {
 	if ttl <= 0 {
 		return "", Share{}, fmt.Errorf("%w: link lifetime must be positive", ErrInvalid)
 	}
@@ -176,14 +189,30 @@ func (d *DB) CreateShareLink(ctx context.Context, nodeID int64, ttl time.Duratio
 	code := ShareLinkPrefix + strings.ToLower(b32.EncodeToString(raw[:]))
 	now := d.now()
 	res, err := d.sql.ExecContext(ctx, `
-		INSERT INTO shares(node_id, status, invite_hash, invite_prefix, created_at, expires_at) VALUES(?, ?, ?, ?, ?, ?)`,
-		nodeID, SharePending, hashAuthKey(code), code[:len(ShareLinkPrefix)+8], unix(now), unix(now.Add(ttl)))
+		INSERT INTO shares(node_id, status, ports, invite_hash, invite_prefix, created_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		nodeID, SharePending, sharePorts(ports), hashAuthKey(code), code[:len(ShareLinkPrefix)+8], unix(now), unix(now.Add(ttl)))
 	if err != nil {
 		return "", Share{}, err
 	}
 	id, _ := res.LastInsertId()
 	s, err := d.GetShare(ctx, id)
 	return code, s, err
+}
+
+// SetSharePorts changes what share id's recipients may open on the machine
+// ("" or "*" = everything). Only the machine's owner may (actorID), or
+// anyone when actorID is 0 (operators).
+func (d *DB) SetSharePorts(ctx context.Context, id, actorID int64, ports string) error {
+	res, err := d.sql.ExecContext(ctx, `
+		UPDATE shares SET ports = ? WHERE id = ? AND (? = 0 OR node_id IN (SELECT id FROM nodes WHERE user_id = ?))`,
+		sharePorts(ports), id, actorID, actorID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("share %d: %w", id, ErrNotFound)
+	}
+	return nil
 }
 
 // RedeemShareLink gives the share behind code to recipientID.

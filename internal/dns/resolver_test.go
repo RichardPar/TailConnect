@@ -308,3 +308,30 @@ func TestTenantDomains(t *testing.T) {
 		t.Fatalf("PTR: %+v", m.Answers)
 	}
 }
+
+func TestAliases(t *testing.T) {
+	r := NewResolver(nil)
+	r.SetConfig(Config{
+		Domain:          "home.internal",
+		Hosts:           map[string][]netip.Addr{"jellyfin.richard.home.internal": alice},
+		Aliases:         map[string][]netip.Addr{"NAS.richard.home.internal": alice},
+		ReversePrefixes: []netip.Prefix{pool4},
+	})
+	m := parse(t, r.Query(context.Background(), mkQuery(t, "nas.richard.home.internal.", dnsmessage.TypeA, false)))
+	if got := answerAddrs(m); !slices.Equal(got, []string{"100.64.0.1"}) {
+		t.Fatalf("alias A: %v", got)
+	}
+	// Reverse lookups always give the machine's name.
+	for range 20 {
+		r.SetConfig(Config{
+			Domain:          "home.internal",
+			Hosts:           map[string][]netip.Addr{"jellyfin.richard.home.internal": alice},
+			Aliases:         map[string][]netip.Addr{"nas.richard.home.internal": alice, "media.richard.home.internal": alice},
+			ReversePrefixes: []netip.Prefix{pool4},
+		})
+		m = parse(t, r.Query(context.Background(), mkQuery(t, "1.0.64.100.in-addr.arpa.", dnsmessage.TypePTR, false)))
+		if got := answerAddrs(m); !slices.Equal(got, []string{"jellyfin.richard.home.internal."}) {
+			t.Fatalf("PTR: %v", got)
+		}
+	}
+}

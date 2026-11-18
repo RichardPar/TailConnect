@@ -59,7 +59,7 @@ func newBenchServer(b testing.TB, tenants, perTenant int, share bool) *benchServ
 	}
 	if share && tenants > 1 {
 		for t := 0; t < tenants; t++ {
-			sh, err := d.ShareWith(ctx, bs.ids[t*perTenant], fmt.Sprintf("tenant%d", (t+1)%tenants))
+			sh, err := d.ShareWith(ctx, bs.ids[t*perTenant], fmt.Sprintf("tenant%d", (t+1)%tenants), "")
 			if err != nil {
 				b.Fatal(err)
 			}

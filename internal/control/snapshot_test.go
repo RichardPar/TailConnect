@@ -38,7 +38,7 @@ func TestBuildMapJSONMatchesBuildMap(t *testing.T) {
 
 	// Mutual share: tenant1's first machine (shared with tenant2) gets
 	// tenant2's first machine shared back.
-	back, err := bs.db.ShareWith(ctx, bs.ids[6], "tenant1")
+	back, err := bs.db.ShareWith(ctx, bs.ids[6], "tenant1", "")
 	if err != nil {
 		t.Fatal(err)
 	}

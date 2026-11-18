@@ -472,7 +472,8 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 	}
 	e.dnsErr = dnsErr
 
-	cfg := dns.Config{ReversePrefixes: []netip.Prefix{ipam.DefaultV4, ipam.DefaultV6}, Hosts: map[string][]netip.Addr{}}
+	cfg := dns.Config{ReversePrefixes: []netip.Prefix{ipam.DefaultV4, ipam.DefaultV6},
+		Hosts: map[string][]netip.Addr{}, Aliases: map[string][]netip.Addr{}}
 	if on {
 		cfg.Domain = nm.DNS.Domain
 		cfg.Domains = magicDomains(nm.DNS)
@@ -483,6 +484,10 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 			for _, p := range n.Addresses {
 				name := strings.ToLower(n.Name)
 				cfg.Hosts[name] = append(cfg.Hosts[name], p.Addr())
+				for _, a := range n.Aliases {
+					a = strings.ToLower(a)
+					cfg.Aliases[a] = append(cfg.Aliases[a], p.Addr())
+				}
 			}
 		}
 		add(nm.Self)

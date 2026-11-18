@@ -30,7 +30,10 @@ type snapshot struct {
 	// each machine is shared with.
 	sharedIn map[int64][]int64
 	sharedTo map[int64][]int64
-	keys     map[key.NodePublic]int64 // node key → machine ID (usable machines only)
+	// sharePorts: what a recipient account's machines may open on a shared
+	// machine, by (machine, account); absent = everything.
+	sharePorts map[[2]int64][]protocol.PortRange
+	keys       map[key.NodePublic]int64 // node key → machine ID (usable machines only)
 	// Access rules per account (nil = no rules: everything allowed).
 	policies map[int64]*acl.Policy
 	// built is when the snapshot was made, and stale when it stops being
@@ -163,6 +166,18 @@ func (s *Server) buildSnapshot(st db.State) (*snapshot, error) {
 		if sh.InEffect() && snap.nodes[sh.NodeID] != nil && snap.nodes[sh.NodeID].db.Usable(now) {
 			snap.sharedIn[sh.RecipientID] = append(snap.sharedIn[sh.RecipientID], sh.NodeID)
 			snap.sharedTo[sh.NodeID] = append(snap.sharedTo[sh.NodeID], sh.RecipientID)
+			a, err := acl.ParsePorts(sh.Ports)
+			if err != nil {
+				// Validated when saved; if broken anyway, fail closed.
+				s.log.Error("share ports don't parse; the recipient can't open connections", "share", sh.ID, "ports", sh.Ports, "err", err)
+				a = acl.Access{}
+			}
+			if !a.All {
+				if snap.sharePorts == nil {
+					snap.sharePorts = map[[2]int64][]protocol.PortRange{}
+				}
+				snap.sharePorts[[2]int64{sh.NodeID, sh.RecipientID}] = a.Ranges
+			}
 		}
 	}
 	return snap, nil
@@ -249,6 +264,10 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 			// Another account's machine, here through a share: it may open
 			// connections only if self is shared with its account.
 			view = peerView{shared: true, noInitiate: !sharedTo[p.db.UserID], noExit: true}
+			if ports, limited := snap.sharePorts[[2]int64{id, p.db.UserID}]; limited && sharedTo[p.db.UserID] {
+				// Shared with its account for some ports only.
+				view.noInitiate, view.inbound = true, ports
+			}
 		} else if policy := snap.policies[self.UserID]; policy != nil {
 			in, out := policy.Allowed(p.acl, sn.acl), policy.Allowed(sn.acl, p.acl)
 			if in.None() && out.None() {

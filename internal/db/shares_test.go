@@ -13,14 +13,14 @@ func TestShares(t *testing.T) {
 	nas, _ := reg(d, "m1", "n1", "nas", mustKey(t, d, acme.ID, false))
 	node := nas.Node.ID
 
-	if _, err := d.ShareWith(ctx, node, "acme"); !errors.Is(err, ErrInvalid) {
+	if _, err := d.ShareWith(ctx, node, "acme", ""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("sharing with the owner: %v", err)
 	}
-	if _, err := d.ShareWith(ctx, node, "nobody"); !errors.Is(err, ErrNotFound) {
+	if _, err := d.ShareWith(ctx, node, "nobody", ""); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("sharing with an unknown account: %v", err)
 	}
 	g0, _ := d.Generation(ctx)
-	s, err := d.ShareWith(ctx, node, "globex")
+	s, err := d.ShareWith(ctx, node, "globex", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestShares(t *testing.T) {
 	if g1, _ := d.Generation(ctx); g1 <= g0 {
 		t.Fatal("sharing must bump the generation")
 	}
-	if _, err := d.ShareWith(ctx, node, "globex"); !errors.Is(err, ErrExists) {
+	if _, err := d.ShareWith(ctx, node, "globex", ""); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate share: %v", err)
 	}
 	// Only the recipient can accept.
@@ -71,7 +71,7 @@ func TestShares(t *testing.T) {
 	}
 
 	// Links: single use, not by the owner, expire.
-	code, ls, err := d.CreateShareLink(ctx, node, time.Hour)
+	code, ls, err := d.CreateShareLink(ctx, node, time.Hour, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,11 +91,11 @@ func TestShares(t *testing.T) {
 	if _, err := d.RedeemShareLink(ctx, code, globex.ID); !errors.Is(err, ErrInvalidShareLink) {
 		t.Fatalf("second redemption: %v", err)
 	}
-	code2, _, _ := d.CreateShareLink(ctx, node, time.Hour)
+	code2, _, _ := d.CreateShareLink(ctx, node, time.Hour, "")
 	if _, err := d.RedeemShareLink(ctx, code2, initech.ID); !errors.Is(err, ErrExists) {
 		t.Fatalf("redeeming a second link to the same machine: %v", err)
 	}
-	code3, _, _ := d.CreateShareLink(ctx, node, time.Hour)
+	code3, _, _ := d.CreateShareLink(ctx, node, time.Hour, "")
 	d.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	if _, err := d.RedeemShareLink(ctx, code3, globex.ID); !errors.Is(err, ErrInvalidShareLink) {
 		t.Fatalf("expired link: %v", err)
@@ -108,5 +108,40 @@ func TestShares(t *testing.T) {
 	}
 	if l, _ := d.ListShares(ctx, ShareFilter{}); len(l) != 0 {
 		t.Fatalf("%d shares survived the machine moving tenant", len(l))
+	}
+}
+
+func TestSharePorts(t *testing.T) {
+	d := open(t)
+	acme := mustUser(t, d, "acme")
+	globex := mustUser(t, d, "globex")
+	r, err := reg(d, "m1", "n1", "web", mustKey(t, d, acme.ID, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := d.ShareWith(ctx, r.Node.ID, "globex", "tcp:80,tcp:443")
+	if err != nil || s.Ports != "tcp:80,tcp:443" {
+		t.Fatalf("share with ports: %+v %v", s, err)
+	}
+	_, l, err := d.CreateShareLink(ctx, r.Node.ID, time.Hour, "")
+	if err != nil || l.Ports != "*" {
+		t.Fatalf("link with default ports: %+v %v", l, err)
+	}
+	// Only the owner (or an operator, actor 0) may change them.
+	if err := d.SetSharePorts(ctx, s.ID, globex.ID, "*"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("recipient changed the ports: %v", err)
+	}
+	g0, _ := d.Generation(ctx)
+	if err := d.SetSharePorts(ctx, s.ID, acme.ID, "22"); err != nil {
+		t.Fatal(err)
+	}
+	if g1, _ := d.Generation(ctx); g1 == g0 {
+		t.Fatal("changing a share's ports didn't change the generation")
+	}
+	if err := d.SetSharePorts(ctx, s.ID, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := d.GetShare(ctx, s.ID); got.Ports != "*" {
+		t.Fatalf("ports after reset: %q", got.Ports)
 	}
 }

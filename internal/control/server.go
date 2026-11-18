@@ -578,9 +578,15 @@ func (s *Server) toProtocol(n db.Node) (protocol.Node, error) {
 	}
 	var hi protocol.Hostinfo
 	_ = json.Unmarshal([]byte(n.Hostinfo), &hi)
+	dom := s.tenantDomain(n.UserName, n.UserDomain)
+	var aliases []string
+	for _, a := range n.Aliases {
+		aliases = append(aliases, a+"."+dom)
+	}
 	out := protocol.Node{
 		ID:        protocol.NodeID(n.ID),
-		Name:      n.GivenName + "." + s.tenantDomain(n.UserName, n.UserDomain),
+		Name:      n.GivenName + "." + dom,
+		Aliases:   aliases,
 		User:      n.UserName,
 		NodeKey:   nk,
 		DiscoKey:  dk,

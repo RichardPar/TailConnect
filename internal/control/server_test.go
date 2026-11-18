@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -371,6 +372,14 @@ func TestTenantIsolationInMapsAndRelay(t *testing.T) {
 	if len(m.Peers) != 1 || m.Peers[0].Name != "desk.acme.home.internal" || m.Self.Name != "laptop.acme.home.internal" {
 		t.Fatalf("acme map: self=%s peers=%v", m.Self.Name, m.Peers)
 	}
+	// Aliases reach peers' maps fully qualified.
+	if _, err := f.db.SetNodeAliases(ctx, int64(m.Peers[0].ID), []string{"nas"}); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.checkGeneration()
+	if m2, _ := f.srv.BuildMap(ctx, a1); len(m2.Peers) != 1 || strings.Join(m2.Peers[0].Aliases, ",") != "nas.acme.home.internal" {
+		t.Fatalf("alias in map: %+v", m2.Peers)
+	}
 	if len(m.DNS.Search) != 2 || m.DNS.Search[0] != "acme.home.internal" {
 		t.Fatalf("acme search domains: %v", m.DNS.Search)
 	}
@@ -437,7 +446,7 @@ func TestSharingInMapsAndRelay(t *testing.T) {
 		return out
 	}
 
-	sh, err := f.db.ShareWith(ctx, nas, "globex")
+	sh, err := f.db.ShareWith(ctx, nas, "globex", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +479,7 @@ func TestSharingInMapsAndRelay(t *testing.T) {
 	}
 
 	// Mutual sharing: each may initiate to the other's shared machine.
-	back, _ := f.db.ShareWith(ctx, laptop, "acme")
+	back, _ := f.db.ShareWith(ctx, laptop, "acme", "")
 	f.db.AcceptShare(ctx, back.ID, mustUserID(t, f, "acme"))
 	f.srv.checkGeneration()
 	if l := peers(nas)["laptop.globex.home.internal"]; l.NoInitiate {
@@ -542,7 +551,7 @@ func TestTenantDNSDomains(t *testing.T) {
 	if m, _ := f.srv.BuildMap(ctx, laptop); !slices.Equal(m.DNS.Domains, []string{"home.internal"}) {
 		t.Fatalf("globex domains before sharing: %v", m.DNS.Domains)
 	}
-	sh, _ := f.db.ShareWith(ctx, nas, "globex")
+	sh, _ := f.db.ShareWith(ctx, nas, "globex", "")
 	f.db.AcceptShare(ctx, sh.ID, mustUserID(t, f, "globex"))
 	f.srv.checkGeneration()
 	m, _ = f.srv.BuildMap(ctx, laptop)
