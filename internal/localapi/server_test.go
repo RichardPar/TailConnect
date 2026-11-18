@@ -25,7 +25,9 @@ func TestAccess(t *testing.T) {
 		{"/localapi/v1/up", `{"AuthKey":"tc-auth-x"}`, AccessAdmin},
 		{"/localapi/v1/up", `{"ControlURL":"https://example.com"}`, AccessAdmin},
 		{"/localapi/v1/up", `{"Hostname":"pc"}`, AccessAdmin},
-		{"/localapi/v1/up", `{"ExitNode":""}`, AccessAdmin},
+		{"/localapi/v1/up", `{"ExitNode":""}`, AccessUser},         // choosing the exit node, like connecting
+		{"/localapi/v1/up", `{"ExitNode":"jellyfin"}`, AccessUser}, //
+		{"/localapi/v1/up", `{"ExitNode":"x","Hostname":"pc"}`, AccessAdmin},
 		{"/localapi/v1/down", `{}`, AccessUser},
 		{"/localapi/v1/logout", `{}`, AccessAdmin},
 	}

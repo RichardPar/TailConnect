@@ -21,7 +21,7 @@ The Windows client puts a PC on your network like any other device: it gets a `1
 - An Administrator account, to install, and to log in or out (connecting and disconnecting are open to every signed-in user).
 - A TailConnect server the PC can reach, and an auth key for the account it joins (`sudo tc-control keys create -user NAME`, or **Auth keys → Generate key** in the portal).
 
-Not yet on Windows: using or being an [exit node](usage.md#exit-nodes).
+Using an [exit node](usage.md#exit-nodes): right-click the tray icon → **Exit node** → pick one (or `tc up --exit-node NAME`). Not yet on Windows: being one.
 
 ## Get the package
 

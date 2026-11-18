@@ -176,6 +176,7 @@ func (f *forwarder) set(on bool) {
 	if !f.cleaned {
 		f.cleaned = true
 		f.deleteTables() // left by a tcd that crashed
+		f.removeIptables()
 	}
 	if on == f.on {
 		return
@@ -197,6 +198,7 @@ func (f *forwarder) set(on bool) {
 		f.fail(fmt.Errorf("set up NAT: %w", err))
 		return
 	}
+	f.addIptables()
 	f.on = true
 	v6 := "IPv4 only"
 	if f.v6 {
@@ -242,6 +244,9 @@ func (f *forwarder) enableV6() bool {
 
 func (f *forwarder) stop() {
 	f.deleteTables()
+	if f.on {
+		f.removeIptables()
+	}
 	// Restore in reverse dependency order: forwarding off before accept_ra.
 	for _, p := range []string{filepath.Join(sysctlDir, "ipv6/conf/all/forwarding"), filepath.Join(sysctlDir, "ipv4/ip_forward")} {
 		if v, ok := f.restore[p]; ok {
@@ -287,8 +292,8 @@ func (f *forwarder) families() []nftables.TableFamily {
 //	}
 //
 // The forward chain only accepts; it can't override a drop in another
-// firewall's forward chain (e.g. ufw's or Docker's), which must allow the
-// traffic itself.
+// firewall's forward chain (e.g. ufw's or Docker's), so addIptables allows
+// the traffic there too.
 func (f *forwarder) addTables() error {
 	c, err := nftables.New()
 	if err != nil {

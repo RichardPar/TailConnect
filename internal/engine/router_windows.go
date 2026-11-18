@@ -8,10 +8,13 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 
+	"tailconnect/internal/netmark"
 	"tailconnect/internal/winnet"
 )
 
@@ -31,7 +34,17 @@ type windowsRouter struct {
 	logf   func(string, ...any)
 	v6Fail bool         // IPv6 is disabled on the adapter; skip v6 config
 	fwAddr []netip.Addr // addresses fwRuleTunnel currently allows
+
+	// Using an exit node: the tunnel has the default routes, and tcd's
+	// sockets are pinned to the interfaces that had them (netmark), which
+	// a goroutine follows until stopExit.
+	exitMu   sync.Mutex
+	exitStop chan struct{}
+	pin4     uint32
+	pin6     uint32
 }
+
+func (*windowsRouter) SupportsExitNodes() bool { return true }
 
 // NewOSRouter configures addresses and routes on the named (Wintun)
 // adapter through the IP Helper API.
@@ -121,9 +134,19 @@ func (r *windowsRouter) Set(cfg RouterConfig) error {
 		}
 	}
 
+	// Using an exit node: pin tcd's sockets to the real network before the
+	// default routes go into the tunnel.
+	if cfg.ExitNode {
+		r.startExit()
+	}
+
 	// Routes.
 	wantR := map[netip.Prefix]bool{}
-	for _, p := range cfg.Routes {
+	routesWanted := cfg.Routes
+	if cfg.ExitNode {
+		routesWanted = append(slices.Clone(cfg.Routes), exitAll...)
+	}
+	for _, p := range routesWanted {
 		if p.Addr().Is6() && !has6 || p.Addr().Is4() && !has4 {
 			continue
 		}
@@ -162,7 +185,95 @@ func (r *windowsRouter) Set(cfg RouterConfig) error {
 	}
 
 	r.setTunnelFirewall(addrs)
+	if !cfg.ExitNode {
+		r.stopExit() // after the default routes left the tunnel
+	}
 	return nil
+}
+
+// startExit pins tcd's sockets to the current default interfaces and starts
+// following them. It does nothing if already started.
+func (r *windowsRouter) startExit() {
+	r.exitMu.Lock()
+	defer r.exitMu.Unlock()
+	if r.exitStop != nil {
+		return
+	}
+	r.repinLocked()
+	stop := make(chan struct{})
+	r.exitStop = stop
+	go func() {
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				r.exitMu.Lock()
+				if r.exitStop == stop {
+					r.repinLocked()
+				}
+				r.exitMu.Unlock()
+			}
+		}
+	}()
+}
+
+// repinLocked pins tcd's sockets to the interfaces with the best default
+// route other than the tunnel's. With none (offline), the last ones are kept.
+func (r *windowsRouter) repinLocked() {
+	i4, i6 := r.defaultInterface(windows.AF_INET), r.defaultInterface(windows.AF_INET6)
+	if i4 == 0 {
+		i4 = r.pin4
+	}
+	if i6 == 0 {
+		i6 = r.pin6
+	}
+	if i4 == r.pin4 && i6 == r.pin6 {
+		return
+	}
+	r.logf("exit node: tcd's own traffic uses interface %d (IPv4), %d (IPv6)", i4, i6)
+	netmark.PinToInterface(i4, i6)
+	r.pin4, r.pin6 = i4, i6
+}
+
+func (r *windowsRouter) stopExit() {
+	r.exitMu.Lock()
+	defer r.exitMu.Unlock()
+	if r.exitStop == nil {
+		return
+	}
+	close(r.exitStop)
+	r.exitStop = nil
+	netmark.PinToInterface(0, 0)
+	r.pin4, r.pin6 = 0, 0
+	r.logf("exit node: tcd's own traffic follows the routing table again")
+}
+
+// defaultInterface is the index of the interface whose default route
+// Windows prefers for family, ignoring the tunnel's (0 = none).
+func (r *windowsRouter) defaultInterface(family uint16) uint32 {
+	var t *windows.MibIpForwardTable2
+	if err := windows.GetIpForwardTable2(family, &t); err != nil {
+		return 0
+	}
+	defer windows.FreeMibTable(unsafe.Pointer(t))
+	var best, bestMetric uint32
+	for _, row := range t.Rows() {
+		if row.DestinationPrefix.PrefixLength != 0 || row.InterfaceLuid == r.luid {
+			continue
+		}
+		ifRow := windows.MibIpInterfaceRow{Family: family, InterfaceLuid: row.InterfaceLuid}
+		if windows.GetIpInterfaceEntry(&ifRow) != nil || ifRow.Connected == 0 {
+			continue
+		}
+		m := row.Metric + ifRow.Metric
+		if best == 0 || m < bestMetric {
+			best, bestMetric = row.InterfaceIndex, m
+		}
+	}
+	return best
 }
 
 // setTunnelFirewall allows inbound traffic to the node's tunnel addresses,
@@ -232,6 +343,7 @@ func routePrefix(row *windows.MibIpForwardRow2) (netip.Prefix, bool) {
 // Close removes the tunnel firewall rule. (Closing the TUN device removes
 // the adapter, and with it its addresses and routes.)
 func (r *windowsRouter) Close() error {
+	r.stopExit()
 	r.setTunnelFirewall(nil)
 	return nil
 }

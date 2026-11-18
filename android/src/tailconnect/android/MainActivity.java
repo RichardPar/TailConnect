@@ -76,7 +76,8 @@ public class MainActivity extends Activity {
     // What the join pop-up holds (the auth key only until it is sent).
     private String joinServer = "", joinKey = "", joinHost = "";
     private AlertDialog loginDialog; // the join pop-up while it's open
-    private Button connect, logout, showLog;
+    private Button connect, logout, showLog, exitButton;
+    private TextView exitText;
     private LinearLayout peers;
     private ScrollView logScroll; // two panes only: the log's own scroll
     private View logBox;          // what to show or hide for the log
@@ -242,6 +243,15 @@ public class MainActivity extends Activity {
         logout.setText("Log out of this network");
         logout.setOnClickListener(v -> confirmLogout());
         conn.addView(logout);
+        // Exit node: shown while connected, when the account has one.
+        exitButton = new Button(this);
+        exitButton.setAllCaps(false);
+        exitButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, compact ? 15 : 16);
+        exitButton.setOnClickListener(v -> chooseExitNode());
+        conn.addView(exitButton, margins(0, dp(compact ? 12 : 16), 0, 0));
+        exitText = text("", compact ? 13 : 14, false);
+        exitText.setAlpha(0.75f);
+        conn.addView(exitText);
         errorText = text("", compact ? 14 : 15, false);
         errorText.setTextColor(RED);
         conn.addView(errorText, margins(0, dp(8), 0, 0));
@@ -564,6 +574,8 @@ public class MainActivity extends Activity {
         selfName.setVisibility(name.isEmpty() ? View.GONE : View.VISIBLE);
         selfAddr.setVisibility(self == null ? View.GONE : View.VISIBLE);
 
+        showExitNode(st);
+
         peers.removeAllViews();
         JSONArray ps = st == null ? null : st.optJSONArray("Peers");
         int n = ps == null ? 0 : ps.length();
@@ -575,6 +587,85 @@ public class MainActivity extends Activity {
         }
         for (int i = 0; i < n; i++) peers.addView(peerRow(ps.optJSONObject(i)));
         if (logShown) refreshLog();
+    }
+
+    private String exitUsing = "";
+
+    /** The peers that can carry this device's internet traffic. */
+    private static List<JSONObject> exitNodes(JSONObject st) {
+        List<JSONObject> out = new ArrayList<>();
+        JSONArray ps = st == null ? null : st.optJSONArray("Peers");
+        for (int i = 0; ps != null && i < ps.length(); i++) {
+            JSONObject p = ps.optJSONObject(i);
+            if (p != null && p.optBoolean("ExitNode")) out.add(p);
+        }
+        return out;
+    }
+
+    private void showExitNode(JSONObject st) {
+        JSONObject ex = st == null ? null : st.optJSONObject("ExitNode");
+        String chosen = ex == null ? "" : ex.optString("Chosen");
+        exitUsing = ex == null ? "" : ex.optString("Using");
+        String exErr = ex == null ? "" : ex.optString("Error");
+        boolean show = running && (!exitNodes(st).isEmpty() || !chosen.isEmpty());
+        exitButton.setVisibility(show ? View.VISIBLE : View.GONE);
+        exitText.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (!show) return;
+        if (!exitUsing.isEmpty()) {
+            exitButton.setText("Exit node: " + shortName(exitUsing));
+            exitText.setText("All internet traffic goes through " + shortName(exitUsing) + ". Websites see " + shortName(exitUsing) + "'s internet address.");
+        } else if (!chosen.isEmpty()) {
+            exitButton.setText("Exit node: " + shortName(chosen) + " (not working)");
+            exitText.setText(shortName(chosen) + " can't be used right now" + (exErr.isEmpty() ? "" : " (" + exErr + ")") + ", so internet traffic goes direct.");
+        } else {
+            exitButton.setText("Exit node: None");
+            exitText.setText("Websites see this device's own internet address.");
+        }
+    }
+
+    /** "jellyfin.richard.home.internal" → "jellyfin". */
+    private static String shortName(String fqdn) {
+        int dot = fqdn.indexOf('.');
+        return dot > 0 ? fqdn.substring(0, dot) : fqdn;
+    }
+
+    private void chooseExitNode() {
+        List<JSONObject> exits = exitNodes(lastStatus);
+        String[] labels = new String[exits.size() + 1];
+        String[] names = new String[exits.size() + 1];
+        labels[0] = "None";
+        names[0] = "";
+        int checked = 0;
+        for (int i = 0; i < exits.size(); i++) {
+            String name = exits.get(i).optString("Name");
+            names[i + 1] = shortName(name);
+            labels[i + 1] = shortName(name);
+            if (name.equals(exitUsing)) checked = i + 1;
+        }
+        JSONObject ex = lastStatus == null ? null : lastStatus.optJSONObject("ExitNode");
+        String chosen = ex == null ? "" : ex.optString("Chosen");
+        if (exitUsing.isEmpty() && !chosen.isEmpty()) {
+            for (int i = 1; i < names.length; i++) if (names[i].equals(shortName(chosen))) checked = i;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Exit node")
+                .setSingleChoiceItems(labels, checked, (d, which) -> {
+                    d.dismiss();
+                    String pick = names[which];
+                    io.execute(() -> {
+                        String err = null;
+                        try {
+                            LocalApi.setExitNode(TcVpnService.socketPath(getFilesDir()), pick);
+                        } catch (IOException e) {
+                            err = e.getMessage();
+                        }
+                        String msg = err != null ? "Exit node: " + err
+                                : pick.isEmpty() ? "Exit node: None" : "Exit node: " + pick;
+                        ui.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
+                    });
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private View peerRow(JSONObject p) {
@@ -602,6 +693,7 @@ public class MainActivity extends Activity {
         List<String> addrs = addresses(p);
         String detail = (addrs.isEmpty() ? "" : addrs.get(0)) + "   " + name;
         if (p.optBoolean("Shared")) detail += "   shared by " + p.optString("User");
+        if (p.optBoolean("ExitNode")) detail += name.equals(exitUsing) ? "   exit node (in use)" : "   exit node";
         TextView sub = text(detail, 14, false);
         sub.setAlpha(0.75f);
         row.addView(sub, margins(0, dp(4), 0, 0));

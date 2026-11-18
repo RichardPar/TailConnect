@@ -66,6 +66,7 @@ type Bridge struct {
 	conn    *net.UnixConn
 	connCh  chan struct{} // closed (and replaced) when an app connects
 	net     Network
+	onNet   func() // called after each network change the app reports
 	replies chan reply
 }
 
@@ -113,6 +114,14 @@ func (b *Bridge) updateNetwork(n Network) {
 		n.DNS = b.net.DNS
 	}
 	b.net = n
+}
+
+// OnNetwork sets f to be called (in its own goroutine) after each network
+// change the app reports.
+func (b *Bridge) OnNetwork(f func()) {
+	b.mu.Lock()
+	b.onNet = f
+	b.mu.Unlock()
 }
 
 // Network returns what the app last reported.
@@ -190,6 +199,12 @@ func (b *Bridge) read(c *net.UnixConn) {
 			switch m.Type {
 			case "network":
 				b.updateNetwork(Network{DNS: m.DNS, Addresses: m.Addresses})
+				b.mu.Lock()
+				f := b.onNet
+				b.mu.Unlock()
+				if f != nil {
+					go f() // may request a new interface, whose reply this loop reads
+				}
 			case "tun-reply":
 				fd := -1
 				if m.OK && len(fds) > 0 {

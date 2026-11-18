@@ -16,9 +16,11 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -54,7 +56,9 @@ const (
 	idLogout
 	idCopySelf
 	idExit
-	idPeerBase = 1000 // + peer index: copy that peer's address
+	idExitNone
+	idPeerBase     = 1000 // + peer index: copy that peer's address
+	idExitNodeBase = 2000 // + index in view.Exits: use that exit node
 )
 
 func main() {
@@ -354,6 +358,29 @@ func (a *app) menu() {
 		}
 		add(m, mfPopup, sub, "Copy address of")
 	}
+	if v.CanDown && (len(v.Exits) > 0 || v.ExitChose != "") {
+		sub, _, _ := pCreatePopupMenu.Call()
+		flags := uint32(mfString)
+		if v.ExitChose == "" {
+			flags |= mfChecked
+		}
+		add(sub, flags, idExitNone, "None")
+		for i, name := range v.Exits {
+			flags := uint32(mfString)
+			if strings.EqualFold(name, v.ExitChose) || strings.HasPrefix(strings.ToLower(v.ExitChose), strings.ToLower(name)+".") {
+				flags |= mfChecked
+			}
+			add(sub, flags, uintptr(idExitNodeBase+i), name)
+		}
+		label := "Exit node: None"
+		switch {
+		case v.ExitChose != "" && v.ExitInUse:
+			label = "Exit node: " + v.ExitChose
+		case v.ExitChose != "":
+			label = "Exit node: " + v.ExitChose + " (not working)"
+		}
+		add(m, mfPopup, sub, label)
+	}
 	add(m, mfSeparator, 0, "")
 	add(m, mfString, idOpen, "Open TailConnect")
 	if v.LoggedIn {
@@ -400,9 +427,29 @@ func (a *app) command(id int) {
 			pDestroyWindow.Call(uintptr(a.win.hwnd))
 		}
 		pPostQuitMessage.Call(0)
+	case id == idExitNone:
+		a.setExitNode("")
+	case id >= idExitNodeBase && id < idExitNodeBase+len(v.Exits):
+		a.setExitNode(v.Exits[id-idExitNodeBase])
 	case id >= idPeerBase && id < idPeerBase+len(v.Peers):
 		setClipboard(a.hwnd, v.Peers[id-idPeerBase].Addr())
 	}
+}
+
+// setExitNode sends this PC's internet traffic through the exit node name
+// ("" = none). The menu shows the result; a choice that can't be used yet
+// (say, the exit node is offline) is reported.
+func (a *app) setExitNode(name string) {
+	a.do("Exit node", func(ctx context.Context) error {
+		st, err := a.c.Up(ctx, localapi.UpRequest{ExitNode: &name})
+		if err != nil {
+			return err
+		}
+		if name != "" && st.ExitNode != nil && st.ExitNode.Using == "" && st.ExitNode.Error != "" {
+			return fmt.Errorf("%s isn't carrying internet traffic yet: %s", name, st.ExitNode.Error)
+		}
+		return nil
+	})
 }
 
 // login opens the login window, elevated: logging in changes the

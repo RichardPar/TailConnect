@@ -130,16 +130,20 @@ func main() {
 
 // newEngine asks the app for a VPN interface routing the tunnel's address
 // ranges (so new peers need no change), with MagicDNS as its DNS server.
+// The router replaces it with one routing everything while an exit node is
+// in use.
 func newEngine(b *androidbridge.Bridge, ep daemon.EngineParams, logf func(string, ...any)) (*engine.Engine, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	fd, err := b.RequestTUN(ctx, androidbridge.Message{
+	base := androidbridge.Message{
 		Addresses: ep.Addrs,
-		Routes:    []netip.Prefix{ipam.DefaultV4, ipam.DefaultV6},
 		DNS:       []netip.Addr{protocol.MagicDNSAddr},
 		Search:    searchDomains(ep),
 		MTU:       engine.DefaultMTU,
-	})
+	}
+	req := base
+	req.Routes = []netip.Prefix{ipam.DefaultV4, ipam.DefaultV6}
+	fd, err := b.RequestTUN(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -149,8 +153,10 @@ func newEngine(b *androidbridge.Bridge, ep daemon.EngineParams, logf func(string
 		b.NotifyClosed()
 		return nil, fmt.Errorf("VPN interface: %w", err)
 	}
+	swap := androidbridge.NewSwapTUN(dev)
 	cfg := engine.Config{
-		TUN:        &closeNotifier{Device: dev, b: b},
+		TUN:        &closeNotifier{Device: swap, b: b},
+		Router:     newAndroidRouter(b, swap, base, logf),
 		ListenPort: ep.Port, DiscoKey: ep.DiscoKey, OnEndpointsChanged: ep.OnEndpointsChanged, Logf: logf,
 		DNS: androidDNS{b},
 	}

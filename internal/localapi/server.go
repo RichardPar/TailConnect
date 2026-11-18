@@ -48,7 +48,7 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		need := AccessAdmin
-		if req.reconnect() {
+		if req.reconnect() || req.exitNodeOnly() {
 			need = AccessUser
 		}
 		if !allowed(w, r, need) {
@@ -74,6 +74,17 @@ func (s *Server) Handler() http.Handler {
 func (req UpRequest) reconnect() bool {
 	return req.ControlURL == "" && req.AuthKey == "" && req.Hostname == "" && req.ServerKey.IsZero() &&
 		req.TLSFingerprint == "" && req.ExitNode == nil
+}
+
+// exitNodeOnly reports whether req only chooses the exit node: an everyday
+// choice like connecting, open to the same users.
+func (req UpRequest) exitNodeOnly() bool {
+	if req.ExitNode == nil {
+		return false
+	}
+	r := req
+	r.ExitNode = nil
+	return r.reconnect()
 }
 
 // allowed checks the caller's access, answering 403 if it falls short.

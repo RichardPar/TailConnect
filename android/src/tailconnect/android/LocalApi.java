@@ -37,6 +37,17 @@ final class LocalApi {
         request(socket, "POST", "/localapi/v1/up", req.toString());
     }
 
+    /** Chooses the exit node for this device's internet traffic ("" = none). */
+    static void setExitNode(String socket, String name) throws IOException {
+        JSONObject req = new JSONObject();
+        try {
+            req.put("ExitNode", name);
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+        request(socket, "POST", "/localapi/v1/up", req.toString());
+    }
+
     static void down(String socket) throws IOException {
         request(socket, "POST", "/localapi/v1/down", "{}");
     }

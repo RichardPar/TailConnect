@@ -156,6 +156,10 @@ A machine using an exit node adds `0.0.0.0/0` and `::/0` to that peer's WireGuar
 | `5271: lookup main suppress_prefixlength 0` | every route of the main table except its default: the LAN and the tunnel's peers |
 | `5272: lookup 124` | table 124 holds the default routes into `tc0` |
 
+**Android** has no policy routing for apps: the VPN's routes are fixed when the interface is created. While an exit node is in use, tcd asks the app for a new interface routing everything except the device's own networks (plus link-local and multicast), and swaps it in under WireGuard without restarting the tunnel. It does so again when the device changes network. tcd's own traffic bypasses the VPN because the app is excluded from it.
+
+**Windows** has no socket marks. The tunnel adapter gets `0.0.0.0/0` and `::/0` (its low metric wins over the physical default routes), and tcd's own sockets are pinned with `IP_UNICAST_IF` to the interface that holds the best other default route, as WireGuard for Windows does. tcd checks every two seconds whether that interface changed.
+
 Inbound packets from the exit node can come from any address. WireGuard still attributes a packet to the peer with the most specific allowed IP, so the exit node can't pose as another peer. Everything is removed when the exit node is turned off or `tcd` stops, and on start (after a crash).
 
 ## Resilience

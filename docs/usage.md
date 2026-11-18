@@ -197,8 +197,13 @@ An exit node is a machine in your account that other machines in your account ca
 Every machine's exit node role is **off** until you turn it on, and each machine chooses for itself whether to use one.
 
 1. **Turn it on.** In the portal's Machines tab, click **Exit node: off** on a Linux machine (or run `tc-control nodes exit-node ID on`). Within a second, that machine enables IP forwarding and NAT for traffic from the tunnel. Its `tc status` says `Exit node: this machine forwards internet traffic for its account`.
-2. **Use it.** On another Linux machine: `sudo tc up --exit-node NAME` (a short name, MagicDNS name, hostname or tunnel IP). `tc status` shows `Exit node: internet traffic goes through NAME`, and lists it as `exit node (in use)`.
-3. **Stop using it.** `sudo tc up --exit-node ""`. The choice is remembered across restarts and reboots until changed.
+2. **Use it.**
+   - **Linux:** `sudo tc up --exit-node NAME` (a short name, MagicDNS name, hostname or tunnel IP). `tc status` shows `Exit node: internet traffic goes through NAME`, and lists it as `exit node (in use)`.
+   - **Android:** in the app, tap **Exit node: None** under Connect and pick the machine.
+   - **Windows:** right-click the tray icon → **Exit node** → pick the machine.
+3. **Stop using it.** Pick **None** in the app or tray menu, or `sudo tc up --exit-node ""`. The choice is remembered across restarts and reboots until changed.
+
+Choosing an exit node is allowed to anyone who may connect and disconnect (the `tailconnect` group on Linux, any signed-in user on Windows); changing the server or account still needs an administrator.
 
 What goes where while a machine uses an exit node:
 
@@ -212,11 +217,11 @@ What goes where while a machine uses an exit node:
 
 Details:
 
-- Only **Linux** machines with a kernel TUN can be exit nodes or use one; the portal shows the button only for Linux machines. Userspace mode and the Android app can't yet.
+- Only **Linux** machines with a kernel TUN can **be** exit nodes; the portal shows the button only for Linux machines. Linux, **Android** and **Windows** can **use** one. Userspace mode can't.
 - Exit nodes serve **their own account only**. A machine shared with another account is never an exit node for it. If access rules limit what a machine may open on the exit node, it can't use it.
 - If the exit node goes away (turned off, removed, offline long enough to leave the map), the machine **falls back to its own internet connection** and `tc status` warns: `exit node NAME not in use (…); internet traffic goes direct`. It returns to the exit node by itself when it's back.
 - When it stops being an exit node, or `tcd` stops, the machine restores its previous forwarding settings and removes its NAT table.
-- Another firewall on the exit node whose forward chain drops traffic (ufw's default, Docker's) must allow forwarding from the tunnel interface, for example `sudo ufw route allow in on tc0`.
+- If the exit node has Docker, or a firewall whose forward policy is DROP (ufw's default), tcd allows forwarding from the tunnel there itself: two rules tagged `tailconnect-exit` in Docker's `DOCKER-USER` chain, or else at the top of `FORWARD` (needs `iptables`). They're removed when it stops being an exit node. Other firewalls (firewalld, plain nftables) must allow it themselves, for example forwarding in on `tc0`.
 - [How it works](how-it-works.md#exit-nodes).
 
 ---

@@ -66,10 +66,16 @@ func (c RouterConfig) equal(o RouterConfig) bool {
 		c.ExitNode == o.ExitNode && c.Forward == o.Forward
 }
 
-// ExitRouter is implemented by routers that can use exit nodes and be one
-// (Linux, with a kernel TUN). Others ignore RouterConfig.ExitNode and Forward.
+// ExitRouter is implemented by routers that can send the internet traffic
+// to an exit node (RouterConfig.ExitNode): Linux with a kernel TUN,
+// Android, Windows. Others ignore it.
 type ExitRouter interface {
 	SupportsExitNodes() bool
+}
+
+// ExitForwarder is implemented by routers that can be an exit node
+// (RouterConfig.Forward): Linux with a kernel TUN. Others ignore it.
+type ExitForwarder interface {
 	// ForwardError says why forwarding failed, if it did.
 	ForwardError() string
 }
@@ -254,7 +260,7 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 	if e.exitPref != "" {
 		switch exit, err := FindExitNode(nm, e.exitPref); {
 		case !canExit:
-			e.exitErr = "this client can't use exit nodes (only Linux with a kernel TUN can)"
+			e.exitErr = "this client can't use exit nodes"
 		case err != nil:
 			e.exitErr = err.Error()
 		default:
@@ -338,7 +344,8 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 	slices.SortFunc(routes, comparePrefix)
 	self := slices.Clone(nm.Self.Addresses)
 	slices.SortFunc(self, comparePrefix)
-	e.exitServes = canExit && nm.Self.ExitNode
+	_, canForward := e.router.(ExitForwarder)
+	e.exitServes = canForward && nm.Self.ExitNode
 	rc := RouterConfig{LocalAddrs: self, Routes: routes, ExitNode: !exitKey.IsZero(), Forward: e.exitServes}
 	if !rc.equal(e.lastRouter) {
 		if err := e.router.Set(rc); err != nil {
@@ -420,7 +427,7 @@ func (e *Engine) ExitStatus() ExitStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	st := ExitStatus{Chosen: e.exitPref, Using: e.exitUsing, Error: e.exitErr, Serving: e.exitServes}
-	if r, ok := e.router.(ExitRouter); ok && e.exitServes {
+	if r, ok := e.router.(ExitForwarder); ok && e.exitServes {
 		st.ServingError = r.ForwardError()
 	}
 	return st

@@ -27,6 +27,12 @@ type view struct {
 	CanDown  bool   // Disconnect makes sense
 	LoggedIn bool
 	Peers    []peerRow
+	// Exit nodes: the peers that can carry this machine's internet
+	// traffic (short names), the one chosen, and whether it's in use.
+	Exits     []string
+	ExitChose string
+	ExitInUse bool
+	ExitError string
 }
 
 type peerRow struct {
@@ -79,7 +85,13 @@ func makeView(st *localapi.Status, err error) view {
 		}
 		v.Self = strings.TrimSpace(name + "  " + v.SelfIP)
 	}
+	if st.ExitNode != nil {
+		v.ExitChose, v.ExitInUse, v.ExitError = st.ExitNode.Chosen, st.ExitNode.Using != "", st.ExitNode.Error
+	}
 	for _, p := range st.Peers {
+		if p.ExitNode {
+			v.Exits = append(v.Exits, shortName(p.Name, st))
+		}
 		v.Peers = append(v.Peers, peerRow{
 			Name: shortName(p.Name, st), IPv4: firstAddr(p.Addresses, true), IPv6: firstAddr(p.Addresses, false),
 			OS: p.OS, User: p.User, Connection: connection(p), Active: p.Active,
