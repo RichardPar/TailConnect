@@ -13,8 +13,11 @@ journalctl -u tc-control -e        # server log (on the server)
 - [Stuck in "Starting"](#stuck-in-starting)
 - [A peer is missing or unreachable](#a-peer-is-missing-or-unreachable)
 - [Peers stay on relay](#peers-stay-on-relay)
+- [Ping times jump around](#ping-times-jump-around)
 - [Names don't resolve](#names-dont-resolve)
+- [Access rules](#access-rules)
 - [Sharing](#sharing)
+- [Exit nodes](#exit-nodes)
 - [Web portal and accounts](#web-portal-and-accounts)
 - [Debug logging](#debug-logging)
 - [Start over](#start-over)
@@ -34,10 +37,11 @@ journalctl -u tc-control -e        # server log (on the server)
 | `fetch server key: … i/o timeout` | A firewall is dropping the connection, or the address is wrong |
 | `the server's certificate isn't trusted (…). If it's a self-signed certificate, check that its fingerprint, sha256:…, matches …` | The server uses a self-signed certificate (`-tls-self-signed`) and this device hasn't pinned it. Compare the fingerprint with the server log or the portal's Auth keys tab; if it matches, run the same `tc up` again with `--tls-fingerprint sha256:…` ([details](installation.md#self-signed-certificate-no-dns-name-or-open-port-needed)). If it doesn't match, something else is answering at that address: don't connect. |
 | `server certificate sha256:… doesn't match the pinned sha256:…` | The server's certificate key changed: its `tls/` folder was lost or replaced, or another machine answers at that address. If you know why (say, a reinstall without a backup), pin the new fingerprint with `tc up --tls-fingerprint`. |
+| `… (connecting by IP address, only the pinned key is accepted)` | The server address is an IP address, so a certificate from a trusted authority can't be checked against a name. Only a pinned certificate is accepted. Use the server's DNS name, or pin its certificate with `--tls-fingerprint`. |
 | `control: 400 Client sent an HTTP request to an HTTPS server` | The server has moved to HTTPS and this device still uses `http://`. Run `sudo tc up --server https://… ` (with `--tls-fingerprint` for a self-signed certificate). The device keeps its identity. |
 | `tls: failed to verify certificate: x509: certificate signed by unknown authority` | The server's certificate isn't trusted. Use a public CA, pin a self-signed certificate with `--tls-fingerprint`, or add your CA to the system trust store and restart `tcd` ([details](installation.md#enable-https)). |
-| `control: 429 too many failed registrations from this address; try again later` | 10 registrations with a wrong auth key from one IP address, then one every 30 seconds. Fix the key and wait a few minutes. Machines that already joined aren't affected. |
-| `control: 429 too many connection attempts from this address` or `control: 503 too many open connections from this address` | The server limits each IP address to 30 quick connection attempts (then one a second) and 64 open connections. Many devices behind one NAT share an address, so this normally means something on that network keeps reconnecting. The device retries by itself. |
+| `control: 429 too many failed registrations from this address; try again later` | 10 registrations with a wrong auth key from one IP address (one /64 network for IPv6), then one every 30 seconds. Fix the key and wait a few minutes. Machines that already joined aren't affected. |
+| `control: 429 too many connection attempts from this address` or `control: 503 too many open connections from this address` | The server limits each IP address (each /64 network for IPv6) to 30 quick connection attempts (then one a second) and 64 open connections. Many devices behind one NAT share an address, so this normally means something on that network keeps reconnecting. The device retries by itself. |
 | `register: control: 403 account is not active (pending approval or suspended)` | The auth key's account is waiting for approval or suspended. An operator approves or reactivates it (Accounts tab, or `tc-control users activate NAME`). |
 | `Notice: this machine's account is suspended or awaiting approval` (status) | Same cause, for a machine that already joined: it has no peers until the account is active again, then recovers by itself. |
 | `Notice: this machine is waiting for approval …` (status) | The account requires approval for new machines. The owner or an operator approves it (Machines → Approve, or `tc-control nodes approve ID`); it then connects by itself. |
@@ -102,6 +106,19 @@ journalctl -u tcd -n 50
 - **Hard NATs.** Mobile networks and some corporate networks use NATs that can't be punched ([why](how-it-works.md#nat-traversal)). If both peers are behind one, they stay on the relay. One peer with a public address or a port forward (UDP 41641 to that device) is enough to get a direct path.
 - To see path discovery in detail, set `TC_DISCO_DEBUG=1` on both devices ([below](#debug-logging)).
 
+## Ping times jump around
+
+Pings **to** a laptop or phone on Wi-Fi vary a lot (say 5 to 150 ms), but pings **from** it are steady. This is the device's Wi-Fi power saving, not TailConnect. While the device is idle, its Wi-Fi radio sleeps, and the router holds packets for it until it wakes up. When the device sends the ping itself, the radio is already awake for the reply.
+
+To check, ping the device's LAN address instead of its TailConnect name. If that jumps around the same way, the tunnel isn't the cause.
+
+To fix it on Windows:
+
+1. Control Panel → **Power Options** → **Change plan settings** → **Change advanced power settings** → **Wireless Adapter Settings** → **Power Saving Mode**: **Maximum Performance**.
+2. Device Manager → **Network adapters** → the Wi-Fi adapter → **Power Management**: untick **Allow the computer to turn off this device to save power**.
+
+Phones do the same and usually have no setting for it. Real traffic (a video call, a file copy) keeps the radio awake, so it isn't slowed down.
+
 ## Names don't resolve
 
 ```sh
@@ -148,7 +165,7 @@ sudo nft list table ip tailconnect-exit  # … and its NAT table
 - **Status says `exit node NAME not in use`.** The reason is in brackets:
   - *not an exit node*: its role is off, or was turned off. Turn it on in the portal.
   - *no such machine in this network*: a typo, or the machine is offline long enough to have left the map, removed, or in another account. Exit nodes serve their own account only.
-  - *this client can't use exit nodes*: userspace mode (`-tun userspace`) or Android.
+  - *this client can't use exit nodes*: userspace mode (`-tun userspace`).
   - *this machine is itself an exit node*: an exit node can't use another one.
   Meanwhile the machine uses its own internet connection; it switches back by itself when the problem goes away.
 - **The exit node isn't listed as one in `tc status`, although it's on.** Access rules may stop this machine opening connections to it: it can only use an exit node it may send everything to. Add a rule such as `tag:laptop → tag:gw *`.

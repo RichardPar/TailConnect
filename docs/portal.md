@@ -105,7 +105,7 @@ How the numbers come about:
 - **The server keeps only the latest report**, in memory: nothing is stored on disk or kept as history. After a server restart, numbers return with the next reports.
 - **`–`** means the machine hasn't reported anything: it's idle, offline, or runs an older client that doesn't report traffic.
 
-Operators see every machine's traffic; tenants see their own machines'.
+Operators see every machine's traffic; tenants see their own machines'. A tenant sees peers named if they're the account's own machines, machines shared with it, or machines of accounts it shares with. Any other peer shows as **another machine**, for example a machine that was removed, or one whose share has ended.
 
 ## Auth keys
 

@@ -6,7 +6,7 @@ A self-hosted mesh VPN built on WireGuard. A small coordination server hands out
 
 Supported platforms: Linux (server and client), Windows 10/11 and Android (clients).
 
-On Windows, exit nodes are not supported yet. See the [roadmap](#roadmap).
+Windows and Android machines can use an exit node, but only Linux machines can be one. See the [roadmap](#roadmap).
 
 To get started, see the [quick start](QUICKSTART.md).
 
@@ -24,7 +24,7 @@ To get started, see the [quick start](QUICKSTART.md).
 - One-way sharing: an account can share a single machine with another account. The other account's machines can connect to it; it can't connect back.
 - Direct WireGuard paths found with STUN and hole punching. Without a direct path, traffic goes through a relay, still end-to-end encrypted. Failover between the two takes about 3 seconds.
 - MagicDNS: machines resolve as `name.account.domain` or just `name`. An account can set its own domain. Split DNS through systemd-resolved, with a `resolv.conf` fallback, and through NRPT rules on Windows.
-- Exit nodes: a Linux machine can route internet traffic for the other machines in its account (`tc up --exit-node NAME`). Off by default.
+- Exit nodes: a Linux machine can route internet traffic for the other machines in its account. Linux, Windows and Android machines can use one (`tc up --exit-node NAME`, or the apps' Exit node menu). Off by default.
 - Access rules within an account: tag machines and allow traffic from one tag to another on given ports.
 - Machine lifecycle: key expiry (180 days by default, or never per machine), optional approval of new machines, removal of ephemeral machines.
 - Pre-auth keys: single-use or reusable, ephemeral or pre-approved, with expiry and revocation.
@@ -89,5 +89,5 @@ Done:
 
 Not done:
 
-- Windows: exit nodes (using one, being one)
+- Windows and Android: being an exit node
 - UDP GSO/GRO for higher throughput

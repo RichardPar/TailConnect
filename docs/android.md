@@ -66,7 +66,7 @@ The quickest way. In the web portal, create an auth key (Auth keys → Generate 
 
 The app never connects from a link by itself: a link can come from anywhere, so you always see the server and decide. A key works once unless it's reusable; to join more devices with one code, make it reusable.
 
-**Self-signed servers.** If the server uses `-tls-self-signed`, the QR code also carries its certificate's fingerprint, and the app trusts that certificate only. If you type the address instead, the app shows the fingerprint the server presents and asks **Trust this server's certificate?** Compare it with the portal's Auth keys tab before tapping **They match: trust it**.
+**Self-signed servers.** If the server uses `-tls-self-signed`, the QR code also carries its certificate's fingerprint, and the app trusts that certificate only. If you type the address instead, the app shows the fingerprint the server presents and asks **Trust this server's certificate?** Compare it with the portal's Auth keys tab before tapping **They match: trust it**. A trusted fingerprint is only used for the server it came with: if you change the server address, the app drops it.
 
 ## Fill it in over USB
 
@@ -97,7 +97,7 @@ You still tap Connect, and approve the VPN, on the device.
 - Android only lets apps create VPN interfaces through its VPN service, so the app creates the interface and passes it to the client.
 - **Only TailConnect traffic uses the VPN:** the tunnel's address ranges (`100.64.0.0/10` and `fd7c:7c0e:a1e0::/48`). Everything else, such as browsing and streaming from the internet, goes out as usual. The app's own traffic (WireGuard, the control server) is kept out of its VPN.
 - **DNS:** while connected, the VPN's DNS server is MagicDNS (`100.100.100.100`), with your account's domain as a search domain, so short names work. Android sends it every lookup; it answers TailConnect names and passes everything else to the DNS servers of the network you're on (Wi-Fi or mobile data).
-- **Network changes:** when you switch between Wi-Fi and mobile data, the app tells the client the new network's DNS servers, and lookups use them from the next query. If Android briefly reports a network without DNS servers while switching, the previous ones are kept.
+- **Network changes:** when you switch between Wi-Fi and mobile data, the app tells the client the new network's DNS servers, and lookups use them from the next query. If Android briefly reports a network without DNS servers while switching, the previous ones are kept. On mobile data, the app moves to Wi-Fi (or Ethernet) as soon as one is up and reaches the internet. It waits until Android has checked the connection, so a Wi-Fi with a sign-in page doesn't take over. The log says `Wi-Fi is available; moving off mobile data`.
 - **Exit nodes:** the app can use an [exit node](usage.md#exit-nodes): tap **Exit node: None** under Connect and pick one. While it's in use, all internet traffic goes through it, except this device's own local network, which stays direct. The VPN interface is replaced to change its routes, so the tunnel stays up but apps may see a brief network change. The app can't be an exit node.
 - **Paths:** the app tells the client the device's addresses on the current network, since Android doesn't let apps read them directly. Devices on the same Wi-Fi then connect directly over it.
 

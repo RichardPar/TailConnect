@@ -71,7 +71,7 @@ To let someone else connect and disconnect: `sudo usermod -aG tailconnect NAME`.
 
 - `tc-gui` is a Go program that calls GTK 3 through [purego](https://github.com/ebitengine/purego), so it's built without cgo like the other binaries (amd64 and arm64 from any machine). The panel icon is an AppIndicator (StatusNotifierItem over D-Bus), or a GtkStatusIcon where that library is missing.
 - It reads the status from `tcd`'s socket every 2 seconds. Connect and disconnect go to the socket directly; `tcd` checks the caller's user with `SO_PEERCRED` and allows members of `tailconnect`.
-- For logging in and out, it runs `pkexec tc-gui -helper` and passes the request (with the auth key) on standard input, never on the command line. The helper, running as root, sends it to `tcd` and prints the result.
+- For logging in and out, it runs `pkexec tc-gui -helper` and passes the request (with the auth key) on standard input, never on the command line. The helper, running as root, sends it to `tcd` and prints the result. Started through `pkexec`, `tc-gui` accepts only `-helper` and no other option, so the password prompt can't be used to run anything else as root.
 - One app per user: a socket in `$XDG_RUNTIME_DIR` passes a later start's request to the running app. The state icons are written to `$XDG_RUNTIME_DIR/tailconnect-icons`.
 
 ## Troubleshooting

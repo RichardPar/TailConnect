@@ -1,6 +1,6 @@
 # Quick start
 
-From nothing to two connected devices and the web portal in about ten minutes, by answering a few questions: no settings files to edit. You need a Linux machine for the server (a small VM or a Raspberry Pi is plenty) and at least one device to join: Linux, or an [Android](docs/android.md) phone or tablet.
+From nothing to two connected devices and the web portal in about ten minutes, by answering a few questions: no settings files to edit. You need a Linux machine for the server (a small VM or a Raspberry Pi is plenty) and at least one device to join: Linux, a [Windows](docs/windows.md) 10/11 PC, or an [Android](docs/android.md) phone or tablet.
 
 ![Setup in five steps: install the server, create a user and key, install tcd on each device, join, verify](docs/images/setup-flow.svg)
 
@@ -92,6 +92,8 @@ Auth key (tc-auth-…; input hidden):
 Name for this device [laptop]:
 Connected as laptop.alice.home.internal (100.64.0.2, fd7c:7c0e:a1e0::6440:2)
 ```
+
+**Windows:** run `tailconnect-VERSION-windows-amd64-setup.exe` (from `make dist-windows`) and accept the Windows prompt. It installs everything and opens the login window: enter the server URL and the auth key, then **Log in** ([details](docs/windows.md#install-and-join)).
 
 **Android:** build and install the app ([how](docs/android.md#build-the-app)). Then, in the web portal, create an auth key and point the device's camera at its QR code: the app opens with the server and key filled in ([how](docs/android.md#join-with-a-qr-code)). Or type them in. Tap Connect.
 
