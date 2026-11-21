@@ -224,3 +224,14 @@ func TestDNSModeConfig(t *testing.T) {
 		t.Skip("no resolver")
 	}
 }
+
+func TestDuckDNSNameRejectsMalformed(t *testing.T) {
+	for _, d := range []string{"foo..duckdns.org", ".duckdns.org", "a_b.duckdns.org", "duckdns.org", "x.example.org"} {
+		if n, err := DuckDNSName(d); err == nil {
+			t.Errorf("DuckDNSName(%q) = %q, want an error", d, n)
+		}
+	}
+	if n, err := DuckDNSName("vpn.TailConnect.duckdns.org."); err != nil || n != "tailconnect" {
+		t.Fatalf("got %q %v", n, err)
+	}
+}

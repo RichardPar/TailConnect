@@ -242,6 +242,10 @@ var waitTXT = func(ctx context.Context, fqdn, value string) error {
 	}
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
+		// The CA may ask any of them: wait until every one that answers
+		// serves the value (one that can't be reached from here, say over
+		// IPv6, can't be checked and doesn't hold things up).
+		answered, have := 0, 0
 		for _, ns := range servers {
 			r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 				var d net.Dialer
@@ -250,9 +254,16 @@ var waitTXT = func(ctx context.Context, fqdn, value string) error {
 			lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			txts, err := r.LookupTXT(lctx, fqdn)
 			cancel()
-			if err == nil && slices.Contains(txts, value) {
-				return nil
+			var dnsErr *net.DNSError
+			if err == nil || (errors.As(err, &dnsErr) && dnsErr.IsNotFound) {
+				answered++ // (not found: answered, just not yet)
 			}
+			if err == nil && slices.Contains(txts, value) {
+				have++
+			}
+		}
+		if answered > 0 && have == answered {
+			return nil
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%s doesn't serve the new TXT record after 3 minutes", fqdn)

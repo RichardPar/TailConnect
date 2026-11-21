@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"time"
 )
 
 const (
@@ -168,7 +169,9 @@ func parseAddr(v []byte, xor bool, tx TxID) (netip.AddrPort, bool) {
 	return netip.AddrPortFrom(ip, port), true
 }
 
-// Serve answers Binding requests on pc until it is closed.
+// Serve answers Binding requests on pc until it is closed. Other read
+// errors (an oversized datagram, an ICMP error reported on the socket, as
+// Windows does) are about one packet, not the socket: they're skipped.
 func Serve(pc net.PacketConn) error {
 	buf := make([]byte, 1500)
 	for {
@@ -177,7 +180,8 @@ func Serve(pc net.PacketConn) error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			return err
+			time.Sleep(10 * time.Millisecond) // a persistent error mustn't spin
+			continue
 		}
 		if !IsRequest(buf[:n]) {
 			continue

@@ -84,6 +84,7 @@ public class MainActivity extends Activity {
     private Form form;
     private JSONObject lastStatus;
     private boolean running, polling, logShown;
+    private int pollGen; // each resume starts a new polling loop; older ones stop
     // joined: this device is a member of a network (the daemon's saved state
     // says so), so it needs no login and its name is fixed. joining: a join
     // with an auth key is in progress.
@@ -95,6 +96,9 @@ public class MainActivity extends Activity {
     // memory only, to retry once the certificate is trusted), and the
     // fingerprint last asked about (to ask only once).
     private String tlsFp = "", retryKey = "", askedFp = "";
+    // The server address tlsFp came with: a pinned certificate is only ever
+    // used for that server (a link can come from anywhere).
+    private String tlsFpServer = "";
     private static final Pattern FP_HINT = Pattern.compile("--tls-fingerprint (sha256:[A-Za-z0-9_-]{43})");
 
     @Override
@@ -140,7 +144,7 @@ public class MainActivity extends Activity {
         if ((v = i.getStringExtra("server")) != null) { joinServer = v; any = true; }
         if ((v = i.getStringExtra("authkey")) != null) { joinKey = v; any = true; }
         if ((v = i.getStringExtra("hostname")) != null) { joinHost = v; any = true; }
-        if ((v = i.getStringExtra("fp")) != null) tlsFp = v.trim();
+        if ((v = i.getStringExtra("fp")) != null) setPin(v, joinServer);
         if (any) showLogin();
     }
 
@@ -148,13 +152,20 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         polling = true;
-        poll();
+        poll(++pollGen);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         polling = false;
+    }
+
+    @Override
+    protected void onDestroy() {
+        ui.removeCallbacksAndMessages(null);
+        io.shutdown();
+        super.onDestroy();
     }
 
     // ---- layout ----
@@ -324,8 +335,8 @@ public class MainActivity extends Activity {
     private void applyJoinLink(Uri link) {
         String s = link.getQueryParameter("server"), k = link.getQueryParameter("key"), h = link.getQueryParameter("hostname");
         String fp = link.getQueryParameter("fp");
-        if (fp != null) tlsFp = fp.trim();
         if (s != null && !s.isEmpty()) joinServer = s;
+        setPin(fp, joinServer);
         if (k != null && !k.isEmpty()) joinKey = k;
         if (h != null && !h.isEmpty()) joinHost = h;
         Toast.makeText(this, "Filled in from the QR code" + (s != null ? " for " + s : "") + ". Check the name and tap Join.", Toast.LENGTH_LONG).show();
@@ -439,6 +450,25 @@ public class MainActivity extends Activity {
         TextView note = text("The name can't be changed after joining (log out and join again to rename).", 13, false);
         note.setAlpha(0.7f);
         box.addView(note, margins(0, gap, 0, 0));
+        // A certificate fingerprint from a join link is shown, never used
+        // silently: it trusts that certificate for this server.
+        boolean[] keepPin = {!tlsFp.isEmpty() && tlsFpServer.equals(joinServer.trim())};
+        if (!keepPin[0]) setPin("", "");
+        LinearLayout pinRow = new LinearLayout(this);
+        pinRow.setOrientation(LinearLayout.VERTICAL);
+        if (keepPin[0]) {
+            TextView pin = text("Trusts this server's certificate: " + tlsFp, 13, false);
+            pin.setTextIsSelectable(true);
+            pinRow.addView(pin);
+            Button drop = new Button(this, null, android.R.attr.borderlessButtonStyle);
+            drop.setText("Don't trust it");
+            drop.setOnClickListener(v -> {
+                keepPin[0] = false;
+                pinRow.setVisibility(View.GONE);
+            });
+            pinRow.addView(drop);
+            box.addView(pinRow, margins(0, gap, 0, 0));
+        }
         TextView err = text("", 14, false);
         err.setTextColor(RED);
         err.setVisibility(View.GONE);
@@ -450,13 +480,14 @@ public class MainActivity extends Activity {
                 .setTitle("Join a network")
                 .setView(scroll)
                 .setPositiveButton("Join", null) // set below, so a bad entry keeps it open
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton("Cancel", (x, w) -> setPin("", ""))
                 .create();
         d.setOnDismissListener(x -> {
             if (loginDialog == d) loginDialog = null;
         });
         if (scan != null) scan.setOnClickListener(v -> {
             // Keep what's typed; the pop-up is shown again after scanning.
+            if (!keepPin[0]) setPin("", "");
             joinServer = srv.getText().toString().trim();
             joinKey = key.getText().toString().trim();
             joinHost = host.getText().toString().trim();
@@ -473,6 +504,8 @@ public class MainActivity extends Activity {
                 err.setVisibility(View.VISIBLE);
                 return;
             }
+            // The pin only applies to the server it came with.
+            if (!keepPin[0] || !u.equals(tlsFpServer)) setPin("", "");
             joinServer = u;
             joinKey = k;
             joinHost = h;
@@ -510,8 +543,8 @@ public class MainActivity extends Activity {
 
     // ---- status ----
 
-    private void poll() {
-        if (!polling) return;
+    private void poll(int gen) {
+        if (!polling || gen != pollGen || io.isShutdown()) return;
         io.execute(() -> {
             JSONObject st = null;
             try {
@@ -522,9 +555,10 @@ public class MainActivity extends Activity {
             JSONObject s = st;
             Saved sv = readSaved();
             ui.post(() -> {
+                if (gen != pollGen || isDestroyed()) return; // a newer loop took over
                 disk = sv;
                 show(s);
-                ui.postDelayed(this::poll, POLL_MS);
+                ui.postDelayed(() -> poll(gen), POLL_MS);
             });
         });
     }
@@ -810,11 +844,17 @@ public class MainActivity extends Activity {
                 .setMessage("The server uses a certificate that isn't from a trusted authority, such as a self-signed one. Its fingerprint is:\n\n"
                         + fp + "\n\nCompare it with the one the web portal shows (Auth keys tab) or tc-control logs. Only trust it if they match.")
                 .setPositiveButton("They match: trust it", (d, w) -> {
-                    tlsFp = fp;
+                    setPin(fp, joinServer);
                     startConnect();
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /** Pins fp ("" or null: none) for server only. */
+    private void setPin(String fp, String server) {
+        tlsFp = fp == null ? "" : fp.trim();
+        tlsFpServer = tlsFp.isEmpty() ? "" : server.trim();
     }
 
     private void setError(String msg) {

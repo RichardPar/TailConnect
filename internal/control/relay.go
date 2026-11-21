@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"tailconnect/internal/db"
 	"tailconnect/internal/key"
@@ -44,10 +45,15 @@ func NewEmbeddedRelay(ctx context.Context, d *db.DB, log *slog.Logger) (*relay.S
 		if errors.Is(err, db.ErrNotFound) {
 			return errors.New("node not registered")
 		}
-		if err == nil && n.UserStatus != db.StatusActive {
-			return errors.New("account not active")
+		if err != nil {
+			return err
 		}
-		return err
+		// The same check as for standalone relays: an inactive account, an
+		// unapproved machine or an expired key may not hold a connection.
+		if notice := cutOffNotice(n, time.Now()); notice != "" {
+			return errors.New("machine is cut off: " + notice)
+		}
+		return nil
 	}
 	return relay.NewServer(rk, authorize, log), nil
 }

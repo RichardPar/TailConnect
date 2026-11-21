@@ -128,8 +128,20 @@ func (m *Manager) Start(ctx context.Context) {
 }
 
 // HTTPHandler serves the CA's HTTP challenges and redirects everything else
-// to HTTPS (for Config.HTTPListen).
-func (m *Manager) HTTPHandler() http.Handler { return m.m.HTTPHandler(nil) }
+// to HTTPS (for Config.HTTPListen). With DNS checks there are no HTTP
+// challenges: it only redirects.
+func (m *Manager) HTTPHandler() http.Handler {
+	if m.m == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host := r.Host
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusFound)
+		})
+	}
+	return m.m.HTTPHandler(nil)
+}
 
 func listenPort(addr string) string {
 	_, port, err := net.SplitHostPort(addr)

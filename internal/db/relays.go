@@ -70,9 +70,14 @@ func (d *DB) ListRelayTokens(ctx context.Context) ([]RelayToken, error) {
 	return out, rows.Err()
 }
 
-// DeleteRelayToken revokes the relay credential called name (or with that ID).
+// DeleteRelayToken revokes the relay credential called name, or failing
+// that the one with that ID. Exactly one: a relay named "2" must not take
+// relay 2 with it.
 func (d *DB) DeleteRelayToken(ctx context.Context, nameOrID string) error {
-	res, err := d.sql.ExecContext(ctx, `DELETE FROM relay_tokens WHERE name = ? OR CAST(id AS TEXT) = ?`, nameOrID, nameOrID)
+	res, err := d.sql.ExecContext(ctx, `
+		DELETE FROM relay_tokens WHERE id = COALESCE(
+			(SELECT id FROM relay_tokens WHERE name = ?),
+			(SELECT id FROM relay_tokens WHERE CAST(id AS TEXT) = ?))`, nameOrID, nameOrID)
 	if err != nil {
 		return err
 	}

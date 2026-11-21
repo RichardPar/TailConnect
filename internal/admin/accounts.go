@@ -103,7 +103,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.hashing(func() { ok = password.Verify(req.Password, u.PasswordHash) })
 	}
 	if !ok {
-		s.acctLimit.Allow(name) // count the failure
+		if err == nil {
+			// Count the failure against the account. Only real accounts are
+			// tracked: a made-up name has no password to guess, and counting
+			// those would let anyone fill the table.
+			s.acctLimit.Allow(name)
+		}
 		s.log.Warn("login failed", "login", name, "remote", r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, "wrong name or password")
 		return
@@ -122,6 +127,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if err := checkMutation(r); err != nil { // another site may not sign you out
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,

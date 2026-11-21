@@ -18,7 +18,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -70,11 +69,7 @@ func main() {
 	if pSetProcessDpiAwarenessContext.Find() == nil {
 		pSetProcessDpiAwarenessContext.Call(^uintptr(3)) // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
 	}
-	manifest := filepath.Join(os.TempDir(), "tailconnect-gui.manifest")
-	if b, err := os.ReadFile(manifest); err != nil || string(b) != commonControlsManifest {
-		_ = os.WriteFile(manifest, []byte(commonControlsManifest), 0o644)
-	}
-	enableVisualStyles(manifest)
+	enableVisualStyles()
 	registerClasses()
 
 	c := localapi.NewClient(localapi.DefaultSocket)

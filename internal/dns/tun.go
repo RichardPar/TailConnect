@@ -30,6 +30,12 @@ type TUN struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	// closeMu orders Close after work Read starts: Read (WireGuard's reader
+	// may still be in it) holds it shared while adding to wg or writing to
+	// the TCP stack; Close takes it exclusively to set closed first.
+	closeMu sync.RWMutex
+	closed  bool
+
 	tcpOnce  sync.Once
 	tcpStack *tcpStack // DNS over TCP, started on first use (see tcp.go)
 }
@@ -77,6 +83,9 @@ func (t *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 }
 
 func (t *TUN) Close() error {
+	t.closeMu.Lock()
+	t.closed = true
+	t.closeMu.Unlock()
 	t.cancel()
 	err := t.Device.Close()
 	t.tcpOnce.Do(func() {}) // no stack starts after this
@@ -152,6 +161,11 @@ func (t *TUN) match(pkt []byte) (query, bool) {
 
 // handle answers q in the background (forwarded queries can take seconds).
 func (t *TUN) handle(q query) {
+	t.closeMu.RLock()
+	defer t.closeMu.RUnlock()
+	if t.closed {
+		return
+	}
 	t.wg.Add(1)
 	go func() {
 		defer t.wg.Done()

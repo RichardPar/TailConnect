@@ -52,6 +52,11 @@ func (t *TUN) isTCPToResolver(pkt []byte) bool {
 
 // toTCPStack hands pkt to the TCP stack, starting it if needed.
 func (t *TUN) toTCPStack(pkt []byte) {
+	t.closeMu.RLock()
+	defer t.closeMu.RUnlock()
+	if t.closed {
+		return
+	}
 	s := t.tcp()
 	if s == nil {
 		return

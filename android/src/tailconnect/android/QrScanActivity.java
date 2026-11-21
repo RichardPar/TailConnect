@@ -18,6 +18,7 @@ import android.hardware.camera2.params.StreamConfigurationMap;
 import android.hardware.display.DisplayManager;
 import android.media.Image;
 import android.media.ImageReader;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -49,6 +50,11 @@ public class QrScanActivity extends Activity {
     private TextView hint;
     private HandlerThread thread;
     private Handler bg;
+    // The camera's callbacks run on the background thread, start and stop on
+    // the UI thread: camLock guards these, and active says whether the
+    // camera is wanted (false after stop, so a late open is closed at once).
+    private final Object camLock = new Object();
+    private boolean active;
     private CameraDevice camera;
     private CameraCaptureSession session;
     private ImageReader reader;
@@ -154,20 +160,26 @@ public class QrScanActivity extends Activity {
             int[] af = cc.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
             boolean continuousAf = af != null && Arrays.stream(af).anyMatch(m -> m == CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
 
-            reader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
-            reader.setOnImageAvailableListener(this::onFrame, bg);
+            synchronized (camLock) {
+                active = true;
+                reader = ImageReader.newInstance(size.getWidth(), size.getHeight(), ImageFormat.YUV_420_888, 2);
+                reader.setOnImageAvailableListener(this::onFrame, bg);
+            }
             cm.openCamera(id, new CameraDevice.StateCallback() {
                 @Override public void onOpened(CameraDevice d) {
-                    camera = d;
+                    synchronized (camLock) {
+                        if (!active) { d.close(); return; } // stopped while opening
+                        camera = d;
+                    }
                     startSession(continuousAf);
                 }
                 @Override public void onDisconnected(CameraDevice d) {
                     d.close();
-                    if (camera == d) camera = null;
+                    synchronized (camLock) { if (camera == d) camera = null; }
                 }
                 @Override public void onError(CameraDevice d, int error) {
                     d.close();
-                    if (camera == d) camera = null;
+                    synchronized (camLock) { if (camera == d) camera = null; }
                     runOnUiThread(() -> hint.setText("The camera couldn't be opened (it may be in use by another app)."));
                 }
             }, bg);
@@ -180,18 +192,25 @@ public class QrScanActivity extends Activity {
     private void startSession(boolean continuousAf) {
         try {
             SurfaceTexture st = preview.getSurfaceTexture();
-            if (st == null || camera == null) return;
+            CameraDevice dev;
+            Surface frames;
+            synchronized (camLock) {
+                if (st == null || camera == null || reader == null) return;
+                dev = camera;
+                frames = reader.getSurface();
+            }
             st.setDefaultBufferSize(size.getWidth(), size.getHeight());
-            Surface view = new Surface(st), frames = reader.getSurface();
-            CaptureRequest.Builder req = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            Surface view = new Surface(st);
+            CaptureRequest.Builder req = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             req.addTarget(view);
             req.addTarget(frames);
             if (continuousAf) req.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-            CameraDevice dev = camera;
             dev.createCaptureSession(Arrays.asList(view, frames), new CameraCaptureSession.StateCallback() {
                 @Override public void onConfigured(CameraCaptureSession s) {
-                    if (camera != dev) { s.close(); return; }
-                    session = s;
+                    synchronized (camLock) {
+                        if (camera != dev) { s.close(); return; }
+                        session = s;
+                    }
                     try {
                         s.setRepeatingRequest(req.build(), null, bg);
                     } catch (CameraAccessException | IllegalStateException e) {
@@ -208,9 +227,12 @@ public class QrScanActivity extends Activity {
     }
 
     private void stop() {
-        if (session != null) { session.close(); session = null; }
-        if (camera != null) { camera.close(); camera = null; }
-        if (reader != null) { reader.close(); reader = null; }
+        synchronized (camLock) {
+            active = false;
+            if (session != null) { session.close(); session = null; }
+            if (camera != null) { camera.close(); camera = null; }
+            if (reader != null) { reader.close(); reader = null; }
+        }
     }
 
     /** The back camera, or failing that any camera. */
@@ -250,7 +272,10 @@ public class QrScanActivity extends Activity {
         if (W == 0 || H == 0) return;
         boolean sideways = sensorOrientation % 180 != 0;
         float nw = sideways ? size.getHeight() : size.getWidth(), nh = sideways ? size.getWidth() : size.getHeight();
-        int deg = 90 * getDisplay().getRotation();
+        // Activity.getDisplay() only exists from Android 11 (API 30).
+        @SuppressWarnings("deprecation")
+        int rot = Build.VERSION.SDK_INT >= 30 ? getDisplay().getRotation() : getWindowManager().getDefaultDisplay().getRotation();
+        int deg = 90 * rot;
         float cw = deg % 180 == 0 ? nw : nh, ch = deg % 180 == 0 ? nh : nw;
         float cx = W / 2, cy = H / 2, s = Math.max(W / cw, H / ch);
         Matrix m = new Matrix();

@@ -98,9 +98,9 @@ func applyAuthKey(ctx context.Context, tx *sql.Tx, id int64, key string, now tim
 			return err
 		}
 	}
-	expires := curExpires // NULL = never expires: kept
-	if curExpires.Valid {
-		expires = expiryAt(now, keyExpiry)
+	expires := curExpires // NULL = never expires: kept within the account
+	if curExpires.Valid || curUser != k.UserID {
+		expires = expiryAt(now, keyExpiry) // a new account's policy applies
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE nodes SET approved = ?, expires_at = ? WHERE id = ?`, approved, expires, id); err != nil {
 		return err
@@ -114,12 +114,15 @@ func applyAuthKey(ctx context.Context, tx *sql.Tx, id int64, key string, now tim
 	if err != nil {
 		return err
 	}
-	// Aliases belong to the account's namespace: moving drops them.
-	aliasesSQL := "aliases"
+	// What an account granted its machine stays with that account: moving
+	// drops aliases (its namespace), tags (its access rules) and the exit
+	// node role, so a machine can't arrive in another account already
+	// tagged into its rules or offering to carry its traffic.
+	moved := ""
 	if curUser != k.UserID {
-		aliasesSQL = "'[]'"
+		moved = ", aliases = '[]', tags = '[]', exit_node = 0"
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, given_name = ?, ephemeral = ?, preauth_key_id = ?, aliases = `+aliasesSQL+` WHERE id = ?`,
+	_, err = tx.ExecContext(ctx, `UPDATE nodes SET user_id = ?, given_name = ?, ephemeral = ?, preauth_key_id = ?`+moved+` WHERE id = ?`,
 		k.UserID, name, k.Ephemeral, k.ID, id)
 	return err
 }

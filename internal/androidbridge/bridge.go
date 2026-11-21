@@ -10,8 +10,8 @@
 // Protocol: newline-delimited JSON messages over a stream socket that tcd
 // listens on and the app connects to.
 //
-//	tcd → app  {"Type":"tun", "Addresses":[…], "Routes":[…], "DNS":[…], "Search":[…], "MTU":1280}
-//	app → tcd  {"Type":"tun-reply", "OK":true}   with the interface's fd attached (SCM_RIGHTS)
+//	tcd → app  {"Type":"tun", "ID":n, "Addresses":[…], "Routes":[…], "DNS":[…], "Search":[…], "MTU":1280}
+//	app → tcd  {"Type":"tun-reply", "ID":n, "OK":true}   with the interface's fd attached (SCM_RIGHTS)
 //	tcd → app  {"Type":"close"}                  the tunnel stopped: close the interface
 //	app → tcd  {"Type":"network", "DNS":[…], "Addresses":[…]}   the underlying network changed
 package androidbridge
@@ -35,6 +35,7 @@ import (
 // Message is one protocol message (fields by type, see the package doc).
 type Message struct {
 	Type string
+	ID   int `json:",omitempty"` // tun, tun-reply: which request a reply answers
 
 	// tun
 	Addresses []netip.Prefix `json:",omitempty"`
@@ -62,6 +63,10 @@ type Bridge struct {
 	ln   *net.UnixListener
 	logf func(string, ...any)
 
+	sendMu  sync.Mutex // one message at a time on the socket
+	reqMu   sync.Mutex // one interface request at a time
+	lastID  int        // of the last tun request
+	closed  bool
 	mu      sync.Mutex
 	conn    *net.UnixConn
 	connCh  chan struct{} // closed (and replaced) when an app connects
@@ -131,7 +136,18 @@ func (b *Bridge) Network() Network {
 	return b.net
 }
 
-func (b *Bridge) Close() error { return b.ln.Close() }
+// Close stops listening and drops the app's connection (ending its reader).
+func (b *Bridge) Close() error {
+	b.mu.Lock()
+	b.closed = true
+	c := b.conn
+	b.conn = nil
+	b.mu.Unlock()
+	if c != nil {
+		c.Close()
+	}
+	return b.ln.Close()
+}
 
 func (b *Bridge) accept() {
 	for {
@@ -140,6 +156,11 @@ func (b *Bridge) accept() {
 			return
 		}
 		b.mu.Lock()
+		if b.closed {
+			b.mu.Unlock()
+			c.Close()
+			return
+		}
 		if b.conn != nil {
 			b.conn.Close() // the newest app connection wins
 		}
@@ -242,6 +263,8 @@ func (b *Bridge) send(m Message) error {
 	if c == nil {
 		return errors.New("the app is not connected")
 	}
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
 	c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, err = c.Write(append(line, '\n'))
 	return err
@@ -250,7 +273,10 @@ func (b *Bridge) send(m Message) error {
 // RequestTUN asks the app for a VPN interface and returns its fd. It waits
 // for the app to connect if it hasn't yet.
 func (b *Bridge) RequestTUN(ctx context.Context, req Message) (int, error) {
-	req.Type = "tun"
+	b.reqMu.Lock()
+	defer b.reqMu.Unlock()
+	b.lastID++
+	req.Type, req.ID = "tun", b.lastID
 	for {
 		b.mu.Lock()
 		connected, ch := b.conn != nil, b.connCh
@@ -264,19 +290,24 @@ func (b *Bridge) RequestTUN(ctx context.Context, req Message) (int, error) {
 			return -1, fmt.Errorf("waiting for the app: %w", ctx.Err())
 		}
 	}
-	// Drop a stale reply, if any.
-	select {
-	case r := <-b.replies:
-		if r.fd >= 0 {
-			syscall.Close(r.fd)
-		}
-	default:
-	}
 	if err := b.send(req); err != nil {
 		return -1, err
 	}
-	select {
-	case r := <-b.replies:
+	for {
+		var r reply
+		select {
+		case r = <-b.replies:
+		case <-ctx.Done():
+			return -1, fmt.Errorf("waiting for the VPN interface: %w", ctx.Err())
+		}
+		if r.msg.ID != req.ID {
+			// The late answer to an earlier request that timed out: not
+			// this interface (other routes). Close it and keep waiting.
+			if r.fd >= 0 {
+				syscall.Close(r.fd)
+			}
+			continue
+		}
 		if !r.msg.OK || r.fd < 0 {
 			if r.fd >= 0 {
 				syscall.Close(r.fd)
@@ -288,8 +319,6 @@ func (b *Bridge) RequestTUN(ctx context.Context, req Message) (int, error) {
 			return -1, errors.New("the app could not create the VPN: " + msg)
 		}
 		return r.fd, nil
-	case <-ctx.Done():
-		return -1, fmt.Errorf("waiting for the VPN interface: %w", ctx.Err())
 	}
 }
 

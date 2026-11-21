@@ -4,6 +4,9 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
+
+	"tailconnect/internal/ipam"
 )
 
 func TestNodeAliases(t *testing.T) {
@@ -74,5 +77,36 @@ func TestNodeAliases(t *testing.T) {
 	}
 	if len(moved.Node.Aliases) != 0 {
 		t.Fatalf("aliases kept across accounts: %v", moved.Node.Aliases)
+	}
+}
+
+// Moving a machine to another account drops what its old account granted:
+// tags, the exit node role and a never-expiring key.
+func TestMoveResetsGrants(t *testing.T) {
+	d := open(t)
+	a := mustUser(t, d, "tenanta")
+	b := mustUser(t, d, "tenantb")
+	r, err := reg(d, "m1", "n1", "box", mustKey(t, d, a.ID, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := r.Node.ID
+	if err := d.SetNodeTags(ctx, id, []string{"prod"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetNodeExitNode(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetNodeExpiry(ctx, id, time.Time{}); err != nil { // never
+		t.Fatal(err)
+	}
+	moved, err := d.RegisterNode(ctx, RegisterParams{MachineKey: "m1", NodeKey: "n1", DiscoKey: "disco-n1", Hostname: "box",
+		AuthKey: mustKey(t, d, b.ID, false), Alloc: ipam.Default().Next, KeyExpiry: 180 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := moved.Node
+	if n.UserName != "tenantb" || len(n.Tags) != 0 || n.ExitNode || n.ExpiresAt.IsZero() {
+		t.Fatalf("after moving: user=%s tags=%v exit=%v expires=%v", n.UserName, n.Tags, n.ExitNode, n.ExpiresAt)
 	}
 }

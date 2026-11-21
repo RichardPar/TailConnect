@@ -224,6 +224,10 @@ func (c *Client) upgrade(ctx context.Context, raw net.Conn) (net.Conn, error) {
 		raw.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 	defer raw.SetDeadline(time.Time{})
+	// Cancelling ctx (shutting down) ends a stalled upgrade at once, not at
+	// the deadline: Windows gives a stopping service only seconds.
+	stop := context.AfterFunc(ctx, func() { raw.SetDeadline(time.Unix(1, 0)) })
+	defer stop()
 
 	req, _ := http.NewRequest("POST", c.u.JoinPath("/machine/noise").String(), nil)
 	req.Header.Set("Upgrade", noise.UpgradeProtocol)

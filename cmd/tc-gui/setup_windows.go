@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +16,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 
 	"tailconnect/internal/localapi"
 )
@@ -83,7 +89,7 @@ func runSetup(c *localapi.Client) {
 
 // install unpacks the package and runs its tcd install.
 func install() (string, error) {
-	dir, err := os.MkdirTemp("", "TailConnect-setup-")
+	dir, err := privateDir()
 	if err != nil {
 		return "", err
 	}
@@ -112,6 +118,43 @@ func install() (string, error) {
 	cmd.Dir = os.TempDir() // a process it starts must not hold dir as its working directory
 	b, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(b)), err
+}
+
+// privateDir creates a new folder for the unpacked package that only SYSTEM
+// and Administrators can touch. The installer runs elevated and starts
+// tcd.exe from it, so it must not be in %TEMP%: the user's unelevated
+// programs could swap tcd.exe, plant a DLL beside it, or rename the folder
+// away and put their own in its place. In ProgramData, users may create
+// folders but not rename or delete other people's.
+func privateDir() (string, error) {
+	base, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	if err != nil {
+		return "", err
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		return "", err
+	}
+	sa := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	for i := 0; i < 10; i++ {
+		var r [8]byte
+		if _, err := rand.Read(r[:]); err != nil {
+			return "", err
+		}
+		dir := filepath.Join(base, "TailConnect-setup-"+hex.EncodeToString(r[:]))
+		p, err := windows.UTF16PtrFromString(dir)
+		if err != nil {
+			return "", err
+		}
+		err = windows.CreateDirectory(p, sa) // fails if it exists: never someone else's
+		if err == nil {
+			return dir, nil
+		}
+		if !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return "", err
+		}
+	}
+	return "", errors.New("could not create a folder to unpack into")
 }
 
 func unpack(f *zip.File, to string) error {

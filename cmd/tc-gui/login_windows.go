@@ -27,6 +27,7 @@ type loginWindow struct {
 
 	server, key, name, fp windows.Handle
 	msg, ok, cancel       windows.Handle
+	fonts                 []windows.Handle // deleted when the window closes
 
 	mu     sync.Mutex
 	result *localapi.Status
@@ -58,6 +59,7 @@ func newLoginWindow(c *localapi.Client, onDone func(), standalone bool) *loginWi
 
 	font := messageFont(dpi, 1, false)
 	bold := messageFont(dpi, 1.25, true)
+	w.fonts = []windows.Handle{font, bold}
 	r := clientRect(w.hwnd)
 	m := sc(16)
 	full := r.Right - r.Left - 2*m
@@ -131,6 +133,10 @@ func (w *loginWindow) handle(m uint32, wp, lp uintptr) (uintptr, bool) {
 
 func (w *loginWindow) close() {
 	pDestroyWindow.Call(uintptr(w.hwnd))
+	for _, f := range w.fonts { // after the controls using them are gone
+		pDeleteObject.Call(uintptr(f))
+	}
+	w.fonts = nil
 	if w.standalone {
 		pPostQuitMessage.Call(0)
 	}

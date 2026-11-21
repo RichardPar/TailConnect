@@ -102,6 +102,9 @@ func (c *Client) Send(dst key.NodePublic, pkt []byte) error {
 	if c.ctx.Err() != nil {
 		return errors.New("relay: client closed")
 	}
+	if keyLen+len(pkt) > maxFrame {
+		return errors.New("relay: packet too large")
+	}
 	frame := make([]byte, 5+keyLen+len(pkt))
 	frame[0] = byte(frameSendPacket)
 	putLen(frame[1:5], keyLen+len(pkt))
@@ -155,6 +158,13 @@ func (c *Client) dial(ctx context.Context) (net.Conn, *bufio.Reader, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// The TLS handshake, upgrade request and response all end with ctx:
+	// a server that stalls mid-upgrade must not hang dial (and Close).
+	if dl, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(dl)
+	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 	if c.u.Scheme == "https" {
 		cfg := c.opts.TLSConfig.Clone()
 		if cfg == nil {
@@ -174,6 +184,7 @@ func (c *Client) dial(ctx context.Context) (net.Conn, *bufio.Reader, error) {
 	req, _ := http.NewRequest("GET", c.u.String(), nil)
 	req.Header.Set("Upgrade", UpgradeProtocol)
 	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set(ChallengeHeader, "1")
 	if err := req.Write(conn); err != nil {
 		conn.Close()
 		return nil, nil, err
@@ -190,6 +201,10 @@ func (c *Client) dial(ctx context.Context) (net.Conn, *bufio.Reader, error) {
 		conn.Close()
 		return nil, nil, fmt.Errorf("relay upgrade refused: %s: %s", resp.Status, b)
 	}
+	if !stop() { // ctx ended as the upgrade finished: conn is closed
+		return nil, nil, ctx.Err()
+	}
+	conn.SetDeadline(time.Time{})
 	return conn, br, nil
 }
 
@@ -210,13 +225,18 @@ func (c *Client) connectAndServe() error {
 	if err != nil {
 		return err
 	}
-	if t != frameServerKey || len(b) != len(magic)+keyLen || string(b[:len(magic)]) != magic {
+	// The server adds a challenge when it supports them (older ones don't).
+	if t != frameServerKey || (len(b) != len(magic)+keyLen && len(b) != len(magic)+keyLen+challengeLen) || string(b[:len(magic)]) != magic {
 		return errors.New("not a TailConnect relay")
 	}
 	var serverPub [32]byte
 	copy(serverPub[:], b[len(magic):])
+	var challenge []byte
+	if len(b) > len(magic)+keyLen {
+		challenge = append([]byte(nil), b[len(magic)+keyLen:]...)
+	}
 
-	info, _ := json.Marshal(clientInfo{Version: version})
+	info, _ := json.Marshal(clientInfo{Version: version, Challenge: challenge})
 	nonce, err := generateNonce()
 	if err != nil {
 		return err
@@ -245,13 +265,18 @@ func (c *Client) connectAndServe() error {
 	c.mu.Unlock()
 	c.opts.Logf("relay %s: connected", c.u.Host)
 
-	// Writer.
+	// Writer, for this connection only: it stops when the reader below
+	// returns, so it never takes packets meant for the next connection.
 	werr := make(chan error, 1)
+	connDone := make(chan struct{})
+	defer close(connDone)
 	go func() {
 		for {
 			select {
 			case <-c.ctx.Done():
 				werr <- nil
+				return
+			case <-connDone:
 				return
 			case q := <-c.sendq:
 				if time.Since(q.at) > maxQueueAge {

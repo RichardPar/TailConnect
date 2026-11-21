@@ -30,6 +30,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -91,10 +92,10 @@ public class TcVpnService extends VpnService {
         String action = intent == null ? null : intent.getAction();
         if (ACTION_DISCONNECT.equals(action)) {
             wanted = false;
-            worker.execute(() -> stop(false));
+            post(() -> stop(false));
         } else if (ACTION_LOGOUT.equals(action)) {
             wanted = false;
-            worker.execute(() -> stop(true));
+            post(() -> stop(true));
         } else {
             // ACTION_CONNECT from the UI, or the system starting an always-on VPN
             // (then there are no extras: the daemon reconnects with its saved state).
@@ -102,10 +103,19 @@ public class TcVpnService extends VpnService {
             String fp = extra(intent, EXTRA_FP);
             wanted = true;
             gap = MIN_GAP_MS;
-            worker.execute(() -> connect(server, key, host, fp));
+            post(() -> connect(server, key, host, fp));
             startWatchdog();
         }
         return START_STICKY;
+    }
+
+    /** Runs r on the worker, unless the service is shutting down. */
+    private void post(Runnable r) {
+        try {
+            worker.execute(r);
+        } catch (RejectedExecutionException ignored) {
+            // onDestroy stopped the worker: a late callback has nothing to do
+        }
     }
 
     private static String extra(Intent i, String name) {
@@ -117,7 +127,7 @@ public class TcVpnService extends VpnService {
     public void onRevoke() {
         // Another VPN took over, or the user turned it off in Settings.
         wanted = false;
-        worker.execute(() -> stop(false));
+        post(() -> stop(false));
     }
 
     @Override
@@ -190,7 +200,7 @@ public class TcVpnService extends VpnService {
         if (watching) return;
         watching = true;
         timer.scheduleWithFixedDelay(() -> {
-            if (wanted) worker.execute(this::check);
+            if (wanted) post(this::check);
         }, CHECK_MS, CHECK_MS, TimeUnit.MILLISECONDS);
     }
 
@@ -250,7 +260,7 @@ public class TcVpnService extends VpnService {
 
     /** The underlying network changed (on the worker): reconnect once it has settled. */
     private void networkChanged(String why) {
-        timer.schedule(() -> worker.execute(() -> {
+        timer.schedule(() -> post(() -> {
             lastReconnect = 0; // a network change is worth reconnecting at once
             gap = MIN_GAP_MS;
             reconnect(why);
@@ -344,6 +354,19 @@ public class TcVpnService extends VpnService {
             }
         } catch (IOException | JSONException e) {
             if (bridge == s) addLog("bridge: " + e.getMessage());
+        } finally {
+            // The daemon went away (or the bridge broke): forget this
+            // connection, so the next connect makes a new one.
+            synchronized (this) {
+                if (bridge == s) {
+                    try {
+                        s.close();
+                    } catch (IOException ignored) {
+                    }
+                    bridge = null;
+                    bridgeOut = null;
+                }
+            }
         }
     }
 
@@ -367,6 +390,7 @@ public class TcVpnService extends VpnService {
         ParcelFileDescriptor pfd = null;
         try {
             reply.put("Type", "tun-reply");
+            reply.put("ID", m.optInt("ID")); // which request this answers
             Builder b = new Builder()
                     .setSession(getString(R.string.app_name))
                     .setMtu(m.optInt("MTU", 1280));
@@ -390,10 +414,12 @@ public class TcVpnService extends VpnService {
             addLog("VPN interface: " + e.getMessage());
         }
         synchronized (this) {
-            ParcelFileDescriptor old = vpn;
-            vpn = pfd;
             send(reply.toString(), pfd == null ? null : pfd.getFileDescriptor());
-            closeQuietly(old);
+            if (pfd != null) { // a failed attempt keeps the interface that works
+                ParcelFileDescriptor old = vpn;
+                vpn = pfd;
+                closeQuietly(old);
+            }
         }
     }
 
@@ -425,7 +451,7 @@ public class TcVpnService extends VpnService {
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
             public void onAvailable(Network network) {
-                worker.execute(() -> {
+                post(() -> {
                     up.add(network);
                     if (defaultNet == null) {
                         defaultNet = network; // the network we started on
@@ -439,7 +465,7 @@ public class TcVpnService extends VpnService {
 
             @Override
             public void onLost(Network network) {
-                worker.execute(() -> {
+                post(() -> {
                     up.remove(network);
                     if (!network.equals(defaultNet)) return;
                     netLost = true;
@@ -452,7 +478,7 @@ public class TcVpnService extends VpnService {
 
             @Override
             public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
-                worker.execute(() -> {
+                post(() -> {
                     // On mobile data and Wi-Fi (or Ethernet) is now up and
                     // reaches the internet (validated, so not a sign-in page):
                     // move to it. Mobile data stays up, so onLost never fires,
@@ -470,7 +496,7 @@ public class TcVpnService extends VpnService {
 
             @Override
             public void onLinkPropertiesChanged(Network network, LinkProperties lp) {
-                worker.execute(() -> {
+                post(() -> {
                     if (network.equals(defaultNet)) sendNetwork(lp);
                 });
             }

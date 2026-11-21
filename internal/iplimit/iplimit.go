@@ -16,8 +16,9 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// maxTracked bounds memory: past it the table is reset, which at worst
-// gives every client a fresh burst.
+// maxTracked bounds memory. Past it, idle entries (back to a full burst,
+// so forgetting them changes nothing) are dropped; only if every entry is
+// busy is the table reset, which at worst gives every client a fresh burst.
 const maxTracked = 10000
 
 // IP returns the client address of r without its port.
@@ -62,14 +63,22 @@ func NewRate(every time.Duration, burst int) *Rate {
 }
 
 func (l *Rate) get(ip string) *rate.Limiter {
-	if len(l.clients) > maxTracked {
-		l.clients = map[string]*rate.Limiter{}
-	}
 	lim, ok := l.clients[ip]
-	if !ok {
-		lim = rate.NewLimiter(rate.Every(l.every), l.burst)
-		l.clients[ip] = lim
+	if ok {
+		return lim
 	}
+	if len(l.clients) >= maxTracked {
+		for k, v := range l.clients {
+			if v.Tokens() >= float64(l.burst) {
+				delete(l.clients, k)
+			}
+		}
+		if len(l.clients) >= maxTracked {
+			l.clients = map[string]*rate.Limiter{}
+		}
+	}
+	lim = rate.NewLimiter(rate.Every(l.every), l.burst)
+	l.clients[ip] = lim
 	return lim
 }
 
@@ -91,7 +100,8 @@ func (l *Rate) Blocked(ip string) bool {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.get(ip).Tokens() < 1
+	lim, ok := l.clients[ip] // reading adds nothing: unknown means unused
+	return ok && lim.Tokens() < 1
 }
 
 // Count caps how many things (connections) each IP, and everyone together,

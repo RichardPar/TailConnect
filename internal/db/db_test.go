@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -296,5 +297,24 @@ func TestSettingIfAbsent(t *testing.T) {
 	v, _ = d.SetSettingIfAbsent(ctx, "k", "two")
 	if v != "one" {
 		t.Fatalf("overwrote existing setting: %q", v)
+	}
+}
+
+func TestDeleteRelayTokenDeletesOne(t *testing.T) {
+	d := open(t)
+	_, first, err := d.CreateRelayToken(ctx, "eu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A relay whose name is the other's ID.
+	if _, _, err := d.CreateRelayToken(ctx, strconv.FormatInt(first.ID, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DeleteRelayToken(ctx, strconv.FormatInt(first.ID, 10)); err != nil {
+		t.Fatal(err)
+	}
+	left, _ := d.ListRelayTokens(ctx)
+	if len(left) != 1 || left[0].Name != "eu" {
+		t.Fatalf("left: %+v", left)
 	}
 }

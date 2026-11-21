@@ -178,11 +178,13 @@ type Conn struct {
 	rmu     sync.Mutex
 	recv    *noise.CipherState
 	rframe  []byte
-	pending []byte // decrypted but not yet returned by Read
+	rbuf    []byte // decryption buffer, reused
+	pending []byte // decrypted but not yet returned by Read (part of rbuf)
 
 	wmu  sync.Mutex
 	send *noise.CipherState
 	wbuf []byte
+	werr error // a failed write leaves the stream out of step: every later one fails too
 }
 
 func newConn(c net.Conn, rw io.ReadWriter, send, recv *noise.CipherState, peer key.MachinePublic) *Conn {
@@ -201,13 +203,13 @@ func (c *Conn) Read(p []byte) (int, error) {
 			return 0, err
 		}
 		c.rframe = f
-		pt, err := c.recv.Decrypt(c.pending[:0], nil, f)
+		pt, err := c.recv.Decrypt(c.rbuf[:0], nil, f)
 		if err != nil {
 			// A decryption failure means tampering or desync; the stream is unusable.
 			c.Conn.Close()
 			return 0, fmt.Errorf("noise: decrypt: %w", err)
 		}
-		c.pending = pt
+		c.rbuf, c.pending = pt[:0], pt
 	}
 	n := copy(p, c.pending)
 	c.pending = c.pending[n:]
@@ -217,6 +219,16 @@ func (c *Conn) Read(p []byte) (int, error) {
 func (c *Conn) Write(p []byte) (int, error) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if c.werr != nil {
+		return 0, c.werr
+	}
+	// Each frame uses the next nonce, so after a failure (a frame not, or
+	// partly, sent) the peer can't follow the stream: close it for good.
+	fail := func(err error) error {
+		c.werr = fmt.Errorf("noise: write: %w", err)
+		c.Conn.Close()
+		return c.werr
+	}
 	written := 0
 	for len(p) > 0 {
 		chunk := p
@@ -229,11 +241,11 @@ func (c *Conn) Write(p []byte) (int, error) {
 		buf := c.wbuf[:2]
 		buf, err := c.send.Encrypt(buf, nil, chunk)
 		if err != nil {
-			return written, err
+			return written, fail(err)
 		}
 		binary.BigEndian.PutUint16(buf, uint16(len(buf)-2))
 		if _, err := c.rw.Write(buf); err != nil {
-			return written, err
+			return written, fail(err)
 		}
 		written += len(chunk)
 		p = p[len(chunk):]

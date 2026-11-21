@@ -78,6 +78,20 @@ esac
 case $name in
 *[!a-z0-9.-]* | .* | *..*) die "\"$name\" isn't a valid DNS name" ;;
 esac
+# Everything below ends up in /etc/default/tc-control and tc-control's
+# command line, so only plain values are accepted.
+for p in "$port" "${public_port:-1}"; do
+	case $p in
+	'' | *[!0-9]*) die "\"$p\" isn't a port number" ;;
+	esac
+	[ "$p" -ge 1 ] && [ "$p" -le 65535 ] || die "\"$p\" isn't a port number"
+done
+case $email in
+'') ;;
+*[!A-Za-z0-9._%+@-]* | *@*@* | @* | *@) die "\"$email\" isn't an email address" ;;
+*@*.*) ;;
+*) die "\"$email\" isn't an email address" ;;
+esac
 [ -n "$public_port" ] || public_port=$port
 for p in "$port" "$public_port"; do
 	case $p in
@@ -171,16 +185,20 @@ fi
 backup=$SETTINGS.pre-letsencrypt-$(date +%Y%m%d-%H%M%S)
 cp -p "$SETTINGS" "$backup"
 chmod 600 "$backup"
-tmp=$(mktemp)
+# The new file is written beside the old one, private from the start (the
+# token is a secret: only root, and systemd, which reads it, may read it),
+# then moved into place: a new file, so whoever had the old one open never
+# sees the token through it.
+tmp=$(mktemp "$SETTINGS.XXXXXX")
 awk -v line="TC_CONTROL_ARGS=\"$new\"" -v tok="$token" '
 	/^TC_CONTROL_ARGS=/ { if (!done) print line; done = 1; next }
 	/^TC_DUCKDNS_TOKEN=/ { next }
 	{ print }
 	END { if (!done) print line; if (tok != "") print "TC_DUCKDNS_TOKEN=" tok }' "$SETTINGS" >"$tmp"
-cat "$tmp" >"$SETTINGS"
-rm -f "$tmp"
-# The token is a secret: only root (and systemd, which reads it) may read the file.
-[ -z "$token" ] || chmod 600 "$SETTINGS"
+if [ -z "$token" ] && ! grep -q '^TC_DUCKDNS_TOKEN=' "$tmp"; then
+	chmod --reference="$SETTINGS" "$tmp" # nothing secret: keep its permissions
+fi
+mv -f "$tmp" "$SETTINGS"
 
 systemctl stop tc-control
 # Certificates are stored by name: a stored test certificate would keep

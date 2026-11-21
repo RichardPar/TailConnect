@@ -268,10 +268,13 @@ func replyHeader(h dnsmessage.Header, rcode dnsmessage.RCode) dnsmessage.Header 
 	}
 }
 
+// errorReply answers with rcode. It echoes at most the first question
+// (servers answer one per query), so a query stuffed with questions can't
+// make it larger than the client accepts.
 func errorReply(h dnsmessage.Header, qs []dnsmessage.Question, rcode dnsmessage.RCode, edns bool) []byte {
 	hh := replyHeader(h, rcode)
 	hh.Authoritative = false
-	return build(hh, qs, nil, edns)
+	return build(hh, qs[:min(len(qs), 1)], nil, edns)
 }
 
 // buildReply builds a response, truncating (TC bit, no answers) if it would

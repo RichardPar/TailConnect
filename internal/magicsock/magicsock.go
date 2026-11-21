@@ -91,7 +91,8 @@ type Conn struct {
 
 	byDisco       map[key.DiscoPublic]*peer
 	pings         map[disco.TxID]pendingPing
-	local         []netip.AddrPort // local interface endpoints
+	seenPings     map[disco.TxID]time.Time // recent pings answered: a repeat is a replay
+	local         []netip.AddrPort         // local interface endpoints
 	stunTx        map[stun.TxID]stunRequest
 	stunAddrs     map[int]netip.AddrPort // public address seen by each region's STUN server
 	regionLatency map[int]time.Duration
@@ -151,6 +152,7 @@ func New(opts Options) *Conn {
 		relays:        map[int]*relay.Client{},
 		byDisco:       map[key.DiscoPublic]*peer{},
 		pings:         map[disco.TxID]pendingPing{},
+		seenPings:     map[disco.TxID]time.Time{},
 		stunTx:        map[stun.TxID]stunRequest{},
 		stunAddrs:     map[int]netip.AddrPort{},
 		regionLatency: map[int]time.Duration{},
@@ -358,6 +360,9 @@ func (c *Conn) relayClientLocked(id int) *relay.Client {
 	if rc := c.relays[id]; rc != nil {
 		return rc
 	}
+	if c.shutdown {
+		return nil // Shutdown closed the relays; nothing would close a new one
+	}
 	u, ok := c.regionURL(id)
 	if !ok {
 		return nil
@@ -514,11 +519,7 @@ func (c *Conn) receiveUDP(k *sock) conn.ReceiveFunc {
 				}
 				sizes[out] = len(b)
 				if p := c.attributeLocked(b); p != nil {
-					// The peer's WireGuard traffic proves this path. Adopt it unless
-					// discovery has already chosen a (better) path that still works.
-					if ap == p.directAddr || !p.trusted(now) {
-						p.directAddr, p.lastDirectRecv, p.firstUnanswered = ap, now, time.Time{}
-					}
+					c.noteDirectRecvLocked(p, ap, now)
 					if wgType(b) == wgTransport {
 						p.lastActive = now
 					}
@@ -757,6 +758,36 @@ func (c *Conn) attributeLocked(b []byte) *peer {
 	}
 	return c.peers[e.peer]
 }
+
+// noteDirectRecvLocked handles a WireGuard packet attributed to p (by its
+// receiver index) that arrived directly from ap. WireGuard hasn't checked
+// it yet, and the index is visible to anyone on the path, so the packet
+// alone doesn't prove where p is:
+//   - from the path in use, it keeps the path fresh, as before (forging
+//     that needs packets with the path's own source address);
+//   - from a new address, while no path is trusted, it isn't adopted on its
+//     word: p is pinged there (disco messages are signed with p's disco
+//     key) and the path is adopted when the pong comes back. Peers without
+//     a disco key can't be asked, so their address is adopted as before.
+//
+// A trusted path is never replaced by a WireGuard packet; discovery does
+// that.
+func (c *Conn) noteDirectRecvLocked(p *peer, ap netip.AddrPort, now time.Time) {
+	switch {
+	case ap == p.directAddr:
+		p.lastDirectRecv, p.firstUnanswered = now, time.Time{}
+	case p.trusted(now):
+	case p.discoKey.IsZero() || c.disco.IsZero():
+		p.directAddr, p.lastDirectRecv, p.firstUnanswered = ap, now, time.Time{}
+	default:
+		if ep := c.learnLocked(p, ap, now); ep != nil && now.Sub(ep.lastPing) >= probeInterval {
+			c.sendPingLocked(p, ap, now)
+		}
+	}
+}
+
+// probeInterval limits pings to an address WireGuard packets came from.
+const probeInterval = 250 * time.Millisecond
 
 // relayGrace: a peer that sent us a packet directly this recently can still
 // use the direct path, even if it is also sending through the relay (as it

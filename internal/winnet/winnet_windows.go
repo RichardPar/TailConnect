@@ -143,9 +143,9 @@ func SetInterfaceDNSSettings(guid windows.GUID, s *DNSInterfaceSettings) error {
 		return err
 	}
 	s.Version = 1
-	r, _, _ := procSetInterfaceDnsSettings.Call(
-		uintptr(unsafe.Pointer(&guid)), uintptr(unsafe.Pointer(s)))
-	return errno(r)
+	// The GUID is passed by value, which each architecture does its own way
+	// (callGUID): a pointer on x64, two registers on ARM64.
+	return errno(callGUID(procSetInterfaceDnsSettings, &guid, unsafe.Pointer(s)))
 }
 
 // FlushResolverCache empties the DNS client's cache (ipconfig /flushdns).

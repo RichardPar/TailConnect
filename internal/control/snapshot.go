@@ -441,6 +441,12 @@ func cutOffNotice(n db.Node, now time.Time) string {
 	return ""
 }
 
+// newerThan reports whether s reflects a later state than o: a later
+// generation, or the same one rebuilt later (after a key expired).
+func (s *snapshot) newerThan(o *snapshot) bool {
+	return s.gen > o.gen || (s.gen == o.gen && s.built.After(o.built))
+}
+
 // snapshotStale reports whether the current snapshot has passed the moment
 // it stops being exact (a key expired), so maps must be rebuilt.
 func (s *Server) snapshotStale() bool {

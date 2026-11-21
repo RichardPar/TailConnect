@@ -25,10 +25,11 @@ type DuckDNS struct {
 // ("tailconnect.duckdns.org", or "vpn.tailconnect.duckdns.org") belongs to.
 func DuckDNSName(domain string) (string, error) {
 	rest, ok := strings.CutSuffix(strings.ToLower(strings.TrimSuffix(domain, ".")), ".duckdns.org")
-	if !ok || rest == "" {
+	name := rest[strings.LastIndex(rest, ".")+1:]
+	if !ok || name == "" || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" {
 		return "", fmt.Errorf("%q isn't a DuckDNS name (NAME.duckdns.org)", domain)
 	}
-	return rest[strings.LastIndex(rest, ".")+1:], nil
+	return name, nil
 }
 
 func (d *DuckDNS) SetTXT(ctx context.Context, domain, value string) error {

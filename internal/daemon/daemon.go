@@ -252,6 +252,10 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 	if reqPin != "" {
 		pin = reqPin
 	}
+	// restart: the running tunnel must stop before the new state is saved
+	// (another server or address). It's stopped only once nothing can fail
+	// any more, so a failed switch leaves the device connected as it was.
+	restart := false
 	if st.ControlURL != "" && url != st.ControlURL {
 		same, err := d.sameServer(url, st.ServerKey, pin)
 		if err != nil && req.AuthKey == "" {
@@ -259,7 +263,7 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 			// why, and leave the device as it is.
 			return err
 		}
-		d.stopLocked()
+		restart = true
 		if same {
 			// The same server at a new address (new port, hostname or TLS).
 			// Safe to trust: the Noise handshake still authenticates the
@@ -343,6 +347,9 @@ func (d *Daemon) Up(req localapi.UpRequest) error {
 		d.opts.Logf("registered as %s (%v)", resp.Node.Name, resp.Node.Addresses)
 	}
 	st.WantRunning = true
+	if restart {
+		d.stopLocked()
+	}
 
 	d.mu.Lock()
 	d.st = st
@@ -503,15 +510,19 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		fail(localapi.StateStopped, fmt.Errorf("start tunnel: %w", err))
 		return
 	}
-	_ = eng.SetExitNode(st.ExitNode) // no map yet: nothing to apply
 	eng.SetRelayTLS(tlspin.ClientConfig(st.TLSFingerprint))
 	if err := eng.SetControlURL(st.ControlURL); err != nil {
 		logf("relay base URL: %v", err)
 	}
 	port := eng.ListenPort()
+	// The exit node choice is read as the engine is published, under the
+	// same lock as Up's: a choice made while starting either is seen here
+	// or finds the engine and applies it itself.
 	d.mu.Lock()
 	d.eng, d.port = eng, port
+	exitPref := d.st.ExitNode
 	d.mu.Unlock()
+	_ = eng.SetExitNode(exitPref) // no map yet: nothing to apply
 	defer func() {
 		d.mu.Lock()
 		d.eng, d.netmap, d.port = nil, nil, 0
@@ -522,6 +533,14 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		eng.Close()
 	}()
 	logf("tunnel up, WireGuard on UDP port %d", port)
+
+	// The helper goroutines below live exactly as long as this run: they
+	// stop (and are waited for) before the engine and control client close,
+	// however run returns.
+	ctx, cancel := context.WithCancel(ctx)
+	var helpers sync.WaitGroup
+	defer helpers.Wait()
+	defer cancel()
 
 	nk, dk := st.NodeKey.Public(), st.DiscoKey.Public()
 	hi := d.hostinfo(st)
@@ -541,7 +560,9 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 	}
 
 	// Re-report endpoints when interfaces change (DHCP renewals, Wi-Fi switches).
+	helpers.Add(2)
 	go func() {
+		defer helpers.Done()
 		t := time.NewTicker(d.opts.EndpointInterval)
 		defer t.Stop()
 		for {
@@ -572,7 +593,10 @@ func (d *Daemon) run(ctx context.Context, st persist, done chan struct{}) {
 		}
 	}()
 
-	go d.reportTraffic(ctx, cc, eng, nk)
+	go func() {
+		defer helpers.Done()
+		d.reportTraffic(ctx, cc, eng, nk)
+	}()
 
 	backoff := time.Second
 	for {

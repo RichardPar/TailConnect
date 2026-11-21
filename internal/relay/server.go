@@ -3,6 +3,7 @@ package relay
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -37,6 +38,7 @@ type Server struct {
 	mu      sync.Mutex
 	clients map[key.NodePublic]*sclient
 	closed  bool
+	replay  replayCache // recent hello nonces
 
 	packetsForwarded atomic.Int64
 	packetsDropped   atomic.Int64
@@ -118,25 +120,37 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	conn.SetDeadline(time.Time{})
+	// Until the handshake is done, everything (reads and writes) must
+	// finish in time, so unauthenticated connections can't linger.
+	conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: " + UpgradeProtocol + "\r\nConnection: Upgrade\r\n\r\n")
 	if err := brw.Flush(); err != nil {
 		conn.Close()
 		return
 	}
-	s.serve(r.Context(), conn, brw.Reader)
+	s.serve(r.Context(), conn, brw.Reader, r.Header.Get(ChallengeHeader) == "1")
 }
 
-func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader) {
+// handshakeTimeout bounds the upgrade and handshake.
+const handshakeTimeout = 10 * time.Second
+
+func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader, wantsChallenge bool) {
 	defer conn.Close()
 	remote := conn.RemoteAddr().String()
 
 	// Handshake.
+	conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	pub := s.priv.Public().Raw()
-	if err := writeFrame(conn, frameServerKey, []byte(magic), pub[:]); err != nil {
+	var challenge []byte
+	if wantsChallenge {
+		challenge = make([]byte, challengeLen)
+		if _, err := rand.Read(challenge); err != nil {
+			return
+		}
+	}
+	if err := writeFrame(conn, frameServerKey, []byte(magic), pub[:], challenge); err != nil {
 		return
 	}
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	t, b, err := readFrame(br, nil)
 	if err != nil || t != frameClientInfo || len(b) < keyLen+nonceLen+box.Overhead {
 		s.log.Debug("relay: bad client hello", "remote", remote, "err", err)
@@ -158,6 +172,16 @@ func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader) {
 		writeFrame(conn, frameError, []byte(fmt.Sprintf("unsupported version %d", info.Version)))
 		return
 	}
+	// Every hello's nonce is remembered, so none is accepted twice. With a
+	// challenge, the hello must carry this connection's; without (a client
+	// from before challenges), it must carry none: one that does was
+	// recorded from another connection.
+	fresh := s.replay.add(n24)
+	if !fresh || !hmac.Equal(info.Challenge, challenge) {
+		s.log.Info("relay: replayed or mismatched client hello refused", "remote", remote, "challenge", challenge != nil)
+		writeFrame(conn, frameError, []byte("key proof failed"))
+		return
+	}
 	nk := key.PublicFromRaw[key.NodeKind](ck)
 	if s.authorize != nil {
 		if err := s.authorize(ctx, nk); err != nil {
@@ -170,7 +194,7 @@ func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader) {
 	if err := writeFrame(conn, frameServerInfo, si); err != nil {
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
+	conn.SetDeadline(time.Time{}) // the writer sets its own write deadlines
 
 	c := &sclient{key: nk, conn: conn, sendq: make(chan []byte, 256), done: make(chan struct{})}
 	s.mu.Lock()
@@ -213,11 +237,8 @@ func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader) {
 }
 
 func (s *Server) forward(srcKey, dst key.NodePublic, pkt []byte) {
-	if f := s.allow.Load(); f != nil && !(*f)(srcKey, dst) {
-		s.packetsDenied.Add(1)
-		return
-	}
-	src := srcKey.Raw()
+	// Look up the destination first: the policy check may ask the control
+	// server, which made packets to made-up keys a way to flood it.
 	s.mu.Lock()
 	dc := s.clients[dst]
 	s.mu.Unlock()
@@ -225,6 +246,11 @@ func (s *Server) forward(srcKey, dst key.NodePublic, pkt []byte) {
 		s.packetsDropped.Add(1)
 		return
 	}
+	if f := s.allow.Load(); f != nil && !(*f)(srcKey, dst) {
+		s.packetsDenied.Add(1)
+		return
+	}
+	src := srcKey.Raw()
 	frame := make([]byte, 5+keyLen+len(pkt))
 	frame[0] = byte(frameRecvPacket)
 	putLen(frame[1:5], keyLen+len(pkt))

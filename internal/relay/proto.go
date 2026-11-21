@@ -9,13 +9,20 @@
 //
 // Handshake:
 //
-//	server → client  ServerKey   magic "TCRELAY1" | server relay public key (32)
-//	client → server  ClientInfo  node public key (32) | nonce (24) | box(info JSON)
+//	server → client  ServerKey   magic "TCRELAY1" | server relay public key (32) [| challenge (32)]
+//	client → server  ClientInfo  node public key (32) | nonce (24) | box(info JSON {Version, Challenge})
 //	server → client  ServerInfo  JSON {Version}, or Error and close
 //
 // The ClientInfo box is sealed with the client's node private key to the
 // server's public key, proving the client owns the node key it claims, so
 // nobody can register someone else's key to intercept their packets.
+//
+// The challenge makes each proof good for one connection only: a client
+// that sends the ChallengeHeader on the upgrade request gets a random
+// challenge with the server key and must seal it in its ClientInfo, so a
+// recorded ClientInfo can't be replayed. Clients from before the challenge
+// don't send the header; the server then refuses a ClientInfo nonce it has
+// seen recently instead (see replayCache).
 //
 // After the handshake:
 //
@@ -36,9 +43,13 @@ const (
 	magic           = "TCRELAY1"
 	version         = 1
 
-	maxFrame = 64 << 10
-	keyLen   = 32
-	nonceLen = 24
+	maxFrame     = 64 << 10
+	keyLen       = 32
+	nonceLen     = 24
+	challengeLen = 32
+
+	// ChallengeHeader on the upgrade request asks for a challenge.
+	ChallengeHeader = "Tailconnect-Relay-Challenge"
 )
 
 type frameType byte
@@ -54,7 +65,8 @@ const (
 )
 
 type clientInfo struct {
-	Version int
+	Version   int
+	Challenge []byte `json:",omitempty"` // the server's challenge, when it sent one
 }
 
 type serverInfo struct {

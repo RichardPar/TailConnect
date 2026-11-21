@@ -156,12 +156,29 @@ const stateDirSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 // secureStateDir creates the state directory and, when tcd runs elevated,
 // restricts it to SYSTEM and Administrators. (Unelevated test runs with
 // -tun userspace keep the default permissions of the -state they choose.)
+//
+// Users may create folders in ProgramData, so the directory may have been
+// made by someone else first. A junction or symlink is refused (setting
+// its permissions would change those of wherever it points), and the owner
+// is set to Administrators, so a user who created it keeps no owner's
+// right to change the permissions back later.
 func secureStateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return nil
+	}
+	p, err := windows.UTF16PtrFromString(dir)
+	if err != nil {
+		return err
+	}
+	attrs, err := windows.GetFileAttributes(p)
+	if err != nil {
+		return err
+	}
+	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("%s is a junction or link, not a folder: remove it and start again", dir)
 	}
 	sd, err := windows.SecurityDescriptorFromString(stateDirSDDL)
 	if err != nil {
@@ -171,6 +188,11 @@ func secureStateDir(dir string) error {
 	if err != nil {
 		return err
 	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
 	return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		admins, nil, dacl, nil)
 }
