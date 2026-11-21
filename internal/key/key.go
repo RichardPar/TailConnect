@@ -81,11 +81,19 @@ func ParsePublic[K Kind](s string) (Public[K], error) {
 	return p, err
 }
 
-// ParsePrivate parses the text form ("nodeprivkey:<hex>" etc.).
+// ParsePrivate parses the text form ("nodeprivkey:<hex>" etc.). Unlike
+// UnmarshalText (where "" means "not set"), it refuses an empty or all-zero
+// key: everyone can compute Diffie-Hellman with the zero key, so using one
+// would let anybody pose as its owner.
 func ParsePrivate[K Kind](s string) (Private[K], error) {
 	var p Private[K]
-	err := p.UnmarshalText([]byte(s))
-	return p, err
+	if err := p.UnmarshalText([]byte(strings.TrimSpace(s))); err != nil {
+		return p, err
+	}
+	if p.IsZero() {
+		return p, errors.New("key: empty or all-zero private key")
+	}
+	return p, nil
 }
 
 func (p Public[K]) IsZero() bool           { return p.k == [32]byte{} }

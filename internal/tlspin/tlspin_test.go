@@ -3,6 +3,7 @@ package tlspin
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"net/http"
@@ -98,5 +99,45 @@ func TestPinnedClient(t *testing.T) {
 	}
 	if _, err := net.ResolveTCPAddr("tcp", host); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A certificate that a trusted CA issued for another name must not pass
+// when the client connects by IP address (TLS has no server name then):
+// only the pinned key is accepted. By name, the usual check still works.
+func TestPinByIPRejectsOtherTrustedCert(t *testing.T) {
+	trusted, err := LoadOrCreate(t.TempDir(), []string{"unrelated.example"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(trusted.Cert.Leaf) // stands in for a public CA
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }))
+	ts.TLS = trusted.TLSConfig()
+	ts.StartTLS()
+	defer ts.Close()
+	pinned, _ := LoadOrCreate(t.TempDir(), []string{"x"}, time.Now()) // the real server's key
+
+	get := func(cfg *tls.Config) error {
+		c := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
+		resp, err := c.Get(ts.URL) // https://127.0.0.1:port
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	if err := get(clientConfig(pinned.Fingerprint, roots)); err == nil {
+		t.Fatal("by IP: a trusted certificate for another name was accepted instead of the pinned key")
+	}
+	// By name, a trusted certificate for that name is still accepted.
+	cfg := clientConfig(pinned.Fingerprint, roots)
+	cfg.ServerName = "unrelated.example"
+	if err := get(cfg); err != nil {
+		t.Fatalf("by name: trusted certificate refused: %v", err)
+	}
+	cfg = clientConfig(pinned.Fingerprint, roots)
+	cfg.ServerName = "other.example"
+	if err := get(cfg); err == nil {
+		t.Fatal("by name: trusted certificate for another name accepted")
 	}
 }

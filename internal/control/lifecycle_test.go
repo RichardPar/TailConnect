@@ -82,3 +82,31 @@ func TestEphemeralReaper(t *testing.T) {
 		t.Fatalf("after reaping: %d nodes left (want only the online one)", len(nodes))
 	}
 }
+
+// A map request (or /metrics) rebuilding the snapshot after a key expired,
+// before the watcher's tick, must not hide the expiry from the watcher:
+// streams are still woken and the relay stops serving the machine.
+func TestExpirySeenAfterSomeoneElseRebuilt(t *testing.T) {
+	bs := newBenchServer(t, 1, 2, false)
+	ctx := context.Background()
+	b := bs.ids[1]
+	// Expiry is stored in whole seconds: aim at the start of a second.
+	at := time.Now().Truncate(time.Second).Add(2 * time.Second)
+	bs.db.SetNodeExpiry(ctx, b, at)
+	bs.srv.checkGeneration()
+	if !bs.srv.RelayAllowed(bs.keys[0], bs.keys[1]) {
+		t.Fatal("relay refuses before expiry")
+	}
+	wake := bs.srv.bus.wait()
+	time.Sleep(time.Until(at) + 100*time.Millisecond)
+	bs.srv.BuildMap(ctx, bs.ids[0]) // rebuilds the snapshot first
+	bs.srv.checkGeneration()
+	select {
+	case <-wake:
+	default:
+		t.Fatal("streams not woken: the expiry was missed")
+	}
+	if bs.srv.RelayAllowed(bs.keys[0], bs.keys[1]) {
+		t.Fatal("relay still serves the expired machine")
+	}
+}

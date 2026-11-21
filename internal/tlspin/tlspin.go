@@ -55,7 +55,16 @@ func ParseFingerprint(s string) (string, error) {
 // ClientConfig returns a TLS client configuration that accepts the server
 // if its certificate is valid as usual (a public CA, for its name), or if
 // its key matches pin. With pin "", it returns nil: the default checks.
-func ClientConfig(pin string) *tls.Config {
+//
+// The usual check needs the server's name. Connecting to an IP address
+// gives none (TLS doesn't send IP addresses as the server name, so
+// ConnectionState.ServerName is empty), and then only the pinned key is
+// accepted: verifying the chain alone would accept any trusted certificate,
+// for any name.
+func ClientConfig(pin string) *tls.Config { return clientConfig(pin, nil) }
+
+// clientConfig is ClientConfig with the trusted roots (nil = the system's).
+func clientConfig(pin string, roots *x509.CertPool) *tls.Config {
 	if pin == "" {
 		return nil
 	}
@@ -70,11 +79,14 @@ func ClientConfig(pin string) *tls.Config {
 			if Fingerprint(leaf) == pin {
 				return nil
 			}
+			if cs.ServerName == "" {
+				return fmt.Errorf("server certificate %s doesn't match the pinned %s (connecting by IP address, only the pinned key is accepted)", Fingerprint(leaf), pin)
+			}
 			inter := x509.NewCertPool()
 			for _, c := range cs.PeerCertificates[1:] {
 				inter.AddCert(c)
 			}
-			if _, err := leaf.Verify(x509.VerifyOptions{DNSName: cs.ServerName, Intermediates: inter}); err != nil {
+			if _, err := leaf.Verify(x509.VerifyOptions{DNSName: cs.ServerName, Intermediates: inter, Roots: roots}); err != nil {
 				return fmt.Errorf("server certificate %s doesn't match the pinned %s, and isn't trusted: %w", Fingerprint(leaf), pin, err)
 			}
 			return nil

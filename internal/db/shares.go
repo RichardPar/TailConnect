@@ -146,11 +146,21 @@ func sharePorts(ports string) string {
 // ("" or "*" = everything). The share is pending until the recipient
 // accepts it.
 func (d *DB) ShareWith(ctx context.Context, nodeID int64, recipient, ports string) (Share, error) {
-	n, err := d.GetNode(ctx, nodeID)
+	// The checks and the insert are one transaction, so the recipient can't
+	// be suspended (or the machine move) in between.
+	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return Share{}, err
 	}
-	r, err := d.GetUser(ctx, recipient)
+	defer tx.Rollback()
+	n, err := getNodeTx(ctx, tx, nodeID)
+	if err != nil {
+		return Share{}, err
+	}
+	r, err := scanUser(tx.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE name = ?`, recipient))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Share{}, fmt.Errorf("user %q: %w", recipient, ErrNotFound)
+	}
 	if err != nil {
 		return Share{}, err
 	}
@@ -160,7 +170,7 @@ func (d *DB) ShareWith(ctx context.Context, nodeID int64, recipient, ports strin
 	if !r.Active() {
 		return Share{}, fmt.Errorf("%w: account %s is not active", ErrInvalid, r.Name)
 	}
-	res, err := d.sql.ExecContext(ctx, `INSERT INTO shares(node_id, recipient_id, status, ports, created_at) VALUES(?, ?, ?, ?, ?)`,
+	res, err := tx.ExecContext(ctx, `INSERT INTO shares(node_id, recipient_id, status, ports, created_at) VALUES(?, ?, ?, ?, ?)`,
 		nodeID, r.ID, SharePending, sharePorts(ports), unix(d.now()))
 	if isUniqueViolation(err) {
 		return Share{}, fmt.Errorf("%s is already shared with %s: %w", n.GivenName, r.Name, ErrExists)
@@ -169,6 +179,9 @@ func (d *DB) ShareWith(ctx context.Context, nodeID int64, recipient, ports strin
 		return Share{}, err
 	}
 	id, _ := res.LastInsertId()
+	if err := tx.Commit(); err != nil {
+		return Share{}, err
+	}
 	return d.GetShare(ctx, id)
 }
 

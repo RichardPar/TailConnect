@@ -113,7 +113,11 @@ func peerAccess(c net.Conn) (Access, error) {
 	if err != nil {
 		return AccessNone, err
 	}
-	if windows.EqualSid(peer.User.Sid, self.User.Sid) {
+	// The same user as tcd may do anything, except when tcd runs elevated
+	// and the caller doesn't: the same user's unelevated programs are what
+	// UAC keeps out. They get what their groups give, like anyone else.
+	if windows.EqualSid(peer.User.Sid, self.User.Sid) &&
+		(!windows.GetCurrentProcessToken().IsElevated() || tok.IsElevated()) {
 		return AccessAdmin, nil
 	}
 	groups, err := tok.GetTokenGroups()

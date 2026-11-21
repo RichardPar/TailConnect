@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/netip"
@@ -86,7 +87,9 @@ func (r *androidRouter) localNetworks() []netip.Prefix {
 		out = append(out, p.Masked())
 	}
 	out = append(out, alwaysDirect...)
-	slices.SortFunc(out, func(a, b netip.Prefix) int { return a.Addr().Compare(b.Addr())*64 + a.Bits() - b.Bits() })
+	slices.SortFunc(out, func(a, b netip.Prefix) int {
+		return cmp.Or(a.Addr().Compare(b.Addr()), cmp.Compare(a.Bits(), b.Bits()))
+	})
 	return slices.Compact(out)
 }
 

@@ -253,6 +253,11 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 	want := map[key.NodePublic]bool{}
 	var routes []netip.Prefix
 	restricted := map[netip.Addr][]protocol.PortRange{}
+	_, canForward := e.router.(ExitForwarder)
+	serving := canForward && nm.Self.ExitNode
+	forward := map[netip.Addr]bool{}   // peers that may use this machine as an exit node
+	peerAddrs := map[netip.Addr]bool{} // every peer's tunnel addresses
+	var exitLimit *filter.ExitLimit    // the exit node in use, if restricted
 	exitRouter, canExit := e.router.(ExitRouter)
 	canExit = canExit && exitRouter.SupportsExitNodes()
 	e.exitUsing, e.exitErr = "", ""
@@ -270,6 +275,9 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 			e.logf("exit node %q not used: %s; internet traffic goes direct", e.exitPref, e.exitErr)
 		}
 	}
+	// Peer changes are worked out on a copy, kept only once WireGuard has
+	// taken them: if it refuses, the next map tries them all again.
+	next := maps.Clone(e.peers)
 	for _, p := range nm.Peers {
 		if p.NodeKey.IsZero() || p.NodeKey.Equal(e.pub) {
 			continue
@@ -280,6 +288,18 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 				restricted[a.Addr()] = p.Inbound
 			}
 		}
+		for _, a := range p.Addresses {
+			peerAddrs[a.Addr()] = true
+			// Only our own account's unrestricted machines may send traffic
+			// through us; the map's exit node flag isn't enough, as a peer
+			// can route anything at us regardless.
+			if serving && !p.Shared && !p.NoInitiate {
+				forward[a.Addr()] = true
+			}
+		}
+		if p.NodeKey == exitKey && p.NoInitiate {
+			exitLimit = &filter.ExitLimit{Ports: p.Inbound}
+		}
 		allowed := slices.Clone(p.Addresses)
 		routes = append(routes, allowed...)
 		if p.NodeKey == exitKey {
@@ -287,7 +307,7 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 		}
 		slices.SortFunc(allowed, comparePrefix)
 
-		old, exists := e.peers[p.NodeKey]
+		old, exists := next[p.NodeKey]
 		if exists && slices.Equal(old.allowed, allowed) {
 			continue
 		}
@@ -305,33 +325,44 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 		for _, a := range allowed {
 			fmt.Fprintf(&b, "allowed_ip=%s\n", a)
 		}
-		e.peers[p.NodeKey] = peerState{allowed: allowed}
+		next[p.NodeKey] = peerState{allowed: allowed}
 		e.logf("peer %s (%s): allowed=%v endpoints=%v relay=%d", p.Name, p.NodeKey.ShortString(), allowed, p.Endpoints, p.HomeRelay)
 	}
-	for k := range e.peers {
+	for k := range next {
 		if !want[k] {
 			raw := k.Raw()
 			fmt.Fprintf(&b, "public_key=%s\nremove=true\n", hex.EncodeToString(raw[:]))
-			delete(e.peers, k)
+			delete(next, k)
 			e.logf("peer %s removed", k.ShortString())
 		}
 	}
 	// Change the filter around the peer update so no packet slips through:
 	// restrictions for new shared machines apply before they are added, and
 	// restrictions for removed ones are lifted only after they are gone.
+	if exitLimit != nil {
+		exitLimit.Peers = peerAddrs
+	}
+	var selfAddrs []netip.Addr
+	for _, a := range nm.Self.Addresses {
+		selfAddrs = append(selfAddrs, a.Addr())
+	}
+	pol := func(r map[netip.Addr][]protocol.PortRange) filter.Policy {
+		return filter.Policy{Restricted: r, Self: selfAddrs, Forward: forward, Exit: exitLimit}
+	}
 	transition := maps.Clone(restricted)
 	for a, r := range e.restricted {
 		if _, ok := transition[a]; !ok {
 			transition[a] = r // a peer on its way out keeps its restriction until removed
 		}
 	}
-	e.filter.SetPolicies(transition)
+	e.filter.SetPolicy(pol(transition))
 	if b.Len() > 0 {
 		if err := e.dev.IpcSet(b.String()); err != nil {
 			return fmt.Errorf("engine: apply peers: %w", err)
 		}
 	}
-	e.filter.SetPolicies(restricted)
+	e.peers = next
+	e.filter.SetPolicy(pol(restricted))
 	e.restricted = restricted
 	for _, k := range kick {
 		time.AfterFunc(rand.N(maxKickJitter), func() { e.kickHandshake(k) })
@@ -344,8 +375,7 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 	slices.SortFunc(routes, comparePrefix)
 	self := slices.Clone(nm.Self.Addresses)
 	slices.SortFunc(self, comparePrefix)
-	_, canForward := e.router.(ExitForwarder)
-	e.exitServes = canForward && nm.Self.ExitNode
+	e.exitServes = serving
 	rc := RouterConfig{LocalAddrs: self, Routes: routes, ExitNode: !exitKey.IsZero(), Forward: e.exitServes}
 	if !rc.equal(e.lastRouter) {
 		if err := e.router.Set(rc); err != nil {
@@ -427,7 +457,8 @@ func (e *Engine) ExitStatus() ExitStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	st := ExitStatus{Chosen: e.exitPref, Using: e.exitUsing, Error: e.exitErr, Serving: e.exitServes}
-	if r, ok := e.router.(ExitForwarder); ok && e.exitServes {
+	// Once closed, Close tears the router down without e.mu: don't read it.
+	if r, ok := e.router.(ExitForwarder); ok && e.exitServes && !e.closed {
 		st.ServingError = r.ForwardError()
 	}
 	return st

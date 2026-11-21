@@ -93,9 +93,6 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	genMu   sync.Mutex
-	lastGen int64
-
 	// tenantOf maps every active machine's node key to its tenant (user ID),
 	// for the relay's per-packet check. Rebuilt when the generation changes.
 	snapMu sync.Mutex
@@ -110,6 +107,8 @@ type Server struct {
 	policies  map[int64]*acl.Policy
 	// policyEpoch counts rebuilds, for standalone relays' caches.
 	policyEpoch int64
+	// policySnap is the snapshot the tables above come from.
+	policySnap *snapshot
 
 	// Per-IP limits (a nil limit allows everything).
 	connLimit  *iplimit.Count // open Noise channels
@@ -159,7 +158,6 @@ func New(ctx context.Context, d *db.DB, cfg Config, log *slog.Logger) (*Server, 
 	}
 	s.bus.init()
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.lastGen, _ = d.Generation(ctx)
 	// Relays cache answers per policy version; starting from the clock keeps
 	// versions increasing across restarts.
 	s.policyEpoch = time.Now().UnixNano()
@@ -245,7 +243,7 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "expected Upgrade: "+noise.UpgradeProtocol)
 		return
 	}
-	ip := iplimit.IP(r)
+	ip := iplimit.Client(r)      // IPv6: the /64, or each address would get its own allowance
 	if !s.handshakes.Allow(ip) { // before the handshake's key exchange
 		s.stats.connRefused.rate.Add(1)
 		writeError(w, http.StatusTooManyRequests, "too many connection attempts from this address; try again later")
@@ -435,13 +433,19 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 	}
 	// Subscribe before writing so our own change is reflected in the first map.
 	changed := s.bus.wait()
-	if err := s.db.UpdateNodeStatus(r.Context(), self.ID, db.NodeStatus{
-		DiscoKey: textOrEmpty(req.DiscoKey), Endpoints: req.Endpoints, HomeRelay: req.HomeRelay, Hostinfo: hi,
-	}); err != nil {
-		s.internalError(w, "map", err)
-		return
+	// A cut-off machine (suspended account, not approved, key expired) is in
+	// nobody's map, so its endpoints don't matter until it's back; storing
+	// them would let it rebuild everyone's maps at will. Path discovery
+	// finds its current ones once it's let back in.
+	if cutOffNotice(self, time.Now()) == "" {
+		if err := s.db.UpdateNodeStatus(r.Context(), self.ID, db.NodeStatus{
+			DiscoKey: textOrEmpty(req.DiscoKey), Endpoints: req.Endpoints, HomeRelay: req.HomeRelay, Hostinfo: hi,
+		}); err != nil {
+			s.internalError(w, "map", err)
+			return
+		}
+		s.checkGeneration() // wakes peers' streams only if something they see changed
 	}
-	s.checkGeneration() // wakes peers' streams only if something they see changed
 
 	if req.OmitPeers && !req.Stream {
 		w.WriteHeader(http.StatusOK)
@@ -632,35 +636,33 @@ func (b *bus) notify() {
 	b.ch = make(chan struct{})
 }
 
-// checkGeneration wakes map streams if the database generation moved.
+// checkGeneration wakes map streams when the maps changed: the database
+// generation moved, or a key expired (the snapshot was rebuilt either way).
+// It works from the current snapshot, whoever built it (a map request may
+// have rebuilt it first), and keeps trying while reading it fails.
 func (s *Server) checkGeneration() {
-	g, err := s.db.Generation(s.ctx)
-	if err != nil {
-		if s.ctx.Err() == nil {
-			s.log.Warn("read generation", "err", err)
-		}
-		return
-	}
-	s.genMu.Lock()
-	changed := g != s.lastGen
-	s.lastGen = g
-	s.genMu.Unlock()
-	// A key expiring changes maps without any database change.
-	if changed || s.snapshotStale() {
-		s.refreshPolicy()
+	if s.refreshPolicy() {
 		s.bus.notify()
 	}
 }
 
-// refreshPolicy rebuilds the node-key → tenant table used by RelayAllowed,
-// from the current snapshot. On error the previous table stays in force.
-func (s *Server) refreshPolicy() {
+// refreshPolicy rebuilds the node-key → tenant table used by RelayAllowed
+// from the current snapshot, reporting whether it changed. A snapshot
+// older than the one installed (a slower concurrent call) is ignored. On
+// error the previous table stays in force.
+func (s *Server) refreshPolicy() bool {
 	snap, err := s.currentSnapshot(s.ctx)
 	if err != nil {
 		if s.ctx.Err() == nil {
 			s.log.Warn("refresh relay policy", "err", err)
 		}
-		return
+		return false
+	}
+	s.policyMu.RLock()
+	installed := s.policySnap
+	s.policyMu.RUnlock()
+	if snap == installed || (installed != nil && !snap.newerThan(installed)) {
+		return false
 	}
 	m := make(map[key.NodePublic]int64, len(snap.keys))
 	mo := make(map[key.NodePublic]acl.Machine, len(snap.keys))
@@ -680,9 +682,14 @@ func (s *Server) refreshPolicy() {
 		}
 	}
 	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	if s.policySnap != nil && s.policySnap != installed && !snap.newerThan(s.policySnap) {
+		return false // a newer one was installed meanwhile
+	}
 	s.tenantOf, s.sharedWith, s.machineOf, s.policies = m, sw, mo, snap.policies
+	s.policySnap = snap
 	s.policyEpoch++
-	s.policyMu.Unlock()
+	return true
 }
 
 // RelayAllowed reports whether the relay may carry packets between a and b

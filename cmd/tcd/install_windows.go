@@ -431,10 +431,29 @@ func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + 
 // The app that started us (TailConnect.exe -uninstall, or the setup
 // program) is spared: it reports the result.
 func stopTrayApps() bool {
-	out, _ := exec.Command("taskkill", "/F", "/IM", trayExe, "/FI", fmt.Sprintf("PID ne %d", os.Getppid())).CombinedOutput()
-	ran := strings.Contains(string(out), "SUCCESS")
-	if ran {
-		time.Sleep(500 * time.Millisecond) // let Windows release the file
+	// Through the process list, not taskkill: its messages are translated,
+	// and it reports success even when nothing matched its filter.
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(snap)
+	parent := uint32(os.Getppid())
+	ran := false
+	e := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	for err = windows.Process32First(snap, &e); err == nil; err = windows.Process32Next(snap, &e) {
+		if e.ProcessID == parent || !strings.EqualFold(windows.UTF16ToString(e.ExeFile[:]), trayExe) {
+			continue
+		}
+		h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, e.ProcessID)
+		if err != nil {
+			continue
+		}
+		if windows.TerminateProcess(h, 1) == nil {
+			windows.WaitForSingleObject(h, 2000) // until Windows releases the file
+			ran = true
+		}
+		windows.CloseHandle(h)
 	}
 	return ran
 }

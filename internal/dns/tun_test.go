@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,3 +165,41 @@ func (l *loopTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	return 1, nil
 }
 func (l *loopTUN) Write(bufs [][]byte, _ int) (int, error) { return len(bufs), nil }
+
+// closingLoop returns pkt from every Read until closed.
+type closingLoop struct {
+	loopTUN
+	closed atomic.Bool
+}
+
+func (l *closingLoop) Close() error { l.closed.Store(true); return nil }
+func (l *closingLoop) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	if l.closed.Load() {
+		return 0, os.ErrClosed
+	}
+	return l.loopTUN.Read(bufs, sizes, offset)
+}
+
+// Close while queries keep arriving must not race with Read starting new
+// work (WaitGroup misuse panics, writes to a closed TCP stack).
+func TestCloseDuringQueries(t *testing.T) {
+	q := mkQuery(t, "alice.tc.internal.", dnsmessage.TypeA, false)
+	for range 50 {
+		dev := &closingLoop{loopTUN: loopTUN{pkt: udpPacket(alice[0], res4, 40000, 53, q)}}
+		w := WrapTUN(dev, testResolver(), res4, res6, nil)
+		w.SetEnabled(true)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			bufs, sizes := [][]byte{make([]byte, 2000)}, []int{0}
+			for {
+				if _, err := w.Read(bufs, sizes, 0); err != nil {
+					return
+				}
+			}
+		}()
+		time.Sleep(time.Millisecond)
+		w.Close()
+		<-done
+	}
+}

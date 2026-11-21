@@ -318,6 +318,7 @@ var (
 	cbNext   uintptr
 	cbByArgs [5]uintptr // cbByArgs[n]: handler with n arguments before user data
 	cbIdle   uintptr
+	cbFree   uintptr // GClosureNotify: forgets a handler when its signal goes
 
 	postMu    sync.Mutex
 	postQueue []func()
@@ -337,6 +338,14 @@ func initCallbacks() {
 	cbByArgs[2] = purego.NewCallback(func(a, b, d uintptr) uintptr { return call(d, a, b) })
 	cbByArgs[3] = purego.NewCallback(func(a, b, c, d uintptr) uintptr { return call(d, a, b, c) })
 	cbByArgs[4] = purego.NewCallback(func(a, b, c, e, d uintptr) uintptr { return call(d, a, b, c, e) })
+	// GTK calls this when a connection is destroyed (its widget was), so
+	// handlers of menus rebuilt on every change don't pile up.
+	cbFree = purego.NewCallback(func(d, _ uintptr) uintptr {
+		cbMu.Lock()
+		delete(cbFuncs, d)
+		cbMu.Unlock()
+		return 0
+	})
 	cbIdle = purego.NewCallback(func(uintptr) uintptr {
 		postMu.Lock()
 		q := postQueue
@@ -358,19 +367,18 @@ func connect(obj uintptr, signal string, nargs int, f func(args []uintptr) uintp
 	id := cbNext
 	cbFuncs[id] = f
 	cbMu.Unlock()
-	g_signal_connect_data(obj, signal, cbByArgs[nargs], id, 0, 0)
+	g_signal_connect_data(obj, signal, cbByArgs[nargs], id, cbFree, 0)
 }
 
-// onClick runs f when a button or menu item is activated.
+// onClick runs f when a button is clicked.
 func onClick(w uintptr, f func()) {
-	signal := "clicked"
-	if isMenuItem[w] {
-		signal = "activate"
-	}
-	connect(w, signal, 1, func([]uintptr) uintptr { f(); return 0 })
+	connect(w, "clicked", 1, func([]uintptr) uintptr { f(); return 0 })
 }
 
-var isMenuItem = map[uintptr]bool{}
+// onActivate runs f when a menu item is chosen.
+func onActivate(it uintptr, f func()) {
+	connect(it, "activate", 1, func([]uintptr) uintptr { f(); return 0 })
+}
 
 // post runs f on the GTK thread. Safe from any goroutine.
 func post(f func()) {
@@ -399,10 +407,9 @@ func button(text string, f func()) uintptr {
 
 func menuItem(menu uintptr, text string, enabled bool, f func()) uintptr {
 	it := gtk_menu_item_new_with_label(text)
-	isMenuItem[it] = true
 	gtk_widget_set_sensitive(it, enabled)
 	if f != nil {
-		onClick(it, f)
+		onActivate(it, f)
 	}
 	gtk_menu_shell_append(menu, it)
 	return it
@@ -411,10 +418,9 @@ func menuItem(menu uintptr, text string, enabled bool, f func()) uintptr {
 // checkMenuItem is a menu item with a check mark, ticked if active.
 func checkMenuItem(menu uintptr, text string, active bool, f func()) uintptr {
 	it := gtk_check_menu_item_new_with_label(text)
-	isMenuItem[it] = true
-	gtk_check_menu_item_set_active(it, active) // before onClick: setting it activates the item
+	gtk_check_menu_item_set_active(it, active) // before onActivate: setting it activates the item
 	if f != nil {
-		onClick(it, f)
+		onActivate(it, f)
 	}
 	gtk_menu_shell_append(menu, it)
 	return it

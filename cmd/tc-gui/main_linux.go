@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"tailconnect/internal/localapi"
@@ -44,6 +45,14 @@ const (
 func init() { runtime.LockOSThread() } // GTK lives on the main thread
 
 func main() {
+	// Started by pkexec (as root, for whoever passed polkit's password
+	// prompt): only the helper is allowed, with no other flags, so the
+	// prompt can't be reused to run other options (-icon writes a file,
+	// -socket picks the daemon) as root.
+	if os.Getenv("PKEXEC_UID") != "" && (len(os.Args) != 2 || os.Args[1] != "-helper") {
+		fmt.Fprintln(os.Stderr, "tc-gui: through pkexec, only -helper is allowed")
+		os.Exit(2)
+	}
 	trayOnly := flag.Bool("tray", false, "start with only the panel icon (for autostart)")
 	login := flag.Bool("login", false, "open the login window")
 	icon := flag.String("icon", "", "write the app icon as a PNG to `FILE` and exit")
@@ -106,19 +115,40 @@ func fatal(err error) {
 
 // ---- one app per user ----
 
-func instanceSocket() string {
+// instanceSocket is where the running app listens. Without
+// XDG_RUNTIME_DIR it's in the user's cache folder, not /tmp, where another
+// user could create the folder first and take over the socket; and the
+// folder must be this user's own, private directory.
+func instanceSocket() (string, error) {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
-		dir = filepath.Join(os.TempDir(), fmt.Sprintf("tailconnect-%d", os.Getuid()))
-		_ = os.MkdirAll(dir, 0o700)
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(cache, "tailconnect")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", err
+		}
 	}
-	return filepath.Join(dir, "tailconnect-gui.sock")
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.IsDir() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("%s isn't a private folder of this user's", dir)
+	}
+	return filepath.Join(dir, "tailconnect-gui.sock"), nil
 }
 
 // singleInstance passes cmd to an app that is already running and returns
 // nil, or else returns the listener for later starts.
 func singleInstance(cmd string) (net.Listener, error) {
-	path := instanceSocket()
+	path, err := instanceSocket()
+	if err != nil {
+		return nil, err
+	}
 	if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
 		defer c.Close()
 		_, err := fmt.Fprintln(c, cmd)
@@ -166,7 +196,11 @@ type app struct {
 
 func newApp(c *localapi.Client) (*app, error) {
 	a := &app{c: c, kick: make(chan struct{}, 1)}
-	a.icons = filepath.Join(filepath.Dir(instanceSocket()), "tailconnect-icons")
+	sock, err := instanceSocket()
+	if err != nil {
+		return nil, err
+	}
+	a.icons = filepath.Join(filepath.Dir(sock), "tailconnect-icons")
 	if err := os.MkdirAll(a.icons, 0o700); err != nil {
 		return nil, err
 	}

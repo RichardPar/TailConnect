@@ -164,8 +164,15 @@ server_questions() {
 		case $where in 1 | 2) break ;; esac
 	done
 	if [ "$where" = 1 ]; then
-		ask addr "This server's address on the LAN (give it a fixed address on your router)" "$(lan_address)"
-		[ -n "$addr" ] || die "no address given"
+		while :; do
+			ask addr "This server's address on the LAN (give it a fixed address on your router)" "$(lan_address)"
+			[ -n "$addr" ] || die "no address given"
+			# It goes into tc-control's settings file: only an address or name.
+			case $addr in
+			*[!A-Za-z0-9.:-]*) echo "  That isn't an address (e.g. 192.168.1.10)." ;;
+			*) break ;;
+			esac
+		done
 		server_url="http://$addr:7740"
 		server_args="-domain $domain -public-url $server_url"
 		server_ports="7740/tcp 3478/udp"
@@ -234,13 +241,33 @@ portal_hint() {
 	fi
 }
 
+# install_unit NAME: install NAME.service, with the binaries' real place
+# (the unit files say /usr/local, the default PREFIX).
+install_unit() {
+	sed "s|/usr/local/|$PREFIX/|g" "$HERE/$1.service" >"$UNIT_DIR/$1.service"
+	chmod 644 "$UNIT_DIR/$1.service"
+}
+
 # write_server_settings ARGS: put ARGS in /etc/default/tc-control,
 # keeping a copy of the previous file.
 write_server_settings() {
 	f=$DEFAULTS/tc-control
-	[ -e "$f" ] && cp -p "$f" "$f.bak"
-	install -m644 "$HERE/tc-control.default" "$f"
-	sed -i "s|^TC_CONTROL_ARGS=.*|TC_CONTROL_ARGS=\"$1\"|" "$f"
+	token=""
+	if [ -e "$f" ]; then
+		cp -p "$f" "$f.bak"
+		token=$(sed -n 's/^TC_DUCKDNS_TOKEN=//p' "$f" | tail -n 1)
+	fi
+	# Written beside the old file and moved into place; private if it keeps
+	# a DuckDNS token (a secret), which a new configuration still needs.
+	tmp=$(mktemp "$f.XXXXXX")
+	args=$1 awk '/^TC_CONTROL_ARGS=/ { print "TC_CONTROL_ARGS=\"" ENVIRON["args"] "\""; next } { print }' \
+		"$HERE/tc-control.default" >"$tmp"
+	if [ -n "$token" ]; then
+		echo "TC_DUCKDNS_TOKEN=$token" >>"$tmp"
+	else
+		chmod 644 "$tmp"
+	fi
+	mv -f "$tmp" "$f"
 	echo "  saved in $f"
 }
 
@@ -374,7 +401,7 @@ main() {
 		need_root "$cmd"
 		need_bin tcd tc
 		install -m755 "$BIN_DIR/tcd" "$BIN_DIR/tc" "$PREFIX/bin/"
-		install -m644 "$HERE/tcd.service" "$UNIT_DIR/"
+		install_unit tcd
 		install_default tcd
 		install_docs
 		start tcd
@@ -396,7 +423,7 @@ main() {
 		first=no
 		[ -e "$DEFAULTS/tc-control" ] || first=yes
 		install -m755 "$BIN_DIR/tc-control" "$PREFIX/bin/"
-		install -m644 "$HERE/tc-control.service" "$UNIT_DIR/"
+		install_unit tc-control
 		install_default tc-control
 		install_docs
 		if interactive && { [ "$first" = yes ] || [ "$setup" = always ]; }; then

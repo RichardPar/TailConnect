@@ -92,7 +92,7 @@ func TestRequestTUN(t *testing.T) {
 	}
 	defer r.Close()
 	defer w.Close()
-	app.send(Message{Type: "tun-reply", OK: true}, int(w.Fd()))
+	app.send(Message{Type: "tun-reply", ID: m.ID, OK: true}, int(w.Fd()))
 	res := <-done
 	if res.err != nil || res.fd < 0 {
 		t.Fatalf("RequestTUN: %d %v", res.fd, res.err)
@@ -116,10 +116,24 @@ func TestRequestTUN(t *testing.T) {
 		fd, err := b.RequestTUN(context.Background(), req)
 		done <- result{fd, err}
 	}()
-	app.next()
-	app.send(Message{Type: "tun-reply", Error: "VPN permission not granted"}, -1)
+	m = app.next()
+	app.send(Message{Type: "tun-reply", ID: m.ID, Error: "VPN permission not granted"}, -1)
 	if res := <-done; res.err == nil {
 		t.Fatal("refusal not reported")
+	}
+
+	// A late answer to an earlier request isn't taken as this one's.
+	go func() {
+		fd, err := b.RequestTUN(context.Background(), req)
+		done <- result{fd, err}
+	}()
+	m = app.next()
+	app.send(Message{Type: "tun-reply", ID: m.ID - 1, Error: "stale"}, -1)
+	app.send(Message{Type: "tun-reply", ID: m.ID, OK: true}, int(w.Fd()))
+	if res := <-done; res.err != nil || res.fd < 0 {
+		t.Fatalf("answer after a stale one: %d %v", res.fd, res.err)
+	} else {
+		os.NewFile(uintptr(res.fd), "x").Close()
 	}
 
 	b.NotifyClosed()

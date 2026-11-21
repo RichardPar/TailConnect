@@ -276,3 +276,71 @@ func TestAllowedPorts(t *testing.T) {
 		t.Fatal("reply to our connection dropped")
 	}
 }
+
+// On an exit node, packets from the tunnel to addresses that aren't this
+// machine's (the internet, the LAN) pass only from peers allowed to use it.
+func TestForwardingOnlyForAllowedPeers(t *testing.T) {
+	h := newHarness(t)
+	internet := netip.MustParseAddr("8.8.8.8")
+	lan := netip.MustParseAddr("192.168.10.1")
+	h.w.SetPolicy(Policy{
+		Restricted: map[netip.Addr][]protocol.PortRange{shared: {{Proto: "tcp", First: 443, Last: 443}}},
+		Self:       []netip.Addr{me, me6},
+		Forward:    map[netip.Addr]bool{friend: true},
+	})
+	if !h.recv(tcp(friend, internet, 5000, 443, syn)) {
+		t.Fatal("allowed peer's internet traffic dropped")
+	}
+	if !h.recv(tcp(friend, me, 5000, 22, syn)) {
+		t.Fatal("allowed peer can't reach this machine")
+	}
+	// The shared (restricted) peer may open 443 on this machine, but not
+	// anything through it, on any port.
+	if !h.recv(tcp(shared, me, 5000, 443, syn)) {
+		t.Fatal("restricted peer's allowed port dropped")
+	}
+	for _, dst := range []netip.Addr{internet, lan} {
+		if h.recv(tcp(shared, dst, 5000, 443, syn)) {
+			t.Fatalf("restricted peer forwarded to %v", dst)
+		}
+	}
+	// Without Forward (not an exit node), nobody's packets are forwarded.
+	h.w.SetPolicy(Policy{Self: []netip.Addr{me, me6}})
+	if h.recv(tcp(friend, lan, 5000, 80, syn)) {
+		t.Fatal("forwarded although this machine isn't an exit node")
+	}
+}
+
+// Using a restricted exit node: everything from non-peer addresses gets
+// its restrictions; replies to our own connections still come back.
+func TestRestrictedExitNodeInUse(t *testing.T) {
+	h := newHarness(t)
+	exit := shared
+	h.w.SetPolicy(Policy{
+		Restricted: map[netip.Addr][]protocol.PortRange{exit: nil},
+		Self:       []netip.Addr{me, me6},
+		Exit:       &ExitLimit{Peers: map[netip.Addr]bool{exit: true, friend: true}},
+	})
+	spoofed := netip.MustParseAddr("1.2.3.4")
+	if h.recv(tcp(spoofed, me, 5000, 22, syn)) {
+		t.Fatal("restricted exit node opened a connection from a made-up internet address")
+	}
+	site := netip.MustParseAddr("93.184.216.34")
+	h.send(tcp(me, site, 40000, 443, syn))
+	if !h.recv(tcp(site, me, 443, 40000, synack)) {
+		t.Fatal("reply from the internet through the exit node dropped")
+	}
+	if !h.recv(tcp(friend, me, 5000, 22, syn)) {
+		t.Fatal("unrestricted peer affected by the exit node's limits")
+	}
+}
+
+// IPv4 packets claiming to be ICMPv6 (errors pass the filter) are refused.
+func TestIPv4WithICMPv6Refused(t *testing.T) {
+	h := newHarness(t)
+	l4 := make([]byte, 8)
+	l4[0] = 1 // ICMPv6 destination unreachable, if it were IPv6
+	if h.recv(ip(shared, me, protoICMPv6, l4)) {
+		t.Fatal("IPv4 packet with protocol 58 passed the filter")
+	}
+}

@@ -176,7 +176,9 @@ func main() {
 		hs.TLSConfig = certs.TLSConfig()
 		if *acmeHTTP != "" {
 			go func() {
-				if err := http.ListenAndServe(*acmeHTTP, certs.HTTPHandler()); err != nil {
+				as := &http.Server{Addr: *acmeHTTP, Handler: certs.HTTPHandler(), ReadHeaderTimeout: 10 * time.Second,
+					ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}
+				if err := as.ListenAndServe(); err != nil {
 					log.Error("certificate checks listener", "err", err)
 					os.Exit(1)
 				}
@@ -234,17 +236,24 @@ func main() {
 	}
 }
 
+// loadOrCreateKey reads the relay's key, creating it if the file is missing
+// or empty (a write that was cut short). The key is written atomically, so
+// a crash can't leave a half-written one.
 func loadOrCreateKey(path string) (key.RelayPrivate, error) {
 	b, err := os.ReadFile(path)
-	if err == nil {
+	if err == nil && len(strings.TrimSpace(string(b))) > 0 {
 		return key.ParsePrivate[key.RelayKind](string(b))
 	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return key.RelayPrivate{}, err
 	}
 	k := key.NewPrivate[key.RelayKind]()
 	text, _ := k.MarshalText()
-	if err := os.WriteFile(path, text, 0o600); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, text, 0o600); err != nil {
+		return key.RelayPrivate{}, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		return key.RelayPrivate{}, err
 	}
 	return k, nil

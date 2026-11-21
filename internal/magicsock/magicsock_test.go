@@ -209,3 +209,38 @@ func TestSTUNIgnoresHairpin(t *testing.T) {
 		t.Errorf("hairpin answer left %v advertised", a)
 	}
 }
+
+// A WireGuard packet attributed to a peer by its receiver index (which an
+// eavesdropper can copy) doesn't move the peer's path to a new address; it
+// triggers a signed disco ping there instead. Packets from the path in use
+// keep it fresh.
+func TestNewAddressProbedNotAdopted(t *testing.T) {
+	c := New(Options{PrivateKey: key.NewPrivate[key.NodeKind](), DiscoKey: key.NewPrivate[key.DiscoKind]()})
+	defer c.Close()
+	now := time.Now()
+	evil := netip.MustParseAddrPort("203.0.113.66:4444")
+	good := netip.MustParseAddrPort("192.168.1.20:41641")
+	p := newPeer(key.NewPrivate[key.NodeKind]().Public())
+	p.discoKey = key.NewPrivate[key.DiscoKind]().Public()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.noteDirectRecvLocked(p, evil, now)
+	if p.directAddr.IsValid() {
+		t.Fatalf("path adopted from an unauthenticated packet: %v", p.directAddr)
+	}
+	if ep := p.eps[evil]; ep == nil {
+		t.Fatal("new address not recorded as a candidate to ping")
+	}
+	// The path in use is refreshed by its own packets.
+	p.directAddr, p.lastDirectRecv, p.firstUnanswered = good, now.Add(-10*time.Second), now.Add(-time.Second)
+	c.noteDirectRecvLocked(p, good, now)
+	if p.lastDirectRecv != now || !p.firstUnanswered.IsZero() {
+		t.Fatal("path in use not refreshed")
+	}
+	// A trusted path isn't replaced by packets from elsewhere.
+	c.noteDirectRecvLocked(p, evil, now)
+	if p.directAddr != good {
+		t.Fatalf("trusted path replaced by %v", p.directAddr)
+	}
+}

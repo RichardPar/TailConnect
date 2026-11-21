@@ -1,9 +1,12 @@
 package iplimit
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 func TestRate(t *testing.T) {
@@ -63,5 +66,29 @@ func TestClient(t *testing.T) {
 		if got := Client(r); got != want {
 			t.Errorf("Client(%q) = %q, want %q", addr, got, want)
 		}
+	}
+}
+
+// Flooding the table must not reset a busy key's limit: checking a key adds
+// nothing, and when the table fills, idle entries go first.
+func TestFloodKeepsBusyLimits(t *testing.T) {
+	l := NewRate(time.Hour, 1)
+	l.Allow("victim")
+	for i := 0; i < maxTracked+50; i++ {
+		l.Blocked(fmt.Sprintf("probe%d", i))
+	}
+	if !l.Blocked("victim") {
+		t.Fatal("read-only checks of other keys reset the victim's limit")
+	}
+	// Entries that refilled (here: a fast refill) are idle and evicted
+	// first, so the busy victim survives a flood of them.
+	l = NewRate(time.Nanosecond, 1)
+	l.clients["victim"] = rate.NewLimiter(rate.Every(time.Hour), 1)
+	l.clients["victim"].Allow()
+	for i := 0; i < maxTracked+50; i++ {
+		l.Allow(fmt.Sprintf("flood%d", i))
+	}
+	if !l.Blocked("victim") {
+		t.Fatal("a flood of idle entries reset the busy victim")
 	}
 }

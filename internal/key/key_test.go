@@ -72,3 +72,16 @@ func TestJSONZeroAndValue(t *testing.T) {
 		t.Fatal("json round trip mismatch")
 	}
 }
+
+func TestParsePrivateRefusesZero(t *testing.T) {
+	for _, s := range []string{"", "  \n", "relayprivkey:" + strings.Repeat("00", 32)} {
+		if _, err := ParsePrivate[RelayKind](s); err == nil {
+			t.Errorf("ParsePrivate(%q) accepted a zero key", s)
+		}
+	}
+	k := NewPrivate[RelayKind]()
+	text, _ := k.MarshalText()
+	if got, err := ParsePrivate[RelayKind](string(text) + "\n"); err != nil || got != k {
+		t.Fatalf("round trip: %v", err)
+	}
+}

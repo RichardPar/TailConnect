@@ -225,6 +225,12 @@ func (c *Conn) handleDiscoLocked(pkt []byte, src netip.AddrPort, viaRelay bool, 
 		if viaRelay || !m.NodeKey.Equal(p.key) {
 			return
 		}
+		// Each ping has a fresh random TxID. One seen recently is a
+		// recording sent again (perhaps from a forged source, to aim our
+		// pong at someone): ignore it.
+		if !c.notePingLocked(m.TxID, now) {
+			return
+		}
 		ep := c.learnLocked(p, src, now)
 		if c.socks != nil {
 			c.socks.write([][]byte{disco.Seal(c.disco, p.discoKey, &disco.Pong{TxID: m.TxID, Src: src})}, src)
@@ -249,11 +255,40 @@ func (c *Conn) handleDiscoLocked(pkt []byte, src netip.AddrPort, viaRelay bool, 
 		ep.lastPong, ep.latency = now, now.Sub(pp.sent)
 		c.updateBestLocked(p, now)
 	case *disco.CallMeMaybe:
+		// Peers send it through the relay, where the sender is known. One
+		// arriving over UDP may be a recording aimed at making us ping.
+		if !viaRelay {
+			return
+		}
 		for _, a := range m.Endpoints {
 			c.learnLocked(p, a, now)
 		}
 		c.discoverLocked(p, now, true)
 	}
+}
+
+// seenPingTTL is how long a ping's TxID is remembered. Older replays only
+// get a pong to the address they came from, at most once per TTL.
+const seenPingTTL = time.Minute
+
+// notePingLocked records a received ping's TxID, reporting false if it was
+// seen within seenPingTTL.
+func (c *Conn) notePingLocked(tx disco.TxID, now time.Time) bool {
+	if at, ok := c.seenPings[tx]; ok && now.Sub(at) < seenPingTTL {
+		return false
+	}
+	if len(c.seenPings) >= 4096 {
+		for k, at := range c.seenPings {
+			if now.Sub(at) >= seenPingTTL {
+				delete(c.seenPings, k)
+			}
+		}
+		if len(c.seenPings) >= 4096 {
+			clear(c.seenPings) // only under a flood of fresh pings
+		}
+	}
+	c.seenPings[tx] = now
+	return true
 }
 
 // learnLocked records a candidate endpoint for p discovered at runtime.
@@ -342,13 +377,25 @@ func (c *Conn) sendSTUN(targets []stunTarget) {
 		if err != nil || len(ips) == 0 {
 			continue
 		}
-		// Prefer IPv4 (most NATs are IPv4); IPv6 addresses are usually global anyway.
-		ip := ips[0]
+		// Prefer IPv4 (most NATs are IPv4; IPv6 addresses are usually
+		// global anyway), but only a family we have a socket for: an
+		// IPv6-only host must ask over IPv6.
+		c.mu.Lock()
+		has4, has6 := c.socks != nil && c.socks.v4 != nil, c.socks != nil && c.socks.v6 != nil
+		c.mu.Unlock()
+		var ip netip.Addr
 		for _, a := range ips {
-			if a.Unmap().Is4() {
-				ip = a.Unmap()
+			a = a.Unmap()
+			if a.Is4() && has4 {
+				ip = a
 				break
 			}
+			if a.Is6() && has6 && !ip.IsValid() {
+				ip = a
+			}
+		}
+		if !ip.IsValid() {
+			continue
 		}
 		to := netip.AddrPortFrom(ip, uint16(t.port))
 		tx := stun.NewTxID()

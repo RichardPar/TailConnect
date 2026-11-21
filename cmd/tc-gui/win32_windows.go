@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
@@ -73,6 +75,8 @@ var (
 	pGlobalAlloc                   = kernel32.NewProc("GlobalAlloc")
 	pGlobalLock                    = kernel32.NewProc("GlobalLock")
 	pGlobalUnlock                  = kernel32.NewProc("GlobalUnlock")
+	pGlobalFree                    = kernel32.NewProc("GlobalFree")
+	pDeleteObject                  = gdi32.NewProc("DeleteObject")
 	pInitCommonControlsEx          = comctl32.NewProc("InitCommonControlsEx")
 )
 
@@ -234,7 +238,7 @@ type actCtx struct {
 	ProcessorArchitecture uint16
 	LangID                uint16
 	AssemblyDirectory     *uint16
-	ResourceName          *uint16
+	ResourceName          uintptr // a string pointer, or a resource ID (MAKEINTRESOURCE)
 	ApplicationName       *uint16
 	Module                windows.Handle
 }
@@ -453,10 +457,17 @@ func setClipboard(owner windows.Handle, s string) bool {
 		return false
 	}
 	p, _, _ := pGlobalLock.Call(h)
+	if p == 0 {
+		pGlobalFree.Call(h)
+		return false
+	}
 	copy(unsafe.Slice(*(**uint16)(unsafe.Pointer(&p)), len(u)), u)
 	pGlobalUnlock.Call(h)
-	r, _, _ := pSetClipboardData.Call(cfUnicodeText, h)
-	return r != 0
+	if r, _, _ := pSetClipboardData.Call(cfUnicodeText, h); r == 0 {
+		pGlobalFree.Call(h) // the clipboard owns it only once it accepts it
+		return false
+	}
+	return true
 }
 
 // commonControlsManifest asks for version 6 of the common controls, which
@@ -473,10 +484,32 @@ const commonControlsManifest = `<?xml version="1.0" encoding="UTF-8" standalone=
 // enableVisualStyles activates the manifest above for this thread and
 // initialises the common controls under it. (A manifest compiled into the
 // .exe would do the same; this keeps the build plain `go build`.)
-func enableVisualStyles(manifestPath string) {
-	ctx := actCtx{Source: str(manifestPath)}
+// enableVisualStyles turns on Common Controls 6 (themed controls). It needs
+// an activation context from a manifest. The one embedded in Windows'
+// shell32.dll (resource 124) asks for exactly that and only administrators
+// can change it, so it's used first. A manifest file is only a fallback for
+// an unelevated app: an elevated one (login, uninstall, the installer) must
+// not load a manifest from a folder the user's other programs can write to,
+// as it decides which DLLs are loaded.
+func enableVisualStyles() {
+	const (
+		actCtxFlagResourceNameValid = 0x008
+		shell32Manifest             = 124
+	)
+	sys, _ := windows.GetSystemDirectory()
+	ctx := actCtx{Source: str(filepath.Join(sys, "shell32.dll")), Flags: actCtxFlagResourceNameValid,
+		ResourceName: shell32Manifest}
 	ctx.Size = uint32(unsafe.Sizeof(ctx))
 	h, _, _ := pCreateActCtxW.Call(uintptr(unsafe.Pointer(&ctx)))
+	if h == uintptr(windows.InvalidHandle) && !windows.GetCurrentProcessToken().IsElevated() {
+		manifest := filepath.Join(os.TempDir(), "tailconnect-gui.manifest")
+		if b, err := os.ReadFile(manifest); err != nil || string(b) != commonControlsManifest {
+			_ = os.WriteFile(manifest, []byte(commonControlsManifest), 0o644)
+		}
+		ctx = actCtx{Source: str(manifest)}
+		ctx.Size = uint32(unsafe.Sizeof(ctx))
+		h, _, _ = pCreateActCtxW.Call(uintptr(unsafe.Pointer(&ctx)))
+	}
 	if h != uintptr(windows.InvalidHandle) {
 		var cookie uintptr
 		pActivateActCtx.Call(h, uintptr(unsafe.Pointer(&cookie)))

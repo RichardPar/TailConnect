@@ -313,7 +313,7 @@ func (s *Server) traffic(id int64, byKey map[string]db.Node) *apiTraffic {
 		if n, ok := byKey[p.NodeKey.String()]; ok {
 			ap.Name, ap.FQDN = n.GivenName, s.fqdn(n)
 		} else {
-			ap.Name = "a removed machine"
+			ap.Name = "another machine" // removed, or not this account's to name
 		}
 		out.Peers = append(out.Peers, ap)
 	}
@@ -557,9 +557,11 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, "list nodes", err)
 		return
 	}
-	// Peers in traffic reports are named from all machines: a machine's
-	// peers include machines shared from other accounts, which are in its
-	// network map anyway.
+	// Peers in traffic reports are named from the machines the account is
+	// connected with: its own, machines shared with it, and the machines
+	// of accounts it shares with (all in its machines' maps anyway). A
+	// machine reports traffic per node key, so naming from every machine
+	// would tell a former share partner what a key is called now.
 	var byKey map[string]db.Node
 	if s.info.Traffic != nil {
 		all, err := s.db.ListNodes(r.Context(), 0)
@@ -567,9 +569,31 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 			s.internal(w, "list nodes", err)
 			return
 		}
+		visible := func(db.Node) bool { return true } // operators see everything
+		if sc := principalFrom(r.Context()).scope(); sc != 0 {
+			shares, err := s.db.ListShares(r.Context(), db.ShareFilter{OwnerID: sc, RecipientID: sc})
+			if err != nil {
+				s.internal(w, "list shares", err)
+				return
+			}
+			nodesIn, accountsOut := map[int64]bool{}, map[int64]bool{}
+			for _, sh := range shares {
+				if !sh.InEffect() {
+					continue
+				}
+				if sh.RecipientID == sc {
+					nodesIn[sh.NodeID] = true
+				} else {
+					accountsOut[sh.RecipientID] = true
+				}
+			}
+			visible = func(n db.Node) bool { return n.UserID == sc || nodesIn[n.ID] || accountsOut[n.UserID] }
+		}
 		byKey = make(map[string]db.Node, len(all))
 		for _, n := range all {
-			byKey[n.NodeKey] = n
+			if visible(n) {
+				byKey[n.NodeKey] = n
+			}
 		}
 	}
 	out := make([]apiNode, 0, len(nodes))

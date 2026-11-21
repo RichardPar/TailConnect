@@ -9,6 +9,15 @@
 // (path-MTU discovery needs them). Peers' source addresses can be trusted:
 // WireGuard only accepts packets from a peer with that peer's own tunnel
 // addresses as the source.
+//
+// Two more rules, for exit nodes (Policy):
+//   - Packets from the tunnel to an address that isn't this machine's would
+//     be forwarded by the OS (to the internet, or the LAN). They pass only
+//     from peers allowed to use this machine as an exit node; every other
+//     peer, other accounts' machines above all, can reach this machine only.
+//   - An exit node in use may send packets from any address (the internet's
+//     replies). If it's restricted, everything from an address that isn't
+//     another peer's gets its restrictions.
 package filter
 
 import (
@@ -27,6 +36,7 @@ import (
 const (
 	tcpTimeout    = 30 * time.Minute
 	tcpRSTTimeout = 5 * time.Second
+	tcpFINTimeout = 2 * time.Minute
 	udpTimeout    = 2 * time.Minute
 	icmpTimeout   = 30 * time.Second
 	maxFlows      = 65536
@@ -39,6 +49,7 @@ const (
 	protoUDP    = 17
 	protoICMPv6 = 58
 	tcpRST      = 0x04
+	tcpFIN      = 0x01
 )
 
 // flowKey identifies a flow from this machine's point of view. For ICMP
@@ -53,9 +64,7 @@ type TUN struct {
 	tun.Device
 	now func() time.Time
 
-	// restricted maps each restricted peer address to what it may still open
-	// here (empty: nothing). nil = filter off.
-	restricted atomic.Pointer[map[netip.Addr][]protocol.PortRange]
+	pol atomic.Pointer[state] // nil = filter off
 
 	mu     sync.Mutex
 	flows  map[flowKey]time.Time // expiry
@@ -64,7 +73,61 @@ type TUN struct {
 	dropped atomic.Int64
 }
 
-// Wrap returns dev with filtering (off until SetRestricted is called with addresses).
+// Policy is what the filter enforces.
+type Policy struct {
+	// Restricted maps each restricted peer address to what it may still
+	// open here (empty: nothing but replies).
+	Restricted map[netip.Addr][]protocol.PortRange
+	// Self are this machine's tunnel addresses. Packets from the tunnel to
+	// any other address pass only from Forward. Empty: not checked.
+	Self []netip.Addr
+	// Forward are the addresses of peers that may send traffic through this
+	// machine (it's their exit node). nil: none.
+	Forward map[netip.Addr]bool
+	// Exit is set while using an exit node that is itself restricted.
+	Exit *ExitLimit
+}
+
+// ExitLimit restricts an exit node in use: packets from addresses that
+// aren't Peers came from it, and may open only Ports here.
+type ExitLimit struct {
+	Ports []protocol.PortRange
+	Peers map[netip.Addr]bool // every peer's tunnel addresses
+}
+
+type state struct {
+	restricted map[netip.Addr][]protocol.PortRange
+	self       []netip.Addr
+	forward    map[netip.Addr]bool
+	exit       *ExitLimit
+}
+
+// policyFor returns what applies to packets from (or flows to) the remote
+// address a: whether it's restricted, and what it may open.
+func (st *state) policyFor(a netip.Addr) ([]protocol.PortRange, bool) {
+	if r, ok := st.restricted[a]; ok {
+		return r, true
+	}
+	if st.exit != nil && !st.exit.Peers[a] {
+		return st.exit.Ports, true
+	}
+	return nil, false
+}
+
+// isSelf reports whether a is this machine's (true when not checked).
+func (st *state) isSelf(a netip.Addr) bool {
+	if len(st.self) == 0 {
+		return true
+	}
+	for _, s := range st.self {
+		if s == a {
+			return true
+		}
+	}
+	return false
+}
+
+// Wrap returns dev with filtering (off until SetPolicy).
 func Wrap(dev tun.Device) *TUN {
 	return &TUN{Device: dev, now: time.Now, flows: map[flowKey]time.Time{}}
 }
@@ -78,18 +141,42 @@ func (t *TUN) SetRestricted(addrs []netip.Addr) {
 	t.SetPolicies(m)
 }
 
-// SetPolicies sets the restricted peers: each address may reply to our
-// connections and open only the listed ports here.
+// SetPolicies sets only the restricted peers: each address may reply to
+// our connections and open only the listed ports here.
 func (t *TUN) SetPolicies(p map[netip.Addr][]protocol.PortRange) {
-	if len(p) == 0 {
-		t.restricted.Store(nil)
-		return
+	t.SetPolicy(Policy{Restricted: p})
+}
+
+// SetPolicy replaces what the filter enforces. Flows to addresses no
+// longer restricted are forgotten.
+func (t *TUN) SetPolicy(p Policy) {
+	if len(p.Restricted) == 0 && len(p.Self) == 0 && p.Exit == nil {
+		t.pol.Store(nil)
+	} else {
+		st := &state{restricted: make(map[netip.Addr][]protocol.PortRange, len(p.Restricted)), forward: map[netip.Addr]bool{}, exit: p.Exit}
+		for a, r := range p.Restricted {
+			st.restricted[a.Unmap()] = r
+		}
+		for _, a := range p.Self {
+			st.self = append(st.self, a.Unmap())
+		}
+		for a, ok := range p.Forward {
+			if ok {
+				st.forward[a.Unmap()] = true
+			}
+		}
+		t.pol.Store(st)
 	}
-	m := make(map[netip.Addr][]protocol.PortRange, len(p))
-	for a, r := range p {
-		m[a.Unmap()] = r
+	st := t.pol.Load()
+	t.mu.Lock()
+	for k := range t.flows {
+		if st == nil {
+			delete(t.flows, k)
+		} else if _, restricted := st.policyFor(k.remote); !restricted {
+			delete(t.flows, k)
+		}
 	}
-	t.restricted.Store(&m)
+	t.mu.Unlock()
 }
 
 // Dropped counts packets the filter refused.
@@ -99,8 +186,8 @@ func (t *TUN) Dropped() int64 { return t.dropped.Load() }
 // restricted peers open (or refresh) flows.
 func (t *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	n, err := t.Device.Read(bufs, sizes, offset)
-	rp := t.restricted.Load()
-	if rp == nil || n == 0 {
+	st := t.pol.Load()
+	if st == nil || n == 0 || (len(st.restricted) == 0 && st.exit == nil) {
 		return n, err
 	}
 	locked := false
@@ -112,7 +199,7 @@ func (t *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 		if !ok {
 			continue
 		}
-		if _, restricted := (*rp)[dst]; !restricted {
+		if _, restricted := st.policyFor(dst); !restricted {
 			continue
 		}
 		pk, ok := parse(b)
@@ -139,17 +226,35 @@ func (t *TUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 // Write carries packets from the tunnel to this host; packets from
 // restricted peers pass only as part of a flow we started.
 func (t *TUN) Write(bufs [][]byte, offset int) (int, error) {
-	rp := t.restricted.Load()
-	if rp == nil {
+	st := t.pol.Load()
+	if st == nil {
 		return t.Device.Write(bufs, offset)
 	}
 	var keep [][]byte // allocated only once something is dropped
 	locked := false
 	var now time.Time
+	drop := func(i int) {
+		t.dropped.Add(1)
+		if keep == nil {
+			keep = append(make([][]byte, 0, len(bufs)), bufs[:i]...)
+		}
+	}
 	for i, b := range bufs {
 		pkt := b[offset:]
 		src, isIP := srcAddr(pkt)
-		allowedPorts, restricted := (*rp)[src]
+		dst, _ := dstAddr(pkt)
+		if isIP && !st.isSelf(dst) {
+			// Not for this machine: the OS would forward it.
+			if st.forward[src] {
+				if keep != nil {
+					keep = append(keep, b)
+				}
+			} else {
+				drop(i)
+			}
+			continue
+		}
+		allowedPorts, restricted := st.policyFor(src)
 		if !isIP || !restricted {
 			if keep != nil {
 				keep = append(keep, b)
@@ -168,10 +273,7 @@ func (t *TUN) Write(bufs [][]byte, offset int) (int, error) {
 			}
 			continue
 		}
-		t.dropped.Add(1)
-		if keep == nil {
-			keep = append(make([][]byte, 0, len(bufs)), bufs[:i]...)
-		}
+		drop(i)
 	}
 	if locked {
 		t.mu.Unlock()
@@ -284,6 +386,9 @@ func (p packet) timeout() time.Duration {
 		if p.tcpFlags&tcpRST != 0 {
 			return tcpRSTTimeout
 		}
+		if p.tcpFlags&tcpFIN != 0 {
+			return tcpFINTimeout // closing: long enough for the last ACKs
+		}
 		return tcpTimeout
 	case protoUDP:
 		return udpTimeout
@@ -326,6 +431,9 @@ func parse(b []byte) (packet, bool) {
 			return p, false // non-first fragment: no transport header
 		}
 		p.proto = b[9]
+		if p.proto != protoTCP && p.proto != protoUDP && p.proto != protoICMP {
+			return p, false // (ICMPv6 inside IPv4 would pass as an ICMP error)
+		}
 		p.src, p.dst = netip.AddrFrom4([4]byte(b[12:16])), netip.AddrFrom4([4]byte(b[16:20]))
 		l4 = b[ihl:]
 	case len(b) >= 40 && b[0]>>4 == 6:
