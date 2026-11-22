@@ -163,11 +163,27 @@ func (d *Daemon) save() error {
 	if err != nil {
 		return err
 	}
-	tmp := d.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	// A new file under a fresh name: never one somebody else made first
+	// (whose owner could read the keys written into it).
+	f, err := os.CreateTemp(filepath.Dir(d.path), "state-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, d.path)
+	tmp := f.Name()
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, d.path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (d *Daemon) running() bool {

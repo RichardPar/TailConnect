@@ -318,3 +318,41 @@ func TestDeleteRelayTokenDeletesOne(t *testing.T) {
 		t.Fatalf("left: %+v", left)
 	}
 }
+
+// A machine can't take another machine's disco key, when registering or
+// reporting its status.
+func TestDiscoKeyTaken(t *testing.T) {
+	d := open(t)
+	u := mustUser(t, d, "alice")
+	k := mustKey(t, d, u.ID, true)
+	a, err := reg(d, "mkey-a", "nk-a", "a", k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := reg(d, "mkey-b", "nk-b", "b", k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.RegisterNode(ctx, RegisterParams{
+		MachineKey: "mkey-c", NodeKey: "nk-c", DiscoKey: a.Node.DiscoKey, Hostname: "c", AuthKey: k, Alloc: ipam.Default().Next,
+	})
+	if !errors.Is(err, ErrDiscoKeyTaken) {
+		t.Fatalf("new machine with a's disco key: %v", err)
+	}
+	if err := d.UpdateNodeStatus(ctx, b.Node.ID, NodeStatus{DiscoKey: a.Node.DiscoKey}); !errors.Is(err, ErrDiscoKeyTaken) {
+		t.Fatalf("b reporting a's disco key: %v", err)
+	}
+	n, _ := d.GetNode(ctx, b.Node.ID)
+	if n.DiscoKey != b.Node.DiscoKey {
+		t.Fatalf("b's disco key changed to %q", n.DiscoKey)
+	}
+	// Its own key, a new one, or none are fine.
+	for _, dk := range []string{b.Node.DiscoKey, "disco-new", ""} {
+		if err := d.UpdateNodeStatus(ctx, b.Node.ID, NodeStatus{DiscoKey: dk}); err != nil {
+			t.Fatalf("b reporting %q: %v", dk, err)
+		}
+	}
+	if err := d.UpdateNodeStatus(ctx, 9999, NodeStatus{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown node: %v", err)
+	}
+}

@@ -150,6 +150,11 @@ func (d *DB) RegisterNode(ctx context.Context, p RegisterParams) (RegisterResult
 	now := d.now()
 
 	existing, err := scanNode(tx.QueryRowContext(ctx, nodeSelect+` WHERE n.machine_key = ?`, p.MachineKey))
+	if err == nil || errors.Is(err, sql.ErrNoRows) {
+		if terr := discoKeyTaken(ctx, tx, p.DiscoKey, existing.ID); terr != nil {
+			return RegisterResult{}, terr
+		}
+	}
 	switch {
 	case err == nil && existing.NodeKey == p.NodeKey:
 		if _, err := tx.ExecContext(ctx,
@@ -255,12 +260,40 @@ func (d *DB) UpdateNodeStatus(ctx context.Context, id int64, st NodeStatus) erro
 	if err != nil {
 		return err
 	}
-	_, err = d.sql.ExecContext(ctx, `
+	// The disco key check is part of the update, so two machines can't
+	// claim one key at the same moment.
+	res, err := d.sql.ExecContext(ctx, `
 		UPDATE nodes SET disco_key = ?, endpoints = ?, home_relay = ?, last_seen = ?,
 		       hostinfo = CASE WHEN ? = '' THEN hostinfo ELSE ? END
-		WHERE id = ?`,
-		discoKey, string(eps), st.HomeRelay, unix(d.now()), hostinfo, hostinfo, id)
-	return err
+		WHERE id = ? AND (? = '' OR NOT EXISTS (SELECT 1 FROM nodes WHERE disco_key = ? AND id != ?))`,
+		discoKey, string(eps), st.HomeRelay, unix(d.now()), hostinfo, hostinfo, id, discoKey, discoKey, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if err := discoKeyTaken(ctx, d.sql, discoKey, id); err != nil {
+			return err
+		}
+		return fmt.Errorf("node %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// discoKeyTaken returns ErrDiscoKeyTaken if a machine other than selfID
+// (0: none) has disco key k ("" is never taken).
+func discoKeyTaken(ctx context.Context, q querier, k string, selfID int64) error {
+	if k == "" {
+		return nil
+	}
+	var id int64
+	err := q.QueryRowContext(ctx, `SELECT id FROM nodes WHERE disco_key = ? AND id != ? LIMIT 1`, k, selfID).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return err
+	}
+	return ErrDiscoKeyTaken
 }
 
 // TouchNode records that the node is alive without changing anything else.

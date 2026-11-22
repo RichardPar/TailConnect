@@ -16,6 +16,7 @@ type stats struct {
 	}
 	mapFull, mapDelta           atomic.Int64 // messages on map streams
 	mapFullBytes, mapDeltaBytes atomic.Int64
+	statusLimited               atomic.Int64 // status updates skipped by the per-machine limit
 }
 
 var deltaPrefix = []byte(`{"Delta":true`)
@@ -99,6 +100,9 @@ func (s *Server) RegisterMetrics(r *metrics.Registry) {
 			emit([]string{"result", "ok"}, float64(s.stats.registerOK.Load()))
 			emit([]string{"result", "refused"}, float64(s.stats.registerRefused.Load()))
 		})
+	r.CounterFunc("tc_control_status_updates_limited_total", "Machines' status updates skipped because the machine sent too many.", func() float64 {
+		return float64(s.stats.statusLimited.Load())
+	})
 	r.Collect("tc_control_connections_refused_total", "Control connections refused or closed by the abuse limits.", "counter",
 		func(emit func([]string, float64)) {
 			emit([]string{"reason", "rate"}, float64(s.stats.connRefused.rate.Load()))

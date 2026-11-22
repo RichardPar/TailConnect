@@ -158,41 +158,82 @@ const stateDirSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 // -tun userspace keep the default permissions of the -state they choose.)
 //
 // Users may create folders in ProgramData, so the directory may have been
-// made by someone else first. A junction or symlink is refused (setting
-// its permissions would change those of wherever it points), and the owner
-// is set to Administrators, so a user who created it keeps no owner's
-// right to change the permissions back later.
-func secureStateDir(dir string) error {
+// made by someone else first, with files already in it. A junction or
+// symlink is refused (setting its permissions would change those of
+// wherever it points), and the owner is set to Administrators, so a user
+// who created it keeps no owner's right to change the permissions back
+// later. Everything inside not owned by SYSTEM or Administrators is
+// removed and returned: a planted state.json would hand tcd keys its maker
+// knows, and a planted file that tcd writes into (state.json.tmp, tcd.log)
+// stays its maker's to read whatever the folder's permissions say.
+func secureStateDir(dir string) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return nil, err
 	}
 	if !windows.GetCurrentProcessToken().IsElevated() {
-		return nil
+		return nil, nil
 	}
-	p, err := windows.UTF16PtrFromString(dir)
-	if err != nil {
-		return err
-	}
-	attrs, err := windows.GetFileAttributes(p)
-	if err != nil {
-		return err
-	}
-	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("%s is a junction or link, not a folder: remove it and start again", dir)
+	if isReparsePoint(dir) {
+		return nil, fmt.Errorf("%s is a junction or link, not a folder: remove it and start again", dir)
 	}
 	sd, err := windows.SecurityDescriptorFromString(stateDirSDDL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		admins, nil, dacl, nil)
+		admins, nil, dacl, nil); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if !isReparsePoint(p) && trustedOwner(p) {
+			continue
+		}
+		// os.RemoveAll doesn't follow links or junctions: it removes the
+		// link itself.
+		if err := os.RemoveAll(p); err != nil {
+			return removed, fmt.Errorf("remove %s, which the TailConnect service did not create: %w", p, err)
+		}
+		removed = append(removed, e.Name())
+	}
+	return removed, nil
+}
+
+// isReparsePoint reports whether p is a junction, symlink or other reparse
+// point (true if it can't be checked, to be safe).
+func isReparsePoint(p string) bool {
+	u, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		return true
+	}
+	attrs, err := windows.GetFileAttributes(u)
+	return err != nil || attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+// trustedOwner reports whether p is owned by SYSTEM or Administrators, as
+// everything an elevated tcd creates is.
+func trustedOwner(p string) bool {
+	sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil {
+		return false
+	}
+	return owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)
 }

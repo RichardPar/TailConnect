@@ -30,10 +30,17 @@ type apiShare struct {
 	Expires    *time.Time `json:"expires,omitempty"`
 }
 
-func (s *Server) toAPIShare(sh db.Share) apiShare {
+// toAPIShare converts sh for its owner's side, or (recipient) for the
+// account it is shared with, whose machines know the machine by its name
+// under the owner's default domain (see control's planMap).
+func (s *Server) toAPIShare(sh db.Share, recipient bool) apiShare {
+	domain := sh.OwnerDomain
+	if recipient {
+		domain = ""
+	}
 	out := apiShare{
 		ID: sh.ID, NodeID: sh.NodeID, Machine: sh.NodeName,
-		FQDN:  sh.NodeName + "." + db.TenantDomain(sh.OwnerName, sh.OwnerDomain, s.info.BaseDomain),
+		FQDN:  sh.NodeName + "." + db.TenantDomain(sh.OwnerName, domain, s.info.BaseDomain),
 		Owner: sh.OwnerName, Recipient: sh.RecipientName, Status: sh.Status, Ports: sh.Ports, InEffect: sh.InEffect(),
 		Link: sh.Link, LinkPrefix: sh.LinkPrefix, Created: sh.CreatedAt,
 	}
@@ -69,13 +76,13 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	for _, sh := range list {
 		if p.user != nil && sh.RecipientID == p.user.ID {
-			out.Incoming = append(out.Incoming, s.toAPIShare(sh))
+			out.Incoming = append(out.Incoming, s.toAPIShare(sh, true))
 			continue
 		}
 		if sh.RecipientID == 0 && !sh.ExpiresAt.IsZero() && now.After(sh.ExpiresAt) {
 			continue // expired, unredeemed link: nothing to show
 		}
-		out.Outgoing = append(out.Outgoing, s.toAPIShare(sh))
+		out.Outgoing = append(out.Outgoing, s.toAPIShare(sh, false))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -98,7 +105,7 @@ func (s *Server) shareNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("share offered", "machine", n.GivenName, "owner", n.UserName, "recipient", sh.RecipientName, "by", principalFrom(r.Context()).name())
-	writeJSON(w, http.StatusCreated, s.toAPIShare(sh))
+	writeJSON(w, http.StatusCreated, s.toAPIShare(sh, false))
 }
 
 func (s *Server) createShareLink(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +131,7 @@ func (s *Server) createShareLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("share link created", "machine", n.GivenName, "owner", n.UserName, "by", principalFrom(r.Context()).name())
-	writeJSON(w, http.StatusCreated, map[string]any{"code": code, "share": s.toAPIShare(sh)})
+	writeJSON(w, http.StatusCreated, map[string]any{"code": code, "share": s.toAPIShare(sh, false)})
 }
 
 // sharePortsArg validates a share's ports field ("" = everything) and
@@ -162,7 +169,7 @@ func (s *Server) setSharePorts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("share ports set", "machine", sh.NodeName, "owner", sh.OwnerName, "recipient", sh.RecipientName, "ports", ports, "by", p.name())
-	writeJSON(w, http.StatusOK, s.toAPIShare(sh))
+	writeJSON(w, http.StatusOK, s.toAPIShare(sh, false))
 }
 
 func (s *Server) acceptShare(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +187,7 @@ func (s *Server) acceptShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("share accepted", "machine", sh.NodeName, "owner", sh.OwnerName, "recipient", p.user.Name)
-	writeJSON(w, http.StatusOK, s.toAPIShare(sh))
+	writeJSON(w, http.StatusOK, s.toAPIShare(sh, true))
 }
 
 func (s *Server) redeemShareLink(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +209,7 @@ func (s *Server) redeemShareLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("share link redeemed", "machine", sh.NodeName, "owner", sh.OwnerName, "recipient", p.user.Name)
-	writeJSON(w, http.StatusOK, s.toAPIShare(sh))
+	writeJSON(w, http.StatusOK, s.toAPIShare(sh, true))
 }
 
 // deleteShare revokes (owner), declines or leaves (recipient) a share;

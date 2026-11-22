@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
+	"tailconnect/internal/iplimit"
 	"tailconnect/internal/key"
 )
 
@@ -66,18 +67,38 @@ func rawHello(t *testing.T, relayURL string, priv key.NodePrivate, askChallenge 
 func TestHelloReplayRefused(t *testing.T) {
 	_, u := newServer(t, nil)
 	victim := key.NewPrivate[key.NodeKind]()
-	for _, challenge := range []bool{true, false} {
-		recorded, ft := rawHello(t, u, victim, challenge, nil)
-		if ft != frameServerInfo {
-			t.Fatalf("challenge=%v: genuine hello refused (%d)", challenge, ft)
-		}
-		// An eavesdropper sends the same hello again, with or without
-		// asking for a challenge: refused either way.
-		for _, ask := range []bool{true, false} {
-			if _, ft := rawHello(t, u, victim, ask, recorded); ft != frameError {
-				t.Fatalf("hello recorded with challenge=%v replayed with challenge=%v: accepted", challenge, ask)
-			}
-		}
+	recorded, ft := rawHello(t, u, victim, true, nil)
+	if ft != frameServerInfo {
+		t.Fatalf("genuine hello refused (%d)", ft)
+	}
+	// An eavesdropper sends the same hello again: it carries the first
+	// connection's challenge, not this one's.
+	if _, ft := rawHello(t, u, victim, true, recorded); ft != frameError {
+		t.Fatal("recorded hello replayed: accepted")
+	}
+}
+
+// A client that doesn't ask for a challenge (v0.17 and older) is refused
+// before the handshake: its hello could be a recording.
+func TestHelloWithoutChallengeRefused(t *testing.T) {
+	_, u := newServer(t, nil)
+	pu, _ := url.Parse(u)
+	conn, err := net.Dial("tcp", pu.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	req, _ := http.NewRequest("GET", u, nil)
+	req.Header.Set("Upgrade", UpgradeProtocol)
+	req.Header.Set("Connection", "Upgrade")
+	req.Write(conn)
+	br := bufio.NewReader(conn)
+	if resp, err := http.ReadResponse(br, req); err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade: %v", err)
+	}
+	if ft, _, err := readFrame(br, nil); err != nil || ft != frameError {
+		t.Fatalf("got frame %d (%v), want an error", ft, err)
 	}
 }
 
@@ -109,5 +130,42 @@ func TestStalledUpgradeDoesNotHangClose(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Close hung on a stalled upgrade")
+	}
+}
+
+// Connections are limited per address: attempts by rate, open ones by
+// count.
+func TestPerAddressLimits(t *testing.T) {
+	s, u := newServer(t, nil)
+	upgrade := func() int {
+		req, _ := http.NewRequest("GET", u, nil)
+		req.Header.Set("Upgrade", UpgradeProtocol)
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set(ChallengeHeader, "1")
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			t.Cleanup(func() { resp.Body.Close() }) // held open
+		} else {
+			resp.Body.Close()
+		}
+		return resp.StatusCode
+	}
+	s.connLimit = iplimit.NewCount(2, 100)
+	for i := range 2 {
+		if c := upgrade(); c != http.StatusSwitchingProtocols {
+			t.Fatalf("connection %d: %d", i, c)
+		}
+	}
+	if c := upgrade(); c != http.StatusServiceUnavailable {
+		t.Fatalf("past the open limit: %d, want 503", c)
+	}
+	s.connLimit = iplimit.NewCount(100, 100)
+	s.handshakes = iplimit.NewRate(time.Hour, 1)
+	upgrade()
+	if c := upgrade(); c != http.StatusTooManyRequests {
+		t.Fatalf("past the rate limit: %d, want 429", c)
 	}
 }

@@ -244,3 +244,23 @@ func TestNewAddressProbedNotAdopted(t *testing.T) {
 		t.Fatalf("trusted path replaced by %v", p.directAddr)
 	}
 }
+
+// Two peers with one disco key (one copied the other's) can't be told
+// apart, so neither is found by it; a peer with its own key still is.
+func TestDuplicateDiscoKeys(t *testing.T) {
+	c := New(Options{PrivateKey: key.NewPrivate[key.NodeKind]()})
+	a := key.NewPrivate[key.NodeKind]().Public()
+	b := key.NewPrivate[key.NodeKind]().Public()
+	o := key.NewPrivate[key.NodeKind]().Public()
+	shared := key.NewPrivate[key.DiscoKind]().Public()
+	own := key.NewPrivate[key.DiscoKind]().Public()
+	c.SetNetworkMap([]protocol.Node{{NodeKey: a, DiscoKey: shared}, {NodeKey: b, DiscoKey: shared}, {NodeKey: o, DiscoKey: own}}, protocol.RelayMap{}, nil)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if p := c.byDisco[shared]; p != nil {
+		t.Fatalf("duplicate disco key maps to %v", p.key.ShortString())
+	}
+	if p := c.byDisco[own]; p == nil || !p.key.Equal(o) {
+		t.Fatal("peer with its own disco key not found")
+	}
+}

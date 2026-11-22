@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
+	"tailconnect/internal/iplimit"
 	"tailconnect/internal/key"
 )
 
@@ -38,11 +39,16 @@ type Server struct {
 	mu      sync.Mutex
 	clients map[key.NodePublic]*sclient
 	closed  bool
-	replay  replayCache // recent hello nonces
+
+	// Per-IP abuse limits (IPv4 address or IPv6 /64), as on the control
+	// listener: anyone can connect and make the relay do a handshake.
+	connLimit  *iplimit.Count // open connections
+	handshakes *iplimit.Rate  // connection attempts
 
 	packetsForwarded atomic.Int64
 	packetsDropped   atomic.Int64
 	packetsDenied    atomic.Int64 // refused by the AllowFunc
+	connsRefused     atomic.Int64 // connections refused by the per-IP limits
 	bytesForwarded   atomic.Int64
 }
 
@@ -61,13 +67,25 @@ func (c *sclient) close() {
 	})
 }
 
+// Per-IP limits. They are generous: machines behind one NAT share an
+// address, and each holds one connection per relay it uses.
+const (
+	connsPerIP     = 64
+	connsTotal     = 10000
+	handshakeEvery = time.Second
+	handshakeBurst = 30 // then one connection attempt a second
+)
+
 // KeepAlive is how often the relay sends idle clients a keep-alive frame,
 // often enough to keep idle connections open through NATs and firewalls
 // that drop them after a minute.
 const KeepAlive = 25 * time.Second
 
 func NewServer(priv key.RelayPrivate, authorize AuthorizeFunc, log *slog.Logger) *Server {
-	return &Server{priv: priv, authorize: authorize, log: log, keepAlive: KeepAlive, clients: map[key.NodePublic]*sclient{}}
+	return &Server{priv: priv, authorize: authorize, log: log, keepAlive: KeepAlive, clients: map[key.NodePublic]*sclient{},
+		connLimit:  iplimit.NewCount(connsPerIP, connsTotal),
+		handshakes: iplimit.NewRate(handshakeEvery, handshakeBurst),
+	}
 }
 
 // SetAllow installs a per-packet policy (nil = forward between any clients).
@@ -116,6 +134,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "connection cannot be upgraded", http.StatusInternalServerError)
 		return
 	}
+	ip := iplimit.Client(r)
+	if !s.handshakes.Allow(ip) {
+		s.connsRefused.Add(1)
+		http.Error(w, "too many connection attempts from this address; try again later", http.StatusTooManyRequests)
+		return
+	}
+	if !s.connLimit.Acquire(ip) {
+		s.connsRefused.Add(1)
+		s.log.Info("relay: connection refused: too many open from this address", "remote", r.RemoteAddr)
+		http.Error(w, "too many open connections from this address", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.connLimit.Release(ip) // serve below runs for the connection's life
 	conn, brw, err := hj.Hijack()
 	if err != nil {
 		return
@@ -128,25 +159,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
-	s.serve(r.Context(), conn, brw.Reader, r.Header.Get(ChallengeHeader) == "1")
+	if r.Header.Get(ChallengeHeader) != "1" {
+		// A client from before challenges (v0.17 and older): its hello,
+		// without one, could be a recording of an earlier connection.
+		s.log.Info("relay: client without challenge support refused; it needs TailConnect v0.18 or later", "remote", conn.RemoteAddr())
+		writeFrame(conn, frameError, []byte("this relay needs TailConnect v0.18 or later: upgrade this machine"))
+		conn.Close()
+		return
+	}
+	s.serve(r.Context(), conn, brw.Reader)
 }
 
 // handshakeTimeout bounds the upgrade and handshake.
 const handshakeTimeout = 10 * time.Second
 
-func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader, wantsChallenge bool) {
+func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader) {
 	defer conn.Close()
 	remote := conn.RemoteAddr().String()
 
 	// Handshake.
 	conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	pub := s.priv.Public().Raw()
-	var challenge []byte
-	if wantsChallenge {
-		challenge = make([]byte, challengeLen)
-		if _, err := rand.Read(challenge); err != nil {
-			return
-		}
+	challenge := make([]byte, challengeLen)
+	if _, err := rand.Read(challenge); err != nil {
+		return
 	}
 	if err := writeFrame(conn, frameServerKey, []byte(magic), pub[:], challenge); err != nil {
 		return
@@ -172,13 +208,10 @@ func (s *Server) serve(ctx context.Context, conn net.Conn, br *bufio.Reader, wan
 		writeFrame(conn, frameError, []byte(fmt.Sprintf("unsupported version %d", info.Version)))
 		return
 	}
-	// Every hello's nonce is remembered, so none is accepted twice. With a
-	// challenge, the hello must carry this connection's; without (a client
-	// from before challenges), it must carry none: one that does was
-	// recorded from another connection.
-	fresh := s.replay.add(n24)
-	if !fresh || !hmac.Equal(info.Challenge, challenge) {
-		s.log.Info("relay: replayed or mismatched client hello refused", "remote", remote, "challenge", challenge != nil)
+	// The hello must carry this connection's challenge: one recorded from
+	// another connection carries that connection's.
+	if !hmac.Equal(info.Challenge, challenge) {
+		s.log.Info("relay: replayed or mismatched client hello refused", "remote", remote)
 		writeFrame(conn, frameError, []byte("key proof failed"))
 		return
 	}

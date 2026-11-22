@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"time"
+	"unicode/utf8"
 
 	"tailconnect/internal/key"
 )
@@ -39,6 +40,34 @@ type Hostinfo struct {
 	OS            string `json:",omitempty"` // "linux", "windows", "android"
 	OSVersion     string `json:",omitempty"`
 	ClientVersion string `json:",omitempty"`
+}
+
+// Limits on what a machine reports about itself. Everything it reports goes
+// into its peers' maps, so the server cuts it down to these.
+const (
+	MaxHostinfoField = 255 // bytes, per Hostinfo field
+	MaxEndpoints     = 64  // candidate endpoints
+)
+
+// Clamp returns h with each field cut to MaxHostinfoField bytes (at a
+// character boundary).
+func (h Hostinfo) Clamp() Hostinfo {
+	h.Hostname = clampString(h.Hostname)
+	h.OS = clampString(h.OS)
+	h.OSVersion = clampString(h.OSVersion)
+	h.ClientVersion = clampString(h.ClientVersion)
+	return h
+}
+
+func clampString(s string) string {
+	if len(s) <= MaxHostinfoField {
+		return s
+	}
+	i := MaxHostinfoField
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i-- // don't cut a character in half
+	}
+	return s[:i]
 }
 
 // ServerKeyResponse is returned by GET /key.

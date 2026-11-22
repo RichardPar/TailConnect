@@ -23,6 +23,10 @@ var (
 	// ErrAccountInactive: the account is pending approval or suspended, so
 	// its machines may not join or stay in the network.
 	ErrAccountInactive = errors.New("account is not active (pending approval or suspended)")
+	// ErrDiscoKeyTaken: another machine already reported that disco key.
+	// Peers find machines by disco key, so a copy would take over (or
+	// break) path discovery to the machine it was copied from.
+	ErrDiscoKeyTaken = errors.New("disco key belongs to another machine")
 )
 
 type DB struct {

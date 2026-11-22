@@ -347,7 +347,7 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 		selfAddrs = append(selfAddrs, a.Addr())
 	}
 	pol := func(r map[netip.Addr][]protocol.PortRange) filter.Policy {
-		return filter.Policy{Restricted: r, Self: selfAddrs, Forward: forward, Exit: exitLimit}
+		return filter.Policy{Restricted: r, Self: selfAddrs, Forward: forward, Exit: exitLimit, Tunnel: tunnelPrefixes}
 	}
 	transition := maps.Clone(restricted)
 	for a, r := range e.restricted {
@@ -386,6 +386,10 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 	e.reconfigDNSLocked(nm, magicDNS)
 	return nil
 }
+
+// tunnelPrefixes are the tunnel's address ranges, which an exit node never
+// forwards to.
+var tunnelPrefixes = []netip.Prefix{ipam.DefaultV4, ipam.DefaultV6}
 
 // ErrNoSuchMachine: FindExitNode found no machine of that name.
 var ErrNoSuchMachine = errors.New("no such machine in this network")
