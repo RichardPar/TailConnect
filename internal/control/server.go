@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -73,12 +74,17 @@ type Config struct {
 // machines behind one NAT (or a router looping LAN clients back in) share
 // an address.
 const (
-	connsPerIP      = 64    // open Noise channels from one IP
-	connsTotal      = 10000 // open Noise channels in all
-	handshakeEvery  = time.Second
-	handshakeBurst  = 30 // then one handshake a second
-	regFailEvery    = 30 * time.Second
-	regFailBurst    = 10 // failed registrations, then one every 30s
+	connsPerIP     = 64    // open Noise channels from one IP
+	connsTotal     = 10000 // open Noise channels in all
+	handshakeEvery = time.Second
+	handshakeBurst = 30 // then one handshake a second
+	regFailEvery   = 30 * time.Second
+	regFailBurst   = 10 // failed registrations, then one every 30s
+	// Status updates (endpoints, hostinfo) per machine. Each can push a
+	// new map to every peer, so a machine mustn't send them nonstop.
+	// Clients send one every 15s or so, more when their network changes.
+	statusEvery     = 2 * time.Second
+	statusBurst     = 20
 	defaultIdentify = 30 * time.Second
 )
 
@@ -114,6 +120,7 @@ type Server struct {
 	connLimit  *iplimit.Count // open Noise channels
 	handshakes *iplimit.Rate  // Noise handshakes
 	regFails   *iplimit.Rate  // registrations refused for a bad auth key
+	statusLim  *iplimit.Rate  // status updates per machine (keyed by node ID)
 
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
@@ -155,6 +162,7 @@ func New(ctx context.Context, d *db.DB, cfg Config, log *slog.Logger) (*Server, 
 		connLimit:  iplimit.NewCount(connsPerIP, connsTotal),
 		handshakes: iplimit.NewRate(handshakeEvery, handshakeBurst),
 		regFails:   iplimit.NewRate(regFailEvery, regFailBurst),
+		statusLim:  iplimit.NewRate(statusEvery, statusBurst),
 	}
 	s.bus.init()
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -345,12 +353,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too many failed registrations from this address; try again later")
 		return
 	}
-	hi, _ := json.Marshal(req.Hostinfo)
+	hi, _ := json.Marshal(req.Hostinfo.Clamp())
 	res, err := s.db.RegisterNode(r.Context(), db.RegisterParams{
 		MachineKey: mk.String(),
 		NodeKey:    req.NodeKey.String(),
 		DiscoKey:   textOrEmpty(req.DiscoKey),
-		Hostname:   req.Hostinfo.Hostname,
+		Hostname:   req.Hostinfo.Clamp().Hostname,
 		Hostinfo:   string(hi),
 		AuthKey:    req.AuthKey,
 		Alloc:      s.ipam.Next,
@@ -367,6 +375,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.regFails.Allow(conn.ip) // counts towards the limit above
 		refused("auth key invalid, expired, revoked or already used")
 		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	case errors.Is(err, db.ErrDiscoKeyTaken):
+		refused("disco key belongs to another machine")
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	case errors.Is(err, db.ErrExists):
 		refused("node key belongs to another machine")
@@ -428,8 +440,11 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 	}
 	var hi string
 	if req.Hostinfo != nil {
-		b, _ := json.Marshal(req.Hostinfo)
+		b, _ := json.Marshal(req.Hostinfo.Clamp())
 		hi = string(b)
+	}
+	if len(req.Endpoints) > protocol.MaxEndpoints {
+		req.Endpoints = req.Endpoints[:protocol.MaxEndpoints]
 	}
 	// Subscribe before writing so our own change is reflected in the first map.
 	changed := s.bus.wait()
@@ -438,9 +453,24 @@ func (s *Server) handleMap(w http.ResponseWriter, r *http.Request) {
 	// them would let it rebuild everyone's maps at will. Path discovery
 	// finds its current ones once it's let back in.
 	if cutOffNotice(self, time.Now()) == "" {
+		// Each update may push a map to every peer, so a machine past its
+		// allowance is refused, not ignored: the client then sends it again
+		// later rather than believing the server has it.
+		if !s.statusLim.Allow(strconv.FormatInt(self.ID, 10)) {
+			s.stats.statusLimited.Add(1)
+			writeError(w, http.StatusTooManyRequests, "too many status updates from this machine; try again later")
+			return
+		}
 		if err := s.db.UpdateNodeStatus(r.Context(), self.ID, db.NodeStatus{
 			DiscoKey: textOrEmpty(req.DiscoKey), Endpoints: req.Endpoints, HomeRelay: req.HomeRelay, Hostinfo: hi,
-		}); err != nil {
+		}); errors.Is(err, db.ErrDiscoKeyTaken) {
+			s.log.Info("map request refused", "reason", "disco key belongs to another machine", "node", self.GivenName, "id", self.ID)
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		} else if errors.Is(err, db.ErrNotFound) {
+			writeError(w, http.StatusUnauthorized, "node key not registered") // deleted meanwhile
+			return
+		} else if err != nil {
 			s.internalError(w, "map", err)
 			return
 		}

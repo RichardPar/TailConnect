@@ -555,7 +555,11 @@ func TestTenantDNSDomains(t *testing.T) {
 	f.db.AcceptShare(ctx, sh.ID, mustUserID(t, f, "globex"))
 	f.srv.checkGeneration()
 	m, _ = f.srv.BuildMap(ctx, laptop)
-	if len(m.Peers) != 1 || m.Peers[0].Name != "nas.acme.internal" || !slices.Equal(m.DNS.Domains, []string{"home.internal", "acme.internal"}) {
+	// The shared machine is named under acme's default domain, and acme's
+	// own domain stays out of globex's DNS: an account's chosen domain
+	// (say corp.internal, a real company's) must not capture the lookups
+	// of accounts it shares with.
+	if len(m.Peers) != 1 || m.Peers[0].Name != "nas.acme.home.internal" || !slices.Equal(m.DNS.Domains, []string{"home.internal"}) {
 		t.Fatalf("globex after sharing: peers %+v DNS %+v", m.Peers, m.DNS)
 	}
 	if m.Self.Name != "laptop.globex.home.internal" {

@@ -15,6 +15,9 @@
 //     be forwarded by the OS (to the internet, or the LAN). They pass only
 //     from peers allowed to use this machine as an exit node; every other
 //     peer, other accounts' machines above all, can reach this machine only.
+//     Not even those peers' packets to other tunnel addresses pass: the OS
+//     would send them back into the tunnel, from the peer's address, to
+//     machines the access rules may keep it away from.
 //   - An exit node in use may send packets from any address (the internet's
 //     replies). If it's restricted, everything from an address that isn't
 //     another peer's gets its restrictions.
@@ -84,6 +87,9 @@ type Policy struct {
 	// Forward are the addresses of peers that may send traffic through this
 	// machine (it's their exit node). nil: none.
 	Forward map[netip.Addr]bool
+	// Tunnel are the tunnel's address ranges: packets to them are never
+	// forwarded, whoever sends them.
+	Tunnel []netip.Prefix
 	// Exit is set while using an exit node that is itself restricted.
 	Exit *ExitLimit
 }
@@ -99,7 +105,18 @@ type state struct {
 	restricted map[netip.Addr][]protocol.PortRange
 	self       []netip.Addr
 	forward    map[netip.Addr]bool
+	tunnel     []netip.Prefix
 	exit       *ExitLimit
+}
+
+// inTunnel reports whether a is one of the tunnel's addresses.
+func (st *state) inTunnel(a netip.Addr) bool {
+	for _, p := range st.tunnel {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // policyFor returns what applies to packets from (or flows to) the remote
@@ -153,7 +170,7 @@ func (t *TUN) SetPolicy(p Policy) {
 	if len(p.Restricted) == 0 && len(p.Self) == 0 && p.Exit == nil {
 		t.pol.Store(nil)
 	} else {
-		st := &state{restricted: make(map[netip.Addr][]protocol.PortRange, len(p.Restricted)), forward: map[netip.Addr]bool{}, exit: p.Exit}
+		st := &state{restricted: make(map[netip.Addr][]protocol.PortRange, len(p.Restricted)), forward: map[netip.Addr]bool{}, exit: p.Exit, tunnel: p.Tunnel}
 		for a, r := range p.Restricted {
 			st.restricted[a.Unmap()] = r
 		}
@@ -245,7 +262,7 @@ func (t *TUN) Write(bufs [][]byte, offset int) (int, error) {
 		dst, _ := dstAddr(pkt)
 		if isIP && !st.isSelf(dst) {
 			// Not for this machine: the OS would forward it.
-			if st.forward[src] {
+			if st.forward[src] && !st.inTunnel(dst) {
 				if keep != nil {
 					keep = append(keep, b)
 				}

@@ -119,7 +119,7 @@ Peers behind these use the relay, which always works.
 
 A relay forwards WireGuard packets between devices that can't reach each other directly. Devices connect to their **home relay**: the region with the lowest STUN latency. They only switch to another region when it's at least 30% faster, to avoid flapping. A device sends packets for a peer to the peer's home relay, addressed by node key. The relay passes them on without being able to read them.
 
-The connection is an HTTP Upgrade (`tailconnect-relay-v1`) on the relay's URL. The relay checks that the device owns its node key with a NaCl box challenge. The relay sends a fresh random challenge with its key, and the device seals it in its reply, so a recorded reply can't be used again. Devices from before the challenge don't ask for one; for them the relay refuses a reply it has seen recently instead. The relay built into `tc-control` also refuses devices that aren't registered.
+The connection is an HTTP Upgrade (`tailconnect-relay-v1`) on the relay's URL. The relay checks that the device owns its node key with a NaCl box challenge. The relay sends a fresh random challenge with its key, and the device seals it in its reply, so a recorded reply can't be used again. Devices from before the challenge (v0.17 and older) are refused: they must be upgraded to use a relay. The relay built into `tc-control` also refuses devices that aren't registered.
 
 ## MagicDNS
 

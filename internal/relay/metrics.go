@@ -14,6 +14,9 @@ func (s *Server) RegisterMetrics(r *metrics.Registry) {
 			emit([]string{"result", "dropped"}, float64(s.packetsDropped.Load()))
 			emit([]string{"result", "denied"}, float64(s.packetsDenied.Load()))
 		})
+	r.CounterFunc("tc_relay_connections_refused_total", "Connections refused by the per-address limits.", func() float64 {
+		return float64(s.connsRefused.Load())
+	})
 	r.CounterFunc("tc_relay_bytes_forwarded_total", "Bytes of packets the relay forwarded.", func() float64 {
 		return float64(s.bytesForwarded.Load())
 	})

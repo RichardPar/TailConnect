@@ -44,6 +44,11 @@ type snapshot struct {
 type snapNode struct {
 	db    db.Node
 	proto protocol.Node // LastSeen cleared: maps don't carry it
+	// The node's name and aliases under its account's default domain
+	// (<account>.<base>), as other accounts' machines see it: an account's
+	// own domain would make them send that domain's lookups to MagicDNS.
+	sharedName    string
+	sharedAliases []string
 
 	acl acl.Machine
 
@@ -85,14 +90,23 @@ func (n *snapNode) peerJSON(v peerView) []byte {
 	if b, ok := n.enc[k]; ok {
 		return b
 	}
-	pn := n.proto
-	v.apply(&pn)
+	pn := n.as(v)
 	b, _ := json.Marshal(pn)
 	if n.enc == nil {
 		n.enc = map[string][]byte{}
 	}
 	n.enc[k] = b
 	return b
+}
+
+// as is the node as it appears in a map with view v.
+func (n *snapNode) as(v peerView) protocol.Node {
+	pn := n.proto // a copy: the flags are per map
+	v.apply(&pn)
+	if v.shared {
+		pn.Name, pn.Aliases = n.sharedName, n.sharedAliases
+	}
+	return pn
 }
 
 // currentSnapshot returns the snapshot for the database's current
@@ -150,7 +164,16 @@ func (s *Server) buildSnapshot(st db.State) (*snapshot, error) {
 			return nil, err
 		}
 		pn.LastSeen = nil
-		snap.nodes[n.ID] = &snapNode{db: n, proto: pn, acl: acl.Machine{ID: n.ID, Name: n.GivenName, Tags: n.Tags}}
+		sn := &snapNode{db: n, proto: pn, acl: acl.Machine{ID: n.ID, Name: n.GivenName, Tags: n.Tags}}
+		sn.sharedName, sn.sharedAliases = pn.Name, pn.Aliases
+		if n.UserDomain != "" {
+			def := s.tenantDomain(n.UserName, "")
+			sn.sharedName, sn.sharedAliases = n.GivenName+"."+def, nil
+			for _, a := range n.Aliases {
+				sn.sharedAliases = append(sn.sharedAliases, a+"."+def)
+			}
+		}
+		snap.nodes[n.ID] = sn
 		snap.byUser[n.UserID] = append(snap.byUser[n.UserID], n.ID)
 		if n.Usable(now) {
 			snap.keys[pn.NodeKey] = n.ID
@@ -228,8 +251,9 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 	slices.Sort(peerIDs)
 	peerIDs = slices.Compact(peerIDs)
 
-	// Every domain a name in this map can end in: the base, plus accounts'
-	// own domains (self's and its peers').
+	// Every domain a name in this map can end in: the base, plus self's
+	// account's own domain (other accounts' machines are named under the
+	// base, whatever domain their account chose).
 	domains := []string{s.cfg.BaseDomain}
 	addDomain := func(n db.Node) {
 		if n.UserDomain != "" && !slices.Contains(domains, n.UserDomain) {
@@ -280,7 +304,9 @@ func (s *Server) planMap(ctx context.Context, id int64) (*mapPlan, error) {
 		}
 		plan.peers = append(plan.peers, p)
 		plan.views = append(plan.views, view)
-		addDomain(p.db)
+		if !view.shared {
+			addDomain(p.db) // other accounts' machines are named under the base domain
+		}
 	}
 	slices.Sort(domains[1:])
 	plan.resp.DNS.Domains = domains
@@ -296,9 +322,7 @@ func (s *Server) BuildMap(ctx context.Context, id int64) (protocol.MapResponse, 
 	resp := plan.resp
 	resp.Peers = make([]protocol.Node, len(plan.peers))
 	for i, p := range plan.peers {
-		pn := p.proto // a copy: the flags are per map
-		plan.views[i].apply(&pn)
-		resp.Peers[i] = pn
+		resp.Peers[i] = p.as(plan.views[i])
 	}
 	return resp, nil
 }

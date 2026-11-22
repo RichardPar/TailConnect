@@ -30,4 +30,4 @@ func serviceContext() (ctx context.Context, stop, finish func()) {
 func logOutput(string) io.Writer { return os.Stderr }
 
 // secureStateDir is left to the daemon, which creates the directory 0700.
-func secureStateDir(string) error { return nil }
+func secureStateDir(string) ([]string, error) { return nil, nil }

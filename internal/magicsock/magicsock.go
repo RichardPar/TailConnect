@@ -267,11 +267,23 @@ func (c *Conn) SetNetworkMap(peers []protocol.Node, relays protocol.RelayMap, lo
 			delete(c.peers, k)
 		}
 	}
+	// Peers are found by disco key. Two with the same one (one copied the
+	// other's) can't be told apart, so neither gets direct paths; both
+	// still work through the relay.
 	c.byDisco = map[key.DiscoPublic]*peer{}
+	dup := map[key.DiscoPublic]bool{}
 	for _, p := range c.peers {
-		if !p.discoKey.IsZero() {
-			c.byDisco[p.discoKey] = p
+		if p.discoKey.IsZero() {
+			continue
 		}
+		if _, seen := c.byDisco[p.discoKey]; seen {
+			dup[p.discoKey] = true
+		}
+		c.byDisco[p.discoKey] = p
+	}
+	for k := range dup {
+		delete(c.byDisco, k)
+		c.logf("magicsock: several peers have disco key %s; no direct paths to them", k.ShortString())
 	}
 }
 

@@ -55,12 +55,16 @@ func main() {
 	}
 	daemon.Version = version
 
-	if err := secureStateDir(*stateDir); err != nil {
+	removed, err := secureStateDir(*stateDir)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tcd: state directory:", err)
 		os.Exit(1)
 	}
 	log := slog.New(slog.NewTextHandler(logOutput(*stateDir), nil))
 	logf := func(f string, a ...any) { log.Info(fmt.Sprintf(f, a...)) }
+	for _, name := range removed {
+		log.Warn("state directory: removed a file that the TailConnect service did not create", "file", name)
+	}
 
 	d, err := daemon.New(daemon.Options{
 		StateDir:   *stateDir,

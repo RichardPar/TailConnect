@@ -9,7 +9,7 @@
 //
 // Handshake:
 //
-//	server → client  ServerKey   magic "TCRELAY1" | server relay public key (32) [| challenge (32)]
+//	server → client  ServerKey   magic "TCRELAY1" | server relay public key (32) | challenge (32)
 //	client → server  ClientInfo  node public key (32) | nonce (24) | box(info JSON {Version, Challenge})
 //	server → client  ServerInfo  JSON {Version}, or Error and close
 //
@@ -17,12 +17,11 @@
 // server's public key, proving the client owns the node key it claims, so
 // nobody can register someone else's key to intercept their packets.
 //
-// The challenge makes each proof good for one connection only: a client
-// that sends the ChallengeHeader on the upgrade request gets a random
-// challenge with the server key and must seal it in its ClientInfo, so a
-// recorded ClientInfo can't be replayed. Clients from before the challenge
-// don't send the header; the server then refuses a ClientInfo nonce it has
-// seen recently instead (see replayCache).
+// The challenge makes each proof good for one connection only: the client
+// sends the ChallengeHeader on the upgrade request, gets a random challenge
+// with the server key and must seal it in its ClientInfo, so a recorded
+// ClientInfo can't be replayed. Clients from before the challenge (v0.17
+// and older) don't send the header and are refused.
 //
 // After the handshake:
 //

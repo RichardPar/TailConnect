@@ -311,6 +311,28 @@ func TestForwardingOnlyForAllowedPeers(t *testing.T) {
 	}
 }
 
+// An exit node doesn't forward an allowed peer's packets to other tunnel
+// addresses: the OS would send them back into the tunnel, from the peer's
+// address, to machines the access rules may keep it away from.
+func TestExitNodeDoesNotForwardIntoTunnel(t *testing.T) {
+	h := newHarness(t)
+	h.w.SetPolicy(Policy{
+		Self:    []netip.Addr{me, me6},
+		Forward: map[netip.Addr]bool{friend: true},
+		Tunnel:  []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fd7c:7c0e:a1e0::/48")},
+	})
+	other := netip.MustParseAddr("100.64.0.99")
+	if h.recv(tcp(friend, other, 5000, 22, syn)) {
+		t.Fatal("exit node forwarded a peer's packet to another tunnel address")
+	}
+	if h.recv(tcp(friend, netip.MustParseAddr("100.100.100.100"), 5000, 53, syn)) {
+		t.Fatal("exit node forwarded a peer's packet to another machine's resolver address")
+	}
+	if !h.recv(tcp(friend, netip.MustParseAddr("8.8.8.8"), 5000, 443, syn)) {
+		t.Fatal("allowed peer's internet traffic dropped")
+	}
+}
+
 // Using a restricted exit node: everything from non-peer addresses gets
 // its restrictions; replies to our own connections still come back.
 func TestRestrictedExitNodeInUse(t *testing.T) {

@@ -287,6 +287,7 @@ func (f *forwarder) families() []nftables.TableFamily {
 //	  chain postrouting { type nat hook postrouting priority srcnat
 //	    iifname "tc0" oifname != "tc0" masquerade }
 //	  chain forward { type filter hook forward priority filter
+//	    iifname "tc0" oifname "tc0" drop
 //	    iifname "tc0" accept
 //	    oifname "tc0" ct state established,related accept }
 //	}
@@ -318,6 +319,16 @@ func (f *forwarder) addTables() error {
 			Name: "forward", Table: t, Type: nftables.ChainTypeFilter,
 			Hooknum: nftables.ChainHookForward, Priority: nftables.ChainPriorityFilter,
 		})
+		// Never from the tunnel back into it: that would carry a peer's
+		// packets to machines the access rules keep it away from (the
+		// packet filter refuses them first; this is a second line).
+		c.AddRule(&nftables.Rule{Table: t, Chain: fwd, Exprs: []expr.Any{
+			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: tun},
+			&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: tun},
+			&expr.Verdict{Kind: expr.VerdictDrop},
+		}})
 		c.AddRule(&nftables.Rule{Table: t, Chain: fwd, Exprs: []expr.Any{
 			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: tun},
