@@ -4,7 +4,10 @@ package engine
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
+
+	"tailconnect/internal/dns"
 )
 
 // Another firewall's forward chain that drops by default (Docker's, or
@@ -18,8 +21,10 @@ import (
 //
 // into DOCKER-USER where Docker is installed (Docker keeps that chain for
 // the user and jumps to it first), or else into FORWARD when its policy is
-// DROP. Each rule carries the comment iptComment, so it's removed on stop
-// and after a crash. Without iptables nothing is done.
+// DROP. Likewise, when the INPUT policy is DROP (ufw), the exit node's DNS
+// server for its clients (dns.ExitPort, UDP and TCP) is allowed from tc0.
+// Each rule carries the comment iptComment, so it's removed on stop and
+// after a crash. Without iptables nothing is done.
 const iptComment = "tailconnect-exit"
 
 type iptRule struct {
@@ -34,16 +39,29 @@ func (f *forwarder) iptRules() []iptRule {
 		bins = append(bins, "ip6tables")
 	}
 	for _, bin := range bins {
-		chain := forwardExceptionChain(bin)
-		if chain == "" {
-			continue
-		}
 		c := []string{"-m", "comment", "--comment", iptComment, "-j", "ACCEPT"}
-		out = append(out,
-			iptRule{bin, chain, append([]string{"-i", f.ifname}, c...)},
-			iptRule{bin, chain, append([]string{"-o", f.ifname, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"}, c...)})
+		if chain := forwardExceptionChain(bin); chain != "" {
+			out = append(out,
+				iptRule{bin, chain, append([]string{"-i", f.ifname}, c...)},
+				iptRule{bin, chain, append([]string{"-o", f.ifname, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"}, c...)})
+		}
+		if bin == "iptables" && policyDrop(bin, "INPUT") { // the DNS server listens on IPv4 only
+			port := strconv.Itoa(dns.ExitPort)
+			for _, proto := range []string{"udp", "tcp"} {
+				out = append(out, iptRule{bin, "INPUT", append([]string{"-i", f.ifname, "-p", proto, "--dport", port}, c...)})
+			}
+		}
 	}
 	return out
+}
+
+// policyDrop reports whether chain's policy is DROP.
+func policyDrop(bin, chain string) bool {
+	if _, err := exec.LookPath(bin); err != nil {
+		return false
+	}
+	out, err := exec.Command(bin, "-w", "-S", chain).Output()
+	return err == nil && strings.Contains(string(out), "-P "+chain+" DROP")
 }
 
 // forwardExceptionChain is the chain to allow forwarding in: DOCKER-USER if
@@ -56,8 +74,7 @@ func forwardExceptionChain(bin string) string {
 	if exec.Command(bin, "-w", "-S", "DOCKER-USER").Run() == nil {
 		return "DOCKER-USER"
 	}
-	out, err := exec.Command(bin, "-w", "-S", "FORWARD").Output()
-	if err == nil && strings.Contains(string(out), "-P FORWARD DROP") {
+	if policyDrop(bin, "FORWARD") {
 		return "FORWARD"
 	}
 	return ""
@@ -70,10 +87,14 @@ func (f *forwarder) addIptables() {
 	for _, r := range f.iptRules() {
 		args := append([]string{"-w", "-I", r.chain, "1"}, r.spec...)
 		if out, err := exec.Command(r.bin, args...).CombinedOutput(); err != nil {
-			f.logf("exit node: allow forwarding in %s %s: %v: %s", r.bin, r.chain, err, strings.TrimSpace(string(out)))
+			f.logf("exit node: allow traffic in %s %s: %v: %s", r.bin, r.chain, err, strings.TrimSpace(string(out)))
 			continue
 		}
-		f.logf("exit node: allowed forwarding from %s in %s chain %s, which would drop it otherwise", f.ifname, r.bin, r.chain)
+		if r.chain == "INPUT" {
+			f.logf("exit node: allowed %s DNS for clients from %s in %s chain INPUT, which would drop it otherwise", r.spec[3], f.ifname, r.bin)
+		} else {
+			f.logf("exit node: allowed forwarding from %s in %s chain %s, which would drop it otherwise", f.ifname, r.bin, r.chain)
+		}
 	}
 }
 
@@ -84,7 +105,7 @@ func (f *forwarder) removeIptables() {
 		if _, err := exec.LookPath(bin); err != nil {
 			continue
 		}
-		for _, chain := range []string{"DOCKER-USER", "FORWARD"} {
+		for _, chain := range []string{"DOCKER-USER", "FORWARD", "INPUT"} {
 			out, err := exec.Command(bin, "-w", "-S", chain).Output()
 			if err != nil {
 				continue

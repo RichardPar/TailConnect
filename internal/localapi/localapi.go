@@ -84,6 +84,9 @@ type ExitStatus struct {
 	Error        string `json:",omitempty"` // why Chosen isn't in use: internet traffic goes direct
 	Serving      bool   `json:",omitempty"` // this machine is an exit node
 	ServingError string `json:",omitempty"` // why it isn't forwarding although it should
+	Via          string `json:",omitempty"` // the interface forwarded traffic leaves through (tcd -exit-interface)
+	DNSError     string `json:",omitempty"` // why this exit node can't resolve names for the machines using it
+	DNSViaExit   bool   `json:",omitempty"` // names outside MagicDNS are resolved by the exit node in use
 }
 
 type PeerStatus struct {

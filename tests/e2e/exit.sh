@@ -141,7 +141,7 @@ ip netns exec a ping -c5 -i0.2 -W2 "$INET" >/dev/null || fail "exit path unstabl
 ok "alpha reaches the internet through beta"
 ip netns exec a ping -c1 -W1 10.99.0.1 >/dev/null || fail "alpha lost its LAN"
 ok "LAN still direct"
-tca status | grep -q "Exit node: internet traffic goes through beta" || { tca status; fail "status"; }
+tca status | grep -q "Exit node: internet traffic and DNS go through beta" || { tca status; fail "status"; }
 tca status | grep -q "exit node (in use)" || { tca status; fail "peer line"; }
 ok "status shows the exit node in use"
 # The tunnel itself (WireGuard, control) must not loop into the tunnel.

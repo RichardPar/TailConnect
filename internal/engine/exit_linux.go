@@ -5,6 +5,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -138,6 +139,7 @@ func (r *linuxRouter) clearExitRoutes() error {
 // sysctls it changed.
 type forwarder struct {
 	ifname  string
+	eg      egress // the -exit-interface, if set
 	on      bool
 	restore map[string]string // sysctl path → value before we changed it
 	v6      bool              // IPv6 is forwarded too
@@ -177,6 +179,7 @@ func (f *forwarder) set(on bool) {
 		f.cleaned = true
 		f.deleteTables() // left by a tcd that crashed
 		f.removeIptables()
+		clearEgress()
 	}
 	if on == f.on {
 		return
@@ -199,6 +202,12 @@ func (f *forwarder) set(on bool) {
 		return
 	}
 	f.addIptables()
+	if f.eg.name != "" {
+		if err := f.eg.start(f.v6); err != nil {
+			f.fail(err)
+			return
+		}
+	}
 	f.on = true
 	v6 := "IPv4 only"
 	if f.v6 {
@@ -243,6 +252,7 @@ func (f *forwarder) enableV6() bool {
 }
 
 func (f *forwarder) stop() {
+	f.eg.stop() // first: with the rules gone, traffic would take the host's default route
 	f.deleteTables()
 	if f.on {
 		f.removeIptables()
@@ -373,5 +383,37 @@ func (r *linuxRouter) ForwardError() string {
 	if r.fwd.lastErr != nil {
 		return r.fwd.lastErr.Error()
 	}
+	if r.fwd.on && r.fwd.eg.name != "" {
+		if _, err := r.fwd.eg.status(); err != nil {
+			return err.Error()
+		}
+	}
 	return ""
+}
+
+// SetExitInterface makes internet traffic this machine forwards as an
+// exit node leave through interface name only (see egress). Call it before
+// the first Set.
+func (r *linuxRouter) SetExitInterface(name string) { r.fwd.eg.name = name }
+
+// ExitDialer is for the DNS lookups an exit node makes for its clients:
+// with an exit interface set, its sockets leave through it (nil: none set).
+func (r *linuxRouter) ExitDialer() *net.Dialer {
+	if r.fwd.eg.name == "" {
+		return nil
+	}
+	return egressDialer()
+}
+
+// ExitInterface is the -exit-interface ("" = none).
+func (r *linuxRouter) ExitInterface() string { return r.fwd.eg.name }
+
+// ForwardVia is where forwarded internet traffic leaves ("" = the host's
+// own routes, or blocked: see ForwardError).
+func (r *linuxRouter) ForwardVia() string {
+	if !r.fwd.on || r.fwd.eg.name == "" {
+		return ""
+	}
+	via, _ := r.fwd.eg.status()
+	return via
 }

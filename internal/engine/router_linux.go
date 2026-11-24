@@ -29,7 +29,7 @@ func NewOSRouter(ifname string, logf func(string, ...any)) (Router, error) {
 	if err != nil {
 		return nil, fmt.Errorf("router: find %s: %w", ifname, err)
 	}
-	r := &linuxRouter{link: link, logf: logf, fwd: forwarder{ifname: ifname, logf: logf}}
+	r := &linuxRouter{link: link, logf: logf, fwd: forwarder{ifname: ifname, logf: logf, eg: egress{tun: ifname, logf: logf}}}
 	if err := r.clearExitRoutes(); err != nil { // left by a tcd that crashed
 		logf("router: %v", err)
 	}

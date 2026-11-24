@@ -203,3 +203,111 @@ func TestCloseDuringQueries(t *testing.T) {
 		<-done
 	}
 }
+
+// With an exit node in use, queries for names outside MagicDNS are
+// readdressed to the exit node's DNS (and go on into the tunnel), MagicDNS
+// names are still answered here, and the exit node's answers come back
+// readdressed from MagicDNS.
+func TestTUNExitDNS(t *testing.T) {
+	ft := newFakeTUN()
+	w := WrapTUN(ft, testResolver(), res4, res6, t.Logf)
+	defer w.Close()
+	w.SetEnabled(true)
+	exit4, exit6 := netip.MustParseAddr("100.64.0.9"), netip.MustParseAddr("fd7c:7c0e:a1e0::6440:9")
+	w.SetExitDNS(exit4, exit6)
+	client4, client6 := alice[0], alice[1]
+
+	outside := mkQuery(t, "example.com.", dnsmessage.TypeA, false)
+	for _, c := range []struct{ client, resolver, exit netip.Addr }{{client4, res4, exit4}, {client6, res6, exit6}} {
+		ft.in <- udpPacket(c.client, c.resolver, 40000, 53, outside)
+		got := readBatch(t, w)
+		if len(got) != 1 {
+			t.Fatalf("%v: got %d packets, want the query passed on", c.resolver, len(got))
+		}
+		u, ok := parseUDP(got[0])
+		if !ok || u.src != c.client || u.dst != c.exit || u.srcPort != 40000 || u.dstPort != ExitPort || !slices.Equal(u.payload, outside) {
+			t.Fatalf("readdressed query: %+v", u)
+		}
+		checkUDPChecksum(t, got[0])
+		select {
+		case p := <-ft.written:
+			t.Fatalf("answered locally instead: %x", p)
+		default:
+		}
+
+		// The exit node's answer, on its way to the host.
+		answer := slices.Clone(outside)
+		answer[2] |= 0x80
+		bufs := [][]byte{append(make([]byte, 16), udpPacket(c.exit, c.client, ExitPort, 40000, answer)...)}
+		if _, err := w.Write(bufs, 16); err != nil {
+			t.Fatal(err)
+		}
+		src, dst, payload := validChecksums(t, <-ft.written)
+		if src != c.resolver || dst != c.client || !slices.Equal(payload, answer) {
+			t.Fatalf("answer %v → %v", src, dst)
+		}
+	}
+
+	// MagicDNS names are still answered here.
+	ft.in <- udpPacket(client4, res4, 40000, 53, mkQuery(t, "alice.tc.internal.", dnsmessage.TypeA, false))
+	ft.in <- udpPacket(client4, netip.MustParseAddr("100.64.0.2"), 40000, 53, []byte("not for us"))
+	if got := readBatch(t, w); len(got) != 1 {
+		t.Fatalf("got %d packets", len(got))
+	}
+	select {
+	case resp := <-ft.written:
+		if src, _, _ := validChecksums(t, resp); src != res4 {
+			t.Fatalf("MagicDNS answer from %v", src)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("MagicDNS name not answered locally")
+	}
+
+	// An answer from the exit node's DNS port to a query that wasn't
+	// readdressed (sent there directly) is left alone, as is a second copy.
+	stray := udpPacket(exit4, client4, ExitPort, 40000, outside)
+	for range 2 {
+		if _, err := w.Write([][]byte{append(make([]byte, 16), stray...)}, 16); err != nil {
+			t.Fatal(err)
+		}
+		if got := <-ft.written; !slices.Equal(got, stray) {
+			t.Fatal("answer to a query that wasn't readdressed was changed")
+		}
+	}
+
+	// Other traffic from the exit node's address is left alone.
+	other := udpPacket(exit4, client4, 5000, 40000, []byte("hello"))
+	if _, err := w.Write([][]byte{append(make([]byte, 16), other...)}, 16); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-ft.written; !slices.Equal(got, other) {
+		t.Fatal("unrelated packet from the exit node changed")
+	}
+
+	// Exit node off: queries are answered here again.
+	w.SetExitDNS(netip.Addr{}, netip.Addr{})
+	ft.in <- udpPacket(client4, res4, 40000, 53, outside)
+	ft.in <- other
+	if got := readBatch(t, w); len(got) != 1 || !slices.Equal(got[0], other) {
+		t.Fatalf("exit off: %d packets", len(got))
+	}
+}
+
+func checkUDPChecksum(t *testing.T, pkt []byte) {
+	t.Helper()
+	u, _ := parseUDP(pkt)
+	var udp []byte
+	if pkt[0]>>4 == 4 {
+		if fold(sum16(pkt[:20], 0)) != 0xffff {
+			t.Fatal("bad IPv4 header checksum")
+		}
+		udp = pkt[20:]
+	} else {
+		udp = pkt[40:]
+	}
+	sum := sum16(u.src.AsSlice(), 0)
+	sum = sum16(u.dst.AsSlice(), sum) + 17 + uint32(len(udp))
+	if fold(sum16(udp, sum)) != 0xffff {
+		t.Fatal("bad UDP checksum")
+	}
+}

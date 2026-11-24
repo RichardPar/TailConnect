@@ -16,11 +16,13 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"net"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/device"
@@ -80,6 +82,20 @@ type ExitForwarder interface {
 	ForwardError() string
 }
 
+// ExitInterfaceSetter is implemented by routers that can send the internet
+// traffic an exit node forwards out through one chosen network interface
+// (tcd -exit-interface), e.g. another VPN's.
+type ExitInterfaceSetter interface {
+	SetExitInterface(name string)
+	ExitInterface() string // "" = none
+	// ExitDialer reaches the DNS servers an exit node asks for its clients
+	// through the exit interface (nil: no exit interface set).
+	ExitDialer() *net.Dialer
+	// ForwardVia is where forwarded traffic leaves now ("" = blocked, or
+	// not an exit node).
+	ForwardVia() string
+}
+
 // exitAll is what an exit node's peer entry adds: every destination.
 var exitAll = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}
 
@@ -106,7 +122,11 @@ type Config struct {
 	OnEndpointsChanged func()
 	// DNS points the host's resolver at MagicDNS (nil = leave host DNS alone;
 	// the in-tunnel resolver still answers at 100.100.100.100).
-	DNS     dns.OSConfigurator
+	DNS dns.OSConfigurator
+	// ExitDNS are the DNS servers this machine asks, as an exit node, for
+	// the machines using it (tcd -exit-dns). Empty: the network's
+	// nameservers, else the host's own.
+	ExitDNS []netip.Addr
 	Logf    func(format string, args ...any)
 	Verbose bool // log wireguard-go internals
 }
@@ -145,6 +165,16 @@ type Engine struct {
 	exitUsing  string // the exit node in use (its name), if any
 	exitErr    string // why exitPref isn't in use
 	exitServes bool   // this machine is an exit node for its account
+
+	// Using an exit node: its tunnel addresses, where DNS goes.
+	exitDNS4, exitDNS6 netip.Addr
+	// Being one: the DNS server for the machines using it.
+	exitDNSCfg   []netip.Addr // Config.ExitDNS
+	exitSrv      *dns.ExitServer
+	exitSrvErr   string
+	exitResolver *dns.Resolver
+	exitAllow    atomic.Pointer[map[netip.Addr]bool] // who may ask exitSrv
+	exitNS       atomic.Pointer[[]netip.Addr]        // the network's nameservers, for exitSrv
 }
 
 // New brings up a WireGuard device with the node's private key.
@@ -186,7 +216,7 @@ func New(cfg Config, priv key.NodePrivate) (*Engine, error) {
 	return &Engine{
 		dev: dev, magic: magic, router: cfg.Router, logf: cfg.Logf, pub: priv.Public(),
 		resolver: resolver, dnsTUN: dnsTUN, filter: filt, osDNS: cfg.DNS,
-		peers: map[key.NodePublic]peerState{},
+		peers: map[key.NodePublic]peerState{}, exitDNSCfg: slices.Clone(cfg.ExitDNS),
 	}, nil
 }
 
@@ -202,7 +232,12 @@ func (e *Engine) Close() {
 		return
 	}
 	e.closed = true
+	srv := e.exitSrv
+	e.exitSrv = nil
 	e.mu.Unlock()
+	if srv != nil {
+		srv.Close()
+	}
 	if err := e.osDNS.Close(); err != nil {
 		e.logf("dns: revert host configuration: %v", err)
 	}
@@ -262,6 +297,7 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 	canExit = canExit && exitRouter.SupportsExitNodes()
 	e.exitUsing, e.exitErr = "", ""
 	var exitKey key.NodePublic
+	e.exitDNS4, e.exitDNS6 = netip.Addr{}, netip.Addr{}
 	if e.exitPref != "" {
 		switch exit, err := FindExitNode(nm, e.exitPref); {
 		case !canExit:
@@ -270,6 +306,13 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 			e.exitErr = err.Error()
 		default:
 			exitKey, e.exitUsing = exit.NodeKey, exit.Name
+			for _, a := range exit.Addresses {
+				if a.Addr().Is4() {
+					e.exitDNS4 = a.Addr()
+				} else {
+					e.exitDNS6 = a.Addr()
+				}
+			}
 		}
 		if e.exitErr != "" {
 			e.logf("exit node %q not used: %s; internet traffic goes direct", e.exitPref, e.exitErr)
@@ -383,6 +426,16 @@ func (e *Engine) reconfigLocked(nm *protocol.MapResponse, local []netip.Prefix) 
 		}
 		e.lastRouter = rc
 	}
+	e.exitAllow.Store(&forward)
+	ns := slices.Clone(nm.DNS.Nameservers)
+	e.exitNS.Store(&ns)
+	var self4 netip.Addr
+	for _, a := range nm.Self.Addresses {
+		if a.Addr().Is4() {
+			self4 = a.Addr()
+		}
+	}
+	e.exitDNSServerLocked(serving, self4)
 	e.reconfigDNSLocked(nm, magicDNS)
 	return nil
 }
@@ -455,15 +508,23 @@ type ExitStatus struct {
 	Error        string // why Chosen isn't in use
 	Serving      bool   // this machine is an exit node
 	ServingError string // why it isn't forwarding although it should
+	Via          string // the interface forwarded traffic leaves through (-exit-interface)
+	DNSError     string // why the DNS server for the machines using this one isn't running
+	// DNSViaExit: names outside MagicDNS are resolved by the exit node in use.
+	DNSViaExit bool
 }
 
 func (e *Engine) ExitStatus() ExitStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	st := ExitStatus{Chosen: e.exitPref, Using: e.exitUsing, Error: e.exitErr, Serving: e.exitServes}
+	st := ExitStatus{Chosen: e.exitPref, Using: e.exitUsing, Error: e.exitErr, Serving: e.exitServes,
+		DNSError: e.exitSrvErr, DNSViaExit: e.exitDNS4.IsValid() && e.dnsBase != ""}
 	// Once closed, Close tears the router down without e.mu: don't read it.
 	if r, ok := e.router.(ExitForwarder); ok && e.exitServes && !e.closed {
 		st.ServingError = r.ForwardError()
+		if v, ok := e.router.(ExitInterfaceSetter); ok {
+			st.Via = v.ForwardVia()
+		}
 	}
 	return st
 }
@@ -492,7 +553,10 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 			search = []string{domain}
 		}
 		osc = dns.OSConfig{Nameservers: []netip.Addr{resolver}, SearchDomains: search}
-		if len(nm.DNS.Nameservers) == 0 && e.osDNS.SupportsSplitDNS() {
+		// With an exit node in use, every name comes to MagicDNS, which
+		// sends the ones outside MagicDNS to the exit node: none may go to
+		// the resolvers of the network this machine is on.
+		if len(nm.DNS.Nameservers) == 0 && e.osDNS.SupportsSplitDNS() && !e.exitDNS4.IsValid() {
 			// Split DNS: only MagicDNS names and reverse lookups of tunnel
 			// addresses; the host keeps its resolvers for everything else.
 			osc.MatchDomains = append(magicDomains(nm.DNS), reverseZones()...)
@@ -537,7 +601,12 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 			add(p)
 		}
 		cfg.Upstream = upstreams(nm.DNS.Nameservers)
-		if len(nm.DNS.Nameservers) == 0 && !e.osDNS.SupportsSplitDNS() {
+		if e.exitDNS4.IsValid() {
+			// Queries the host sends over UDP are readdressed to the exit
+			// node in the TUN (dns.TUN.SetExitDNS); this covers the rest
+			// (DNS over TCP), through the tunnel's route to it.
+			cfg.Upstream = []netip.AddrPort{netip.AddrPortFrom(e.exitDNS4, dns.ExitPort)}
+		} else if len(nm.DNS.Nameservers) == 0 && !e.osDNS.SupportsSplitDNS() {
 			// Everything comes to us; pass it on to the host's resolvers,
 			// looked up at each query as they change with the network.
 			osDNS := e.osDNS
@@ -552,8 +621,95 @@ func (e *Engine) reconfigDNSLocked(nm *protocol.MapResponse, on bool) {
 		e.dnsDomain, e.dnsBase = "", ""
 	}
 	e.resolver.SetConfig(cfg)
+	if on {
+		e.dnsTUN.SetExitDNS(e.exitDNS4, e.exitDNS6)
+	} else {
+		e.dnsTUN.SetExitDNS(netip.Addr{}, netip.Addr{})
+	}
 	e.dnsTUN.SetEnabled(on)
 }
+
+// exitDNSServerLocked runs the DNS server for the machines using this one
+// as their exit node (see dns.ExitServer) while it is one, on its tunnel
+// address self.
+func (e *Engine) exitDNSServerLocked(serving bool, self netip.Addr) {
+	if e.closed {
+		return
+	}
+	if !serving || !self.IsValid() {
+		if e.exitSrv != nil {
+			e.exitSrv.Close()
+			e.exitSrv = nil
+			e.logf("exit node: DNS for clients stopped")
+		}
+		e.exitSrvErr = ""
+		return
+	}
+	if e.exitSrv != nil && e.exitSrv.Addr().Addr() == self {
+		return
+	}
+	if e.exitSrv != nil {
+		e.exitSrv.Close()
+		e.exitSrv = nil
+	}
+	if e.exitResolver == nil {
+		e.exitResolver = dns.NewResolver(e.logf)
+		if s, ok := e.router.(ExitInterfaceSetter); ok {
+			if d := s.ExitDialer(); d != nil {
+				e.exitResolver.SetDialer(d)
+			}
+		}
+		e.exitResolver.SetConfig(dns.Config{HostUpstream: e.exitUpstreams})
+	}
+	srv, err := dns.ListenExit(self, e.exitResolver, func(a netip.Addr) bool {
+		m := e.exitAllow.Load()
+		return m != nil && (*m)[a]
+	}, e.logf)
+	if err != nil {
+		e.exitSrvErr = fmt.Sprintf("DNS for clients: %v (machines using this exit node can't resolve names)", err)
+		e.logf("exit node: %s", e.exitSrvErr)
+		return
+	}
+	e.exitSrv, e.exitSrvErr = srv, ""
+	e.logf("exit node: DNS for clients on %v", srv.Addr())
+}
+
+// exitUpstreams are the DNS servers the exit node asks for its clients, at
+// each query: -exit-dns, else the network's nameservers, else the host's
+// own. With an exit interface, only public ones: a LAN or loopback server
+// can't be reached through it, and asking one around it would leak.
+func (e *Engine) exitUpstreams() []netip.AddrPort {
+	addrs := e.exitDNSCfg
+	if len(addrs) == 0 {
+		if ns := e.exitNS.Load(); ns != nil {
+			addrs = *ns
+		}
+	}
+	if len(addrs) == 0 {
+		addrs = e.osDNS.HostResolvers()
+	}
+	if len(addrs) == 0 {
+		addrs = dns.SystemResolvers()
+	}
+	egress := false
+	if s, ok := e.router.(ExitInterfaceSetter); ok {
+		egress = s.ExitInterface() != ""
+	}
+	var out []netip.AddrPort
+	for _, a := range addrs {
+		a = a.Unmap()
+		if a == protocol.MagicDNSAddr || a == protocol.MagicDNSAddr6 {
+			continue // ourselves
+		}
+		if egress && (!a.IsGlobalUnicast() || a.IsPrivate() || cgnat.Contains(a)) {
+			continue
+		}
+		out = append(out, netip.AddrPortFrom(a, 53))
+	}
+	return out
+}
+
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 
 // magicDomains lists the domains MagicDNS answers: the base domain, then
 // tenants' own domains.
