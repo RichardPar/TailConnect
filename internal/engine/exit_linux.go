@@ -10,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
+	mdnetlink "github.com/mdlayher/netlink"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
@@ -138,7 +140,11 @@ func (r *linuxRouter) clearExitRoutes() error {
 // forwarder turns this machine into an exit node and back, restoring the
 // sysctls it changed.
 type forwarder struct {
-	ifname  string
+	ifname string
+	// nftOff: nftables doesn't work on this kernel (some vendor kernels
+	// lack it, or never answer), so NAT and forwarding are done with
+	// iptables instead (exit_iptables_linux.go).
+	nftOff  bool
 	eg      egress // the -exit-interface, if set
 	on      bool
 	restore map[string]string // sysctl path → value before we changed it
@@ -197,11 +203,21 @@ func (f *forwarder) set(on bool) {
 		return
 	}
 	f.v6 = f.enableV6()
-	if err := f.addTables(); err != nil {
+	if !f.nftOff {
+		if err := f.addTables(); err != nil {
+			f.logf("exit node: nftables: %v; using iptables instead", err)
+			f.nftOff = true
+			f.deleteTables() // whatever part of the table got in
+		}
+	}
+	if f.nftOff && !haveIptables() {
+		f.fail(errors.New("set up NAT: nftables doesn't work on this kernel, and iptables isn't installed"))
+		return
+	}
+	if err := f.addIptables(); err != nil {
 		f.fail(fmt.Errorf("set up NAT: %w", err))
 		return
 	}
-	f.addIptables()
 	if f.eg.name != "" {
 		if err := f.eg.start(f.v6); err != nil {
 			f.fail(err)
@@ -306,7 +322,7 @@ func (f *forwarder) families() []nftables.TableFamily {
 // firewall's forward chain (e.g. ufw's or Docker's), so addIptables allows
 // the traffic there too.
 func (f *forwarder) addTables() error {
-	c, err := nftables.New()
+	c, err := nftConn()
 	if err != nil {
 		return err
 	}
@@ -356,14 +372,35 @@ func (f *forwarder) addTables() error {
 	return c.Flush()
 }
 
+// nftDeadline bounds every nftables exchange with the kernel: some vendor
+// kernels never answer a batch, which would hang the engine for good.
+const nftDeadline = 5 * time.Second
+
+func nftConn() (*nftables.Conn, error) {
+	return nftables.New(nftables.WithSockOptions(func(c *mdnetlink.Conn) error {
+		return c.SetDeadline(time.Now().Add(nftDeadline))
+	}))
+}
+
 func (f *forwarder) deleteTables() {
-	c, err := nftables.New()
+	if f.nftOff {
+		return
+	}
+	c, err := nftConn()
 	if err != nil {
+		f.nftOff = true
 		return
 	}
 	for _, fam := range []nftables.TableFamily{nftables.TableFamilyIPv4, nftables.TableFamilyIPv6} {
 		tables, err := c.ListTablesOfFamily(fam)
 		if err != nil {
+			if fam == nftables.TableFamilyIPv4 {
+				// No nftables here (or it doesn't answer): don't wait on it
+				// again; iptables does the job.
+				f.logf("exit node: nftables unavailable (%v); iptables will be used", err)
+				f.nftOff = true
+				return
+			}
 			continue
 		}
 		for _, t := range tables {
