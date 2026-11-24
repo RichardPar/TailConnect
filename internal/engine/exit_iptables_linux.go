@@ -43,6 +43,7 @@ type iptRule struct {
 	bin, table, chain string // table "" = filter
 	spec              []string
 	required          bool // NAT and forwarding without nftables: failing fails the exit node
+	nat               bool // part of that NAT and forwarding setup (logged as a whole)
 }
 
 func haveIptables() bool {
@@ -65,20 +66,20 @@ func (f *forwarder) iptRules() []iptRule {
 				src = ipam.DefaultV6.String()
 			}
 			out = append(out,
-				iptRule{bin, "nat", "POSTROUTING", append([]string{"-s", src, "!", "-o", f.ifname}, append(slices.Clone(comment), "-j", "MASQUERADE")...), bin == "iptables"},
-				iptRule{bin, "", "FORWARD", append([]string{"-i", f.ifname, "-o", f.ifname}, append(slices.Clone(comment), "-j", "DROP")...), bin == "iptables"},
-				iptRule{bin, "", "FORWARD", append([]string{"-i", f.ifname}, c...), bin == "iptables"},
-				iptRule{bin, "", "FORWARD", append([]string{"-o", f.ifname, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"}, c...), bin == "iptables"})
+				iptRule{bin, "nat", "POSTROUTING", append([]string{"-s", src, "!", "-o", f.ifname}, append(slices.Clone(comment), "-j", "MASQUERADE")...), bin == "iptables", true},
+				iptRule{bin, "", "FORWARD", append([]string{"-i", f.ifname, "-o", f.ifname}, append(slices.Clone(comment), "-j", "DROP")...), bin == "iptables", true},
+				iptRule{bin, "", "FORWARD", append([]string{"-i", f.ifname}, c...), bin == "iptables", true},
+				iptRule{bin, "", "FORWARD", append([]string{"-o", f.ifname, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"}, c...), bin == "iptables", true})
 		}
 		if chain := forwardExceptionChain(bin); chain != "" && !(f.nftOff && chain == "FORWARD") {
 			out = append(out,
-				iptRule{bin, "", chain, append([]string{"-i", f.ifname}, c...), false},
-				iptRule{bin, "", chain, append([]string{"-o", f.ifname, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"}, c...), false})
+				iptRule{bin, "", chain, append([]string{"-i", f.ifname}, c...), false, false},
+				iptRule{bin, "", chain, append([]string{"-o", f.ifname, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED"}, c...), false, false})
 		}
 		if bin == "iptables" && policyDrop(bin, "INPUT") { // the DNS server listens on IPv4 only
 			port := strconv.Itoa(dns.ExitPort)
 			for _, proto := range []string{"udp", "tcp"} {
-				out = append(out, iptRule{bin, "", "INPUT", append([]string{"-i", f.ifname, "-p", proto, "--dport", port}, c...), false})
+				out = append(out, iptRule{bin, "", "INPUT", append([]string{"-i", f.ifname, "-p", proto, "--dport", port}, c...), false, false})
 			}
 		}
 	}
@@ -130,11 +131,15 @@ func (f *forwarder) addIptables() error {
 				f.removeIptables() // none half set up
 				return err
 			}
+			if r.nat {
+				f.logf("exit node: %v (IPv6 isn't forwarded)", err)
+				continue
+			}
 			f.logf("exit node: %v", err)
 			continue
 		}
 		switch {
-		case r.required:
+		case r.nat:
 		case r.chain == "INPUT":
 			f.logf("exit node: allowed %s DNS for clients from %s in %s chain INPUT, which would drop it otherwise", r.spec[3], f.ifname, r.bin)
 		default:
