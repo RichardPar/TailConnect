@@ -181,6 +181,8 @@ The client daemon. It runs as root, or with `CAP_NET_ADMIN`.
 | `-dns` | `auto` | Host DNS integration: `auto`, `systemd-resolved`, `file` or `off` ([details](usage.md#magicdns)) |
 | `-resolv-conf` | `/etc/resolv.conf` | File rewritten in `file` mode |
 | `-metrics-listen` | none | Serve [metrics](usage.md#monitoring) at `/metrics` on this address, e.g. `127.0.0.1:7744` |
+| `-exit-interface` | none | As an exit node, send the internet traffic forwarded for other machines out through this interface only, e.g. another VPN's `tun0`, and block it while that interface is down ([details](usage.md#sending-exit-traffic-through-another-vpn)). Linux. |
+| `-exit-dns` | none | As an exit node, the DNS servers (comma-separated) to resolve names with for the machines using it. Default: the network's `-dns-nameservers`, else this host's own resolvers; with `-exit-interface`, public ones only. |
 | `-verbose` | `false` | Log WireGuard internals |
 | `-version` | | Print the version and exit |
 

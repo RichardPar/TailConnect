@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -42,6 +43,8 @@ func main() {
 	dnsMode := flag.String("dns", dns.ModeAuto, dnsModeHelp)
 	resolvConf := flag.String("resolv-conf", "/etc/resolv.conf", "resolv.conf path (for -dns file)")
 	metricsListen := flag.String("metrics-listen", "", `serve metrics (Prometheus text format) at /metrics on this address, e.g. "127.0.0.1:7744" ("" = off)`)
+	exitIface := flag.String("exit-interface", "", "as an exit node, send the internet traffic forwarded for other machines out through this network interface only (e.g. another VPN's tun0), and block it while that interface is down (Linux)")
+	exitDNS := flag.String("exit-dns", "", "as an exit node, the comma-separated DNS servers to resolve names with for the machines using it (default: the network's nameservers, else this host's own; with -exit-interface, public servers only)")
 	verbose := flag.Bool("verbose", false, "verbose WireGuard logging")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -52,6 +55,28 @@ func main() {
 	if *port > 65535 {
 		fmt.Fprintln(os.Stderr, "-port out of range")
 		os.Exit(2)
+	}
+	if *exitIface != "" {
+		if err := validIfname(*exitIface); err != nil {
+			fmt.Fprintln(os.Stderr, "-exit-interface:", err)
+			os.Exit(2)
+		}
+		if *tunName == "userspace" || *exitIface == *tunName {
+			fmt.Fprintln(os.Stderr, "-exit-interface needs a TUN device (not -tun userspace) and must be another interface than -tun")
+			os.Exit(2)
+		}
+	}
+	var exitDNSAddrs []netip.Addr
+	for _, f := range strings.Split(*exitDNS, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		a, err := netip.ParseAddr(f)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "-exit-dns:", err)
+			os.Exit(2)
+		}
+		exitDNSAddrs = append(exitDNSAddrs, a)
 	}
 	daemon.Version = version
 
@@ -72,7 +97,7 @@ func main() {
 		ListenPort: uint16(*port),
 		Logf:       logf,
 		NewEngine: func(ep daemon.EngineParams) (*engine.Engine, error) {
-			cfg := engine.Config{ListenPort: ep.Port, DiscoKey: ep.DiscoKey, OnEndpointsChanged: ep.OnEndpointsChanged, Logf: logf, Verbose: *verbose}
+			cfg := engine.Config{ExitDNS: exitDNSAddrs, ListenPort: ep.Port, DiscoKey: ep.DiscoKey, OnEndpointsChanged: ep.OnEndpointsChanged, Logf: logf, Verbose: *verbose}
 			if *tunName == "userspace" {
 				// Userspace networking: WireGuard terminates in an in-process
 				// gVisor stack. No root or TUN device needed, and the OS routing
@@ -102,6 +127,15 @@ func main() {
 			if err != nil {
 				tdev.Close()
 				return nil, err
+			}
+			if *exitIface != "" {
+				s, ok := r.(engine.ExitInterfaceSetter)
+				if !ok {
+					r.Close()
+					tdev.Close()
+					return nil, fmt.Errorf("-exit-interface is not supported on this platform")
+				}
+				s.SetExitInterface(*exitIface)
 			}
 			osdns, err := dns.NewOSConfigurator(dns.OSOptions{
 				Mode: *dnsMode, Interface: name, ResolvConf: *resolvConf,
@@ -163,4 +197,14 @@ func main() {
 	<-ctx.Done()
 	log.Info("shutting down")
 	d.Close()
+}
+
+// validIfname checks that name can be a Linux network interface name (it
+// also becomes part of a /proc/sys path).
+func validIfname(name string) error {
+	if len(name) == 0 || len(name) > 15 || name == "." || name == ".." ||
+		strings.ContainsAny(name, "/ \t\n:") {
+		return fmt.Errorf("%q is not a network interface name", name)
+	}
+	return nil
 }

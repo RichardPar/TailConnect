@@ -160,6 +160,18 @@ A machine using an exit node adds `0.0.0.0/0` and `::/0` to that peer's WireGuar
 
 **Windows** has no socket marks. The tunnel adapter gets `0.0.0.0/0` and `::/0` (its low metric wins over the physical default routes), and tcd's own sockets are pinned with `IP_UNICAST_IF` to the interface that holds the best other default route, as WireGuard for Windows does. tcd checks every two seconds whether that interface changed.
 
+**Exit interface** (`tcd -exit-interface tun0`). Policy rules that match only packets coming in from `tc0` send the forwarded traffic to its own table, leaving the host's traffic alone:
+
+| Rule | Effect |
+|---|---|
+| `5260: iif tc0 lookup main suppress_prefixlength 1` | the main table's specific routes (the LAN, the tunnel's peers), but not its default, nor the `0.0.0.0/1` + `128.0.0.0/1` pair OpenVPN installs |
+| `5261: iif tc0 lookup 125` | table 125: the default route out of `tun0` (via its gateway, if it has one), and an `unreachable` default with metric 4000 |
+| `5262: fwmark 0x7d0000/0xff0000 lookup 125` | the exit node's DNS lookups for its clients |
+
+While `tun0` is down or gone, its route disappears and the `unreachable` one answers: the traffic is refused, not sent out by the main table's default route. tcd checks every 5 seconds and puts the route back (with the interface's new index and gateway) when it returns. It also sets `rp_filter` on `tun0` to loose (2), since replies arrive there from addresses the main table routes elsewhere, and restores it afterwards. An IPv6 default goes in only if `tun0` has a global IPv6 address.
+
+**DNS through the exit node.** While a machine uses an exit node, its host sends every name to MagicDNS (systemd-resolved: `~.` on `tc0`; Windows: an NRPT rule for `.`). For names outside MagicDNS, the MagicDNS packet layer readdresses the query packet to the exit node's tunnel address, port 41653, and lets it go on into the tunnel; the answer is readdressed back to look as if MagicDNS sent it (only answers to queries it readdressed, matched by client address, port and DNS ID). No socket of tcd's is involved, which matters on Android, where tcd's own sockets bypass the VPN. DNS over TCP goes through MagicDNS's TCP stack, which forwards to the same port through the tunnel's route (on Android that socket bypasses the VPN, so such lookups fail instead). The exit node listens on its tunnel IPv4 address, port 41653 (UDP and TCP), answers only peers it forwards for, and forwards with its own resolver, whose sockets carry the exit interface's mark when one is set.
+
 Inbound packets from the exit node can come from any address. WireGuard still attributes a packet to the peer with the most specific allowed IP, so the exit node can't pose as another peer. Everything is removed when the exit node is turned off or `tcd` stops, and on start (after a crash).
 
 ## Resilience

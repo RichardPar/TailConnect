@@ -441,7 +441,8 @@ func (d *Daemon) Status() localapi.Status {
 		s.HomeRelay, s.RelayConnected = d.eng.HomeRelay(), d.eng.RelayConnected()
 		s.FilterDropped = d.eng.FilterDropped()
 		if es := d.eng.ExitStatus(); es.Chosen != "" || es.Serving {
-			s.ExitNode = &localapi.ExitStatus{Chosen: es.Chosen, Using: es.Using, Error: es.Error, Serving: es.Serving, ServingError: es.ServingError}
+			s.ExitNode = &localapi.ExitStatus{Chosen: es.Chosen, Using: es.Using, Error: es.Error, Serving: es.Serving, ServingError: es.ServingError, Via: es.Via,
+				DNSError: es.DNSError, DNSViaExit: es.DNSViaExit}
 		}
 		if ds := d.eng.DNSStatus(); ds.Domain != "" {
 			s.DNS = &localapi.DNSStatus{

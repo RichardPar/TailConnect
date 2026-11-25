@@ -287,13 +287,21 @@ func printExitNode(st *localapi.Status) {
 	}
 	switch {
 	case e.Using != "":
-		fmt.Printf("Exit node: internet traffic goes through %s\n", shortName(e.Using, st))
+		if e.DNSViaExit {
+			fmt.Printf("Exit node: internet traffic and DNS go through %s\n", shortName(e.Using, st))
+		} else {
+			fmt.Printf("Exit node: internet traffic goes through %s\n", shortName(e.Using, st))
+		}
 	case e.Chosen != "":
 		fmt.Printf("Warning: exit node %s not in use (%s); internet traffic goes direct\n", e.Chosen, orDefault(e.Error, "not connected yet"))
 	}
 	if e.Serving {
 		if e.ServingError != "" {
 			fmt.Println("Warning: this machine should be an exit node but can't forward traffic:", e.ServingError)
+		} else if e.DNSError != "" {
+			fmt.Println("Warning: exit node:", e.DNSError)
+		} else if e.Via != "" {
+			fmt.Println("Exit node: this machine forwards internet traffic for its account, through", e.Via)
 		} else {
 			fmt.Println("Exit node: this machine forwards internet traffic for its account")
 		}

@@ -213,7 +213,7 @@ What goes where while a machine uses an exit node:
 | The local network (anything the machine has a more specific route for, e.g. `192.168.1.0/24`) | direct, as before |
 | Other machines in the network | through the tunnel, as before |
 | tcd's own WireGuard, relay and control connections | direct (they carry the tunnel) |
-| DNS | unchanged: the machine's usual resolvers |
+| DNS | names outside MagicDNS: resolved by the exit node, through the tunnel; MagicDNS names: answered on the machine itself |
 
 Details:
 
@@ -223,6 +223,29 @@ Details:
 - When it stops being an exit node, or `tcd` stops, the machine restores its previous forwarding settings and removes its NAT table.
 - If the exit node has Docker, or a firewall whose forward policy is DROP (ufw's default), tcd allows forwarding from the tunnel there itself: two rules tagged `tailconnect-exit` in Docker's `DOCKER-USER` chain, or else at the top of `FORWARD` (needs `iptables`). They're removed when it stops being an exit node. Other firewalls (firewalld, plain nftables) must allow it themselves, for example forwarding in on `tc0`.
 - [How it works](how-it-works.md#exit-nodes).
+
+**DNS goes through the exit node too.** While a machine uses an exit node, all its lookups go to MagicDNS (not just MagicDNS names), and MagicDNS sends the names outside MagicDNS to the exit node through the tunnel. The exit node resolves them with its own resolvers (`-exit-dns`, else the network's `-dns-nameservers`, else its host's), so the network the machine is on (a café's or hotel's resolver) sees none of its lookups. `tc status` says `Exit node: internet traffic and DNS go through NAME`. If the exit node can't answer, names fail to resolve: the machine never falls back to the local resolvers. Notes:
+- The exit node answers on its tunnel address, UDP and TCP port **41653**, only to machines allowed to use it as an exit node. If its firewall's INPUT policy is DROP (ufw), tcd allows that port from `tc0` there (rules tagged `tailconnect-exit`); other firewalls must allow it themselves.
+- Both ends need this version: an older exit node doesn't answer, so names don't resolve while using it.
+- **Android:** lookups over TCP (only for answers too big for UDP, which is rare) fail while an exit node is in use, rather than going anywhere else: the app's own connections bypass its VPN, so they can't reach the exit node.
+- A client with `-dns off` doesn't point its host at MagicDNS, so its host keeps asking its own resolvers. Programs with their own DNS (a browser's DNS over HTTPS) send it as internet traffic, through the exit node.
+
+### Sending exit traffic through another VPN
+
+An exit node can send the traffic it carries for others out through one particular interface, for example a commercial VPN's `tun0` (OpenVPN, WireGuard), instead of its normal internet connection. Then machines using it appear on the internet from that VPN, and the exit node's own traffic is unchanged. In `/etc/default/tcd` on the exit node:
+
+```sh
+TCD_ARGS="-exit-interface tun0"
+```
+
+and `sudo systemctl restart tcd`. Its `tc status` then says `Exit node: this machine forwards internet traffic for its account, through tun0`.
+
+- **Kill switch.** While the interface is down or missing (the VPN reconnecting, or stopped), the forwarded traffic is **blocked**, never sent out of the normal connection. `tc status` warns `tun0 is down: exit traffic is blocked until it is up`. tcd checks every 5 seconds and picks the interface up again by itself when the VPN comes back, even when it's recreated.
+- **IPv6** goes through the interface too if it has an IPv6 address; otherwise IPv6 is blocked, and programs use IPv4.
+- **The LAN** of the exit node, and other machines in the network, are still reached directly.
+- **DNS** for the machines using it goes out through the interface as well, so it's covered by the kill switch. Only public DNS servers can be reached that way, so give some with `-exit-dns` if the host's own are on its LAN (or `127.0.0.53`): for example `TCD_ARGS="-exit-interface tun0 -exit-dns 1.1.1.1,9.9.9.9"`, or the VPN provider's.
+- The interface can be an Ethernet one too (say `eth1` on a second uplink): tcd sends traffic to the gateway of that interface's widest route in the main table, or straight out of it for point-to-point interfaces like `tun0` or `wg0`.
+- Linux only.
 
 ---
 

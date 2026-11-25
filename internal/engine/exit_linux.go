@@ -5,14 +5,17 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
+	mdnetlink "github.com/mdlayher/netlink"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
@@ -137,7 +140,12 @@ func (r *linuxRouter) clearExitRoutes() error {
 // forwarder turns this machine into an exit node and back, restoring the
 // sysctls it changed.
 type forwarder struct {
-	ifname  string
+	ifname string
+	// nftOff: nftables doesn't work on this kernel (some vendor kernels
+	// lack it, or never answer), so NAT and forwarding are done with
+	// iptables instead (exit_iptables_linux.go).
+	nftOff  bool
+	eg      egress // the -exit-interface, if set
 	on      bool
 	restore map[string]string // sysctl path → value before we changed it
 	v6      bool              // IPv6 is forwarded too
@@ -177,6 +185,7 @@ func (f *forwarder) set(on bool) {
 		f.cleaned = true
 		f.deleteTables() // left by a tcd that crashed
 		f.removeIptables()
+		clearEgress()
 	}
 	if on == f.on {
 		return
@@ -194,11 +203,27 @@ func (f *forwarder) set(on bool) {
 		return
 	}
 	f.v6 = f.enableV6()
-	if err := f.addTables(); err != nil {
+	if !f.nftOff {
+		if err := f.addTables(); err != nil {
+			f.logf("exit node: nftables: %v; using iptables instead", err)
+			f.nftOff = true
+			f.deleteTables() // whatever part of the table got in
+		}
+	}
+	if f.nftOff && !haveIptables() {
+		f.fail(errors.New("set up NAT: nftables doesn't work on this kernel, and iptables isn't installed"))
+		return
+	}
+	if err := f.addIptables(); err != nil {
 		f.fail(fmt.Errorf("set up NAT: %w", err))
 		return
 	}
-	f.addIptables()
+	if f.eg.name != "" {
+		if err := f.eg.start(f.v6); err != nil {
+			f.fail(err)
+			return
+		}
+	}
 	f.on = true
 	v6 := "IPv4 only"
 	if f.v6 {
@@ -243,6 +268,7 @@ func (f *forwarder) enableV6() bool {
 }
 
 func (f *forwarder) stop() {
+	f.eg.stop() // first: with the rules gone, traffic would take the host's default route
 	f.deleteTables()
 	if f.on {
 		f.removeIptables()
@@ -296,7 +322,7 @@ func (f *forwarder) families() []nftables.TableFamily {
 // firewall's forward chain (e.g. ufw's or Docker's), so addIptables allows
 // the traffic there too.
 func (f *forwarder) addTables() error {
-	c, err := nftables.New()
+	c, err := nftConn()
 	if err != nil {
 		return err
 	}
@@ -346,14 +372,35 @@ func (f *forwarder) addTables() error {
 	return c.Flush()
 }
 
+// nftDeadline bounds every nftables exchange with the kernel: some vendor
+// kernels never answer a batch, which would hang the engine for good.
+const nftDeadline = 5 * time.Second
+
+func nftConn() (*nftables.Conn, error) {
+	return nftables.New(nftables.WithSockOptions(func(c *mdnetlink.Conn) error {
+		return c.SetDeadline(time.Now().Add(nftDeadline))
+	}))
+}
+
 func (f *forwarder) deleteTables() {
-	c, err := nftables.New()
+	if f.nftOff {
+		return
+	}
+	c, err := nftConn()
 	if err != nil {
+		f.nftOff = true
 		return
 	}
 	for _, fam := range []nftables.TableFamily{nftables.TableFamilyIPv4, nftables.TableFamilyIPv6} {
 		tables, err := c.ListTablesOfFamily(fam)
 		if err != nil {
+			if fam == nftables.TableFamilyIPv4 {
+				// No nftables here (or it doesn't answer): don't wait on it
+				// again; iptables does the job.
+				f.logf("exit node: nftables unavailable (%v); iptables will be used", err)
+				f.nftOff = true
+				return
+			}
 			continue
 		}
 		for _, t := range tables {
@@ -373,5 +420,37 @@ func (r *linuxRouter) ForwardError() string {
 	if r.fwd.lastErr != nil {
 		return r.fwd.lastErr.Error()
 	}
+	if r.fwd.on && r.fwd.eg.name != "" {
+		if _, err := r.fwd.eg.status(); err != nil {
+			return err.Error()
+		}
+	}
 	return ""
+}
+
+// SetExitInterface makes internet traffic this machine forwards as an
+// exit node leave through interface name only (see egress). Call it before
+// the first Set.
+func (r *linuxRouter) SetExitInterface(name string) { r.fwd.eg.name = name }
+
+// ExitDialer is for the DNS lookups an exit node makes for its clients:
+// with an exit interface set, its sockets leave through it (nil: none set).
+func (r *linuxRouter) ExitDialer() *net.Dialer {
+	if r.fwd.eg.name == "" {
+		return nil
+	}
+	return egressDialer()
+}
+
+// ExitInterface is the -exit-interface ("" = none).
+func (r *linuxRouter) ExitInterface() string { return r.fwd.eg.name }
+
+// ForwardVia is where forwarded internet traffic leaves ("" = the host's
+// own routes, or blocked: see ForwardError).
+func (r *linuxRouter) ForwardVia() string {
+	if !r.fwd.on || r.fwd.eg.name == "" {
+		return ""
+	}
+	via, _ := r.fwd.eg.status()
+	return via
 }

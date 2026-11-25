@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -29,7 +30,10 @@ func NewOSRouter(ifname string, logf func(string, ...any)) (Router, error) {
 	if err != nil {
 		return nil, fmt.Errorf("router: find %s: %w", ifname, err)
 	}
-	r := &linuxRouter{link: link, logf: logf, fwd: forwarder{ifname: ifname, logf: logf}}
+	r := &linuxRouter{link: link, logf: logf, fwd: forwarder{ifname: ifname, logf: logf, eg: egress{tun: ifname, logf: logf},
+		// TC_EXIT_IPTABLES=1: NAT and forwarding with iptables even where
+		// nftables works (for tests, or a kernel whose nftables misbehaves).
+		nftOff: os.Getenv("TC_EXIT_IPTABLES") == "1"}}
 	if err := r.clearExitRoutes(); err != nil { // left by a tcd that crashed
 		logf("router: %v", err)
 	}

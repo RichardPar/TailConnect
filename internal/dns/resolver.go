@@ -85,6 +85,29 @@ func NewResolver(logf func(string, ...any)) *Resolver {
 	return &Resolver{logf: logf, sem: make(chan struct{}, maxInflight), dial: d.DialContext}
 }
 
+// SetDialer replaces how upstream resolvers are reached (e.g. a dialer
+// whose sockets are marked for policy routing). Call before use.
+func (r *Resolver) SetDialer(d *net.Dialer) { r.dial = d.DialContext }
+
+// Local reports whether the DNS query q asks for a name this resolver
+// answers itself (MagicDNS names and reverse lookups of tunnel addresses)
+// rather than forwarding it. Unparseable queries count as local, so they
+// get an error answer here instead of being sent anywhere.
+func (r *Resolver) Local(q []byte) bool {
+	var p dnsmessage.Parser
+	h, err := p.Start(q)
+	if err != nil || h.Response {
+		return true
+	}
+	qs, err := p.AllQuestions()
+	if err != nil || len(qs) != 1 {
+		return true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.isLocalLocked(strings.ToLower(qs[0].Name.String()))
+}
+
 // SetConfig replaces what the resolver answers.
 func (r *Resolver) SetConfig(c Config) {
 	hosts := make(map[string][]netip.Addr, len(c.Hosts)+len(c.Aliases))

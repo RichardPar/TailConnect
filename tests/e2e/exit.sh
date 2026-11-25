@@ -3,6 +3,7 @@
 # nftables NAT and ping, inside network namespaces.
 #
 #   tests/e2e/exit.sh            # no root needed if unprivileged user namespaces are enabled
+#   TC_EXIT_IPTABLES=1 tests/e2e/exit.sh   # the exit node does NAT with iptables, as where nftables doesn't work
 #
 # Topology (all inside a private user+mount+net namespace):
 #
@@ -128,6 +129,11 @@ tc-control nodes exit-node "$BID" on >/dev/null
 wait_for 10 "beta forwards" bash -c "ip netns exec b cat /proc/sys/net/ipv4/ip_forward | grep -qx 1"
 wait_for 5 "beta reports it" bash -c "ip netns exec b tc --socket /run/tc-b.sock status | grep -q 'this machine forwards'"
 ok "beta forwards (ip_forward=1)"
+if [[ ${TC_EXIT_IPTABLES:-} == 1 ]]; then
+	ip netns exec b iptables -w -t nat -S POSTROUTING | grep -q tailconnect-exit || fail "no iptables NAT rule"
+	ip netns exec b iptables -w -S FORWARD | grep -q -- "-i tc0 -o tc0 .*-j DROP" || fail "no iptables tc0 → tc0 drop"
+	ok "NAT and forwarding through iptables"
+fi
 wait_for 10 "alpha sees beta as an exit node" bash -c "ip netns exec a tc --socket /run/tc-a.sock status | grep -q 'beta.*exit node'"
 ok "alpha sees beta as an exit node"
 ip netns exec a ping -c1 -W1 "$INET" >/dev/null 2>&1 && fail "alpha uses the exit node without choosing it"
@@ -141,7 +147,7 @@ ip netns exec a ping -c5 -i0.2 -W2 "$INET" >/dev/null || fail "exit path unstabl
 ok "alpha reaches the internet through beta"
 ip netns exec a ping -c1 -W1 10.99.0.1 >/dev/null || fail "alpha lost its LAN"
 ok "LAN still direct"
-tca status | grep -q "Exit node: internet traffic goes through beta" || { tca status; fail "status"; }
+tca status | grep -q "Exit node: internet traffic and DNS go through beta" || { tca status; fail "status"; }
 tca status | grep -q "exit node (in use)" || { tca status; fail "peer line"; }
 ok "status shows the exit node in use"
 # The tunnel itself (WireGuard, control) must not loop into the tunnel.
@@ -154,6 +160,11 @@ echo "== beta stops being an exit node"
 tc-control nodes exit-node "$BID" off >/dev/null
 wait_for 10 "beta stops forwarding" bash -c "ip netns exec b cat /proc/sys/net/ipv4/ip_forward | grep -qx 0"
 ok "beta restored ip_forward=0"
+if [[ ${TC_EXIT_IPTABLES:-} == 1 ]]; then
+	ip netns exec b iptables -w -t nat -S | grep -q tailconnect-exit && fail "iptables NAT rule left behind"
+	ip netns exec b iptables -w -S | grep -q tailconnect-exit && fail "iptables forward rule left behind"
+	ok "iptables rules removed"
+fi
 wait_for 10 "alpha falls back" bash -c "ip netns exec a tc --socket /run/tc-a.sock status | grep -q 'not in use'"
 ip netns exec a ping -c1 -W1 "$INET" >/dev/null 2>&1 && fail "internet still reachable through beta"
 ip -n a rule | grep -q "lookup 124" && fail "policy rule left behind"
